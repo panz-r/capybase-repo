@@ -205,3 +205,67 @@ def test_strict_mode_d01_exemption_from_confidence_floor():
     # — pre-existing behavior, separate from the SafetyClass exemption.
     # The key assertion: the D0/D1 candidate passes through the CLASS
     # exemption (provenance → SafetyClass), not through a float.
+
+
+def test_missing_evidence_is_not_complete():
+    """s27-71 (fifth-pass B3): an accepted unit with NO validation object
+    (reconciliation-appended whole-file outcomes, R3 accepts) or no syntax
+    record at all (fast-verify accepts) is MISSING evidence — the mirror
+    of 'unknown is not pass'. It must degrade to Tier B, never stamp Tier
+    A 'complete oracles' on a unit no oracle saw."""
+    from capybase.acceptance import PROPOSE_FOR_REVIEW, decide
+
+    class _U:
+        unit_id = "u1"
+
+    class _CStruct:
+        provenance = "deterministic_structural"
+        suspected_validator_error = False
+
+    class _ONoVal:
+        unit = _U(); validation = None; accepted = _CStruct()
+
+    class _VEmpty:
+        features = {}
+        warnings = []
+
+    class _OFastVerify:
+        unit = _U(); validation = _VEmpty(); accepted = _CStruct()
+
+    for outcome in (_ONoVal(), _OFastVerify()):
+        d = decide([outcome], True)
+        assert (d.tier, d.decision) == ("B", PROPOSE_FOR_REVIEW), d.reasons
+
+
+def test_produced_provenances_explicitly_classified():
+    """s27-71 (fifth-pass B4): every provenance string the orchestrator
+    PRODUCES must carry an explicit table entry — the vocabulary drift
+    (abstract keys like compiler_fixit listed while deterministic_gcc_fixit
+    rides the STRUCTURAL default) silently reclassified the repair family
+    as D1 and reached Tier A against the module's own doctrine."""
+    import re
+    from capybase.langs import _PROVENANCE_SAFETY, safety_class_for
+    src = open("src/capybase/orchestrator.py").read()
+    produced = set()
+    for m in re.finditer(r'provenance="([a-z_0-9{}:+\-]+)"', src):
+        produced.add(m.group(1))
+    # resolve the f-string template families to their concrete keys
+    concrete = set()
+    for p in produced:
+        if "{" in p:
+            concrete |= {p.format(side=s, winner=w, majority_side=s,
+                                  opposite=w)
+                         for s in ("current", "replayed")
+                         for w in ("current", "replayed")}
+        else:
+            concrete.add(p)
+    unmapped = sorted(
+        p for p in concrete
+        if p not in _PROVENANCE_SAFETY
+        and p not in ("manual", "plain_llm", "plain_llm_mixed"))
+    assert unmapped == [], (
+        f"provenances riding the unlisted-deterministic default: {unmapped}")
+    # spot-check the doctrine: repairs are D3, policy mechanisms D2
+    from capybase.langs import SafetyClass
+    assert safety_class_for("deterministic_gcc_fixit") == SafetyClass.HEURISTIC
+    assert safety_class_for("deterministic_convergence_seed") == SafetyClass.POLICY

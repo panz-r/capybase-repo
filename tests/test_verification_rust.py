@@ -399,7 +399,10 @@ def test_unchecked_baseline_abstains_never_fails():
             "/tmp/r", hard, features)
     assert ran is False                      # abstained — cargo "didn't run"
     assert features["syntax_checked"] is False
-    assert features["syntax_passed"] is True
+    # s27-71 (B5): abstain records the UNKNOWN contract (no oracle ran —
+    # acceptance degrades, never silently improves), not a stamped pass.
+    assert "syntax_passed" not in features
+    assert features["syntax_outcome"] == "unknown"
     assert hard == []                        # no failure recorded
 
 

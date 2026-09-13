@@ -756,3 +756,139 @@ def test_empty_side_rule_declines_large_regions(tmp_path: Path):
     big_block = "\n".join(f"rewrite_line_{i}(new, json, serialize)" for i in range(30))
     unit = _empty_side_unit(repo, cur_block="", rep_block=big_block)
     assert orch._try_empty_side_fragment(unit) is None
+
+
+# ---------------------------------------------------------------------------
+# s27-71 (fifth-pass review D1): the absorbed-side arm's "pristine region"
+# must be pristine — sibling units' unresolved conflict blocks are NOT
+# decided text, and the containment must be line-anchored (a 2-line idiom
+# block must not match fragments of unrelated adjacent outside lines).
+# ---------------------------------------------------------------------------
+
+_ABS_OTHER = "alpha_one()\nalpha_two()\n"
+
+
+def _absorbed_unit(repo: Path, worktree: str, rep_block: str,
+                   siblings: list | None = None) -> ConflictUnit:
+    from capybase.adapters.parsers import parse_marker_blocks as _pmb
+    u = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="app.py:1:0",
+        unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=E_BASE),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=""),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=rep_block),
+        original_worktree_text=worktree,
+        marker_span=_pmb(worktree)[0].span,
+    )
+    if siblings is not None:
+        u.structural_metadata["sibling_units"] = siblings
+    return u
+
+
+def _absorbed_stages(orch, other_text: str = _ABS_OTHER):
+    """Unchanged-deleter shape: current stage == base (classify_side
+    'unchanged' → insertion wins when the absorbed arm declines). The
+    diff3 block's other side must CONTAIN the unit's other_block tokens
+    (the parent-block subset contract) or the jaccard gate declines."""
+    from capybase.adapters.parsers import parse_marker_blocks as _pmb
+    _d3 = ("def run():\n<<<<<<< A\n=======\n"
+           + other_text +
+           ">>>>>>> B\n")
+    _blocks = _pmb(_d3)
+    # base == other side verbatim (jaccard 1.0 — a keep, the lightest
+    # possible edit; anything less declines at the 0.6 gate)
+    _blocks[0].__dict__["base_text"] = other_text
+    _rep_file = E_BASE + other_text          # replayed file adds the block
+    orch._empty_side_stage_sides = lambda path: (
+        {"current": E_BASE, "replayed": _rep_file}, E_BASE, _blocks)
+
+
+def test_absorbed_side_fires_on_true_absorption(tmp_path: Path):
+    """Positive control: the other side's lines exist verbatim as plain
+    OUTSIDE lines (the duckdb-0013 shape) → suppressed to empty."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _empty_side_repo(repo, cur_text=E_CUR_DELETED, rep_text=E_REP)
+    orch = _orch(repo)
+    orch.config.validation.enable_verifier_model = False
+    _absorbed_stages(orch)
+    worktree = ("top = 0\n"
+                "<<<<<<< ours\n"
+                "=======\n"
+                + _ABS_OTHER +
+                ">>>>>>> theirs\n"
+                "mid = 1\n"
+                "alpha_one()\n"
+                "alpha_two()\n"
+                "end = 3\n")
+    unit = _absorbed_unit(repo, worktree, _ABS_OTHER)
+    out = orch._try_empty_side_fragment(unit)
+    assert out is not None
+    assert out.accepted.resolved_text == ""
+
+
+def test_absorbed_side_ignores_sibling_conflict_blocks(tmp_path: Path):
+    """s27-71 D1: the other side's content sits ONLY inside a SIBLING
+    unit's unresolved conflict block — not decided pristine text (the
+    sibling may resolve the other way and drop it). The old arm read the
+    sibling block as 'already absorbed elsewhere' and suppressed to empty;
+    the fix excludes sibling spans, so insertion wins instead."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _empty_side_repo(repo, cur_text=E_CUR_DELETED, rep_text=E_REP)
+    orch = _orch(repo)
+    orch.config.validation.enable_verifier_model = False
+    _absorbed_stages(orch)
+    from capybase.adapters.parsers import parse_marker_blocks as _pmb
+    worktree = ("top = 0\n"
+                "<<<<<<< ours\n"
+                "=======\n"
+                + _ABS_OTHER +
+                ">>>>>>> theirs\n"
+                "mid = 1\n"
+                "<<<<<<< ours\n"
+                + _ABS_OTHER +          # inside the SIBLING's current side
+                "beta_other()\n"
+                "=======\n"
+                "gamma()\n"
+                ">>>>>>> theirs\n"
+                "end = 3\n")
+    blocks = _pmb(worktree)
+    siblings = [{"unit_id": "app.py:1:1", "marker_span": list(blocks[1].span)}]
+    unit = _absorbed_unit(repo, worktree, _ABS_OTHER, siblings=siblings)
+    out = orch._try_empty_side_fragment(unit)
+    assert out is not None
+    # NOT suppressed: the insertion (replayed block) wins, as the
+    # unchanged-deleter doctrine dictates when nothing was truly absorbed.
+    assert out.accepted.resolved_text.strip() == _ABS_OTHER.strip()
+
+
+def test_absorbed_side_requires_line_anchored_match(tmp_path: Path):
+    """s27-71 D1: a 2-line idiom block whose FLATTENED text appears inside
+    ONE unrelated outside line is not absorption — the old whitespace-
+    flattened substring matched it and wrongly suppressed."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _empty_side_repo(repo, cur_text=E_CUR_DELETED, rep_text=E_REP)
+    orch = _orch(repo)
+    orch.config.validation.enable_verifier_model = False
+    _absorbed_stages(orch, "return -1\n}\n")
+    other = "    total = 0\n    return total\n"
+    worktree = ("def run():\n"
+                "    top = 0\n"
+                "<<<<<<< ours\n"
+                "=======\n"
+                "    total = 0\n"
+                "    return total\n"
+                ">>>>>>> theirs\n"
+                "    if flag: total = 0\n"
+                "    return total\n")
+    _absorbed_stages(orch, other)
+    unit = _absorbed_unit(repo, worktree, other)
+    out = orch._try_empty_side_fragment(unit)
+    assert out is not None
+    # NOT suppressed (no contiguous outside line-run matches the block):
+    # insertion wins per the unchanged-deleter doctrine.
+    assert out.accepted.resolved_text == other.strip() + "\n" or \
+           out.accepted.resolved_text.strip() == other.strip()

@@ -4104,7 +4104,7 @@ class AstPreservationValidator:
                 name=self.name,
                 passed=True,
                 message="ast preservation skipped (no language or span)",
-                features={"ast_checked": False, "ast_preserved": True},
+                features={"ast_checked": False},
             )
         base_outside = unit.structural_metadata.get("ast_fingerprint_base_outside")
         if not base_outside:
@@ -4114,7 +4114,7 @@ class AstPreservationValidator:
                 name=self.name,
                 passed=True,
                 message="ast preservation skipped (no base fingerprint)",
-                features={"ast_checked": False, "ast_preserved": True},
+                features={"ast_checked": False},
             )
         try:
             from capybase.adapters import structural
@@ -4123,14 +4123,14 @@ class AstPreservationValidator:
                 name=self.name,
                 passed=True,
                 message="ast preservation skipped (parser unavailable)",
-                features={"ast_checked": False, "ast_preserved": True},
+                features={"ast_checked": False},
             )
         if not structural.is_available(lang):
             return VerificationCheckResult(
                 name=self.name,
                 passed=True,
                 message=f"ast preservation skipped (no {lang} grammar)",
-                features={"ast_checked": False, "ast_preserved": True},
+                features={"ast_checked": False},
             )
         # Splice the candidate into the original and re-fingerprint the outside.
         # CRITICAL: for multi-hunk files, the worktree still has sibling conflict
@@ -4163,7 +4163,7 @@ class AstPreservationValidator:
                 name=self.name,
                 passed=True,
                 message="ast preservation skipped (post-splice parse failed)",
-                features={"ast_checked": False, "ast_preserved": True},
+                features={"ast_checked": False},
             )
         preserved = after_outside == base_outside
         # Complementary injection guard: the outside fingerprint (line-range
@@ -6620,7 +6620,18 @@ class VerificationEngine:
             # No cargo available → text-only (a generic ``.toml`` config file or
             # a manifest conflict without a toolchain stays unverifiable).
         features["syntax_checked"] = features.get("syntax_checked", syntax_checked)
-        features["syntax_passed"] = features.get("syntax_passed", syntax_ok)
+        # s27-71: when NO oracle ran for this file (a language with no
+        # whole-file branch, or the tool absent), record the UNKNOWN
+        # contract rather than leaking the branch-local syntax_ok=True
+        # initial — "unknown is not pass", and acceptance reads this
+        # feature as evidence.
+        if (not features.get("syntax_checked")
+                and "syntax_passed" not in features):
+            features.pop("syntax_passed", None)
+            if "syntax_outcome" not in features:
+                features["syntax_outcome"] = "unknown"
+        else:
+            features.setdefault("syntax_passed", syntax_ok)
 
         # Semantic whole-file checks: duplicate definitions + unreachable code.
         # Always-on (no config knob — mirror the syntax check), degrading to a
@@ -6765,8 +6776,12 @@ class VerificationEngine:
             # current, replayed AND the oracle all carry the same two
             # pre-existing errors at merge_sha (zero new for every variant).
             # An undecidable delta must abstain, never fail.
+            # s27-71: abstain records the UNKNOWN contract (no oracle ran —
+            # acceptance degrades, never silently improves); the old
+            # syntax_passed=True stamped a pass no tool produced.
             features["syntax_checked"] = False
-            features["syntax_passed"] = True
+            features.pop("syntax_passed", None)
+            features["syntax_outcome"] = "unknown"
             return False
         features["syntax_checked"] = True
         # New errors = after errors absent from the baseline, via the shared

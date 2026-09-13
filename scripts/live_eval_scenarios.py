@@ -43,6 +43,18 @@ _SUBDIR = {"tikv": "tikv", "polars": "polars", "cython": "cython",
            "scikit-learn": "scikit-learn", "php": "php-src", "libuv": "libuv",
            "duckdb": "duckdb", "prusaslicer": "prusaslicer"}
 
+# Generator-output basename pattern (S27-57/60; module-scope since s27-71
+# so smoke() asserts the PRODUCTION pattern instead of a diverging inline
+# copy — the copy had already silently kept the pre-s27-67 dead
+# `/generated_` alternative). Census: every corpus match (12 paths,
+# duckdb/cython families incl. two hand-written generated-COLUMN feature
+# tests) is oracle-equal-or-inert — 12/12 benign, s27-71.
+_GEN_OUTPUT = re.compile(
+    r"(compiled_grammar|inlined_grammar|\.pb\.cc|\.pb\.h|"
+    r"\.generated\.|\.tab\.c|\.yy\.c|"
+    r"transform_generated_|_generated\.|generated_)",
+    re.IGNORECASE)
+
 
 def _is_partial(clone: Path) -> bool:
     """True when the clone is blob-filtered (promisor remote configured).
@@ -133,6 +145,28 @@ def _journal_counters(journal_path) -> dict:
     except OSError:
         pass
     return out
+
+
+def _chain_verdict(escalated: bool, holes: bool, scored: list,
+                   n_ok: int, absent: list, kept_in_replay: int) -> str:
+    """The per-scenario verdict chain (s27-71: extracted for testability).
+
+    PASS requires all SCORED rows ok (absent rows are excluded by design);
+    a scenario whose every row is absent-at-oracle with the replay
+    agreeing on every deletion has nothing to score and nothing divergent
+    — ALL_ABSENT, not the old fall-through ORACLE_DIVERGENT (a false FAIL
+    no resolver quality could avoid)."""
+    if escalated:
+        return "ESCALATE"
+    if holes:
+        return "ORACLE_HOLE"
+    if scored and n_ok == len(scored):
+        return "PASS"
+    if n_ok > 0:
+        return "PARTIAL"
+    if not scored and absent and not kept_in_replay:
+        return "ALL_ABSENT"
+    return "ORACLE_DIVERGENT"
 
 
 def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
@@ -254,7 +288,7 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
         # the mechanism writes the converged content as the whole file,
         # validated through the standard gates.
         conv_seeds: dict[str, str] = {}
-        # Generator-output take-source seeds (S27-57): for GENERATOR-OUTPUT
+        # Generator-output seeds (S27-57): for GENERATOR-OUTPUT
         # paths (the strict pattern — compiled/inlined grammar, pb.cc/h,
         # .generated, parser tables; NOT lockfiles, which package managers
         # merge substantively — the mixed 20/79 census included those), the
@@ -262,11 +296,7 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
         # grammar family; compiled_grammar.cpp blocked 0004/0005/0007/0010
         # as model refusals). The seed is the SOURCE TIP's blob — computed
         # from tips alone, census-validated, no oracle access.
-        _GEN_OUTPUT = re.compile(
-            r"(compiled_grammar|inlined_grammar|\.pb\.cc|\.pb\.h|"
-            r"\.generated\.|\.tab\.c|\.yy\.c|"
-            r"transform_generated_|_generated\.|generated_)",
-            re.IGNORECASE)
+        # (Pattern hoisted to module scope s27-71 — see _GEN_OUTPUT.)
         # Seed candidates = every path the replay can touch (the source
         # range's diff), not just the miner's conflict_steps — EMERGENT
         # conflicts (compiled_grammar.cpp blocked four duckdb runs yet
@@ -477,16 +507,12 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             # Measurement holes must be visible in the row itself, not just
             # the log — a PASS with unscored files is not an honest PASS.
             row["oracle_read_errors"] = len(holes)
-        if row["escalated"]:
-            row["verdict"] = "ESCALATE"
-        elif holes:
-            row["verdict"] = "ORACLE_HOLE"
-        elif scored and n_ok == len(scored):
-            row["verdict"] = "PASS"
-        elif n_ok > 0:
-            row["verdict"] = "PARTIAL"
-        else:
-            row["verdict"] = "ORACLE_DIVERGENT"
+        row["verdict"] = _chain_verdict(
+            bool(row.get("escalated")), bool(holes), scored, n_ok,
+            absent, row.get("absent_kept_in_replay") or 0)
+        if row["verdict"] == "ALL_ABSENT":
+            row["reason"] = ("all touched paths absent at the oracle; "
+                             "replay agreed on every deletion")
         # PASS's criterion is all-SCORED-ok; the denominator shown is all
         # files (scored + absent + holes) so the row reads consistently.
         row["files_ok"] = f"{n_ok}/{len(results)}"
@@ -589,34 +615,55 @@ def smoke() -> list[str]:
         provider_ok = False
         print("smoke: no provider configured — stub-path assertions SKIPPED")
     if provider_ok:
+        # s27-71: the old check overwrote tests.pre_continue/final and then
+        # inspected the overwritten values — a pure tautology (the s27-50
+        # armor was dead). The REAL contract: the raw per-case gate may
+        # materialize the stub path in tests.pre_continue/final (run_scenario
+        # overwrites exactly those two for replays — the s27-50
+        # neutralization), but the leak must be CONFINED to them — any OTHER
+        # surface carrying the stub path would execute unneutralized in
+        # replays.
         for lang in ("python", "rust", "c", "cpp"):
             cfg = L._config_for(SimpleNamespace(
                 path="scenario.rs", language=lang, marker_original="",
                 id="smoke", dataset="smoke-dataset"), has_crate=True)
-            # The scenario harness neutralizes the per-case gate after
-            # _config_for; assert BOTH that the neutralization is applied in
-            # run_scenario's pattern and that nothing else materializes the
-            # stub path (this mirrors the two lines in run_scenario).
+            for section in ("tests",):
+                obj = getattr(cfg, section, None)
+                if obj is None:
+                    continue
+                for fname in getattr(obj, "model_fields", vars(obj)):
+                    if fname.startswith("_"):
+                        continue
+                    try:
+                        val = str(getattr(obj, fname, "") or "")
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if "scenario.rs" in val and fname not in (
+                            "pre_continue", "final"):
+                        failures.append(
+                            f"{lang}: stub path leaked into "
+                            f"{section}.{fname}: {val[:80]!r}")
+            # and the neutralization pattern itself clears the two allowed
+            # surfaces (mirrors run_scenario):
             cfg.tests.pre_continue = "true"
             cfg.tests.final = "true"
             for label, cmd in (("pre_continue", cfg.tests.pre_continue),
                                ("final", cfg.tests.final)):
-                if "scenario.rs" in (cmd or ""):
+                if cmd != "true":
                     failures.append(
-                        f"{lang}: stub path leaked into tests.{label}: {cmd!r}")
-    # Generator-output seed pattern (s27-57/s27-60): the intended set —
-    # grammar files and generated transformers match; lockfiles and
-    # hand-written helpers don't.
-    import re as _re
-    gen = _re.compile(
-        r"(compiled_grammar|inlined_grammar|\.pb\.cc|\.pb\.h|"
-        r"\.generated\.|\.tab\.c|\.yy\.c|"
-        r"transform_generated_|_generated\.|/generated_)", _re.IGNORECASE)
+                        f"{lang}: neutralized tests.{label} != 'true': {cmd!r}")
+    # Generator-output seed pattern (s27-57/60): asserts the PRODUCTION
+    # pattern (module-scope _GEN_OUTPUT, hoisted s27-71 — the old inline
+    # copy had already diverged back to the dead `/generated_` form).
+    # Census note (s27-71): every corpus match is oracle-equal-or-inert,
+    # including the hand-written generated-COLUMN feature tests — the
+    # bare `generated_` alternative deliberately stays (12/12 benign).
     expect_match = [
         "src/parser/peg/compiled_grammar.cpp",
         "src/parser/peg/transformer/transform_generated_trampoline.cpp",
         "proto/messages.pb.cc",
         "src/parser/peg/inlined_grammar.hpp",
+        "src/settings/autogenerated_settings.cpp",
     ]
     expect_no_match = [
         "Cargo.lock",
@@ -625,10 +672,10 @@ def smoke() -> list[str]:
         "AUTHORS",
     ]
     for p in expect_match:
-        if not gen.search(p.rsplit("/", 1)[-1]):
+        if not _GEN_OUTPUT.search(p.rsplit("/", 1)[-1]):
             failures.append(f"generator pattern should match but doesn't: {p}")
     for p in expect_no_match:
-        if gen.search(p.rsplit("/", 1)[-1]):
+        if _GEN_OUTPUT.search(p.rsplit("/", 1)[-1]):
             failures.append(f"generator pattern should NOT match but does: {p}")
     return failures
 

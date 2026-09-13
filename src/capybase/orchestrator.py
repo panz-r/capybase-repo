@@ -6645,11 +6645,27 @@ class Orchestrator:
         # non-empty side's own lines as comment ghosts (`# line`), and a
         # single-line other_block substring-matches its own ghost — every
         # one-line replayed addition would be wrongly suppressed.
+        # s27-71 hardening (fifth-pass review D1): the "pristine region"
+        # must exclude SIBLING units' unresolved conflict blocks too —
+        # their marker lines and BOTH sides' content are not decided
+        # pristine text, and a sibling that later resolves to the side
+        # WITHOUT the content would turn this unit's suppression into a
+        # file-level loss. The extractor records sibling spans
+        # (sibling_units metadata); without them, only this unit's own
+        # span is excluded (single-unit files are unaffected either way).
         _span = unit.marker_span
         _orig_lines = (unit.original_worktree_text or "").split("\n")
-        if _span is not None:
-            _outside = "\n".join(
-                _orig_lines[:_span[0]] + _orig_lines[_span[1] + 1:])
+        _excl = {_span}
+        for _sib in (unit.structural_metadata.get("sibling_units")
+                     or ()):  # noqa: SIM118
+            _ss = _sib.get("marker_span")
+            if (isinstance(_ss, (list, tuple)) and len(_ss) == 2
+                    and all(isinstance(x, int) for x in _ss)):
+                _excl.add((_ss[0], _ss[1]))
+        if _span is not None or len(_excl) > 1:
+            _keep = [ln for i, ln in enumerate(_orig_lines)
+                     if not any(a <= i <= b for a, b in _excl)]
+            _outside = "\n".join(_keep)
         else:
             _outside = unit.original_worktree_text or ""
         _other_stripped = (other_block or "").strip()
@@ -6657,10 +6673,27 @@ class Orchestrator:
         # trivially substring-matches unrelated code) and compare on
         # whitespace-normalized text (line endings/indent drift must not
         # void the match).
-        _norm_ws = lambda s: " ".join(s.split())
-        if _unit_other and _outside and len(
-                _other_stripped.splitlines()) >= 2 \
-                and _norm_ws(_other_stripped) in _norm_ws(_outside):
+        # s27-71 hardening: the match must be LINE-ANCHORED — the other
+        # side's normalized LINES appear as a CONTIGUOUS run of the
+        # outside's normalized lines. The old flattened substring match
+        # let a 2-line idiom block (`return -1` + `}`) match fragments of
+        # two adjacent unrelated outside lines.
+        def _norm_lines(text: str) -> list[str]:
+            return [" ".join(l.split()) for l in text.split("\n") if l.strip()]
+
+        _other_norm = _norm_lines(_other_stripped)
+        _outside_norm = _norm_lines(_outside)
+
+        def _contiguous_run(needle: list[str], hay: list[str]) -> bool:
+            if not needle or len(needle) > len(hay):
+                return False
+            for i in range(len(hay) - len(needle) + 1):
+                if hay[i:i + len(needle)] == needle:
+                    return True
+            return False
+
+        if (_unit_other and _outside and len(_other_norm) >= 2
+                and _contiguous_run(_other_norm, _outside_norm)):
             winner, why = "", (
                 "absorbed side: the non-empty side's content already exists "
                 "verbatim in the pristine region (duplicate suppression)")
@@ -6988,10 +7021,10 @@ class Orchestrator:
         # SHAPE GATE (S27-25's lesson: the stage-based gate is VACUOUS —
         # every modify/modify conflict passes it because the replayed block
         # is trivially in stage-3's file and ours always differs from base).
-        # The TRUE move-race evidence is cross-file: the def duplicated at
-        # another path in the SOURCE TIP tree. Only the scenario-level
-        # caller has that context; it registers the race evidence on the
-        # orchestrator (``_race_step_paths``) before run(). No evidence ->
+        # The registered evidence is the harness's same-path tip-survival
+        # check (see def_site_race.py's corrected contract note, s27-71) —
+        # weaker than the census's cross-file band; validation + the
+        # multi-touch filtering carry the selectivity. No evidence ->
         # the mechanism declines (dormant in single-file mode, by design).
         race_paths = getattr(self, "_race_step_paths", None) or {}
         evidence = race_paths.get(unit.path)
@@ -10120,7 +10153,11 @@ class Orchestrator:
                     else:
                         fallback += " (no candidates generated)"
                 result.reason = escalated_unit.reason or fallback
-                self._record_outcomes_to_memory(result)
+                # s27-71 (fifth-pass A3): reconcile FIRST — earlier files
+                # in this step may already carry whole-file swaps in
+                # accepted_by_path; recording without reconciliation stores
+                # their discarded per-unit candidates as memory positives.
+                self._reconcile_and_record(result)
                 _alternates, _consensus = _extract_alternates(escalated_unit)
                 write_review_bundle(
                     self.paths,
@@ -10276,10 +10313,22 @@ class Orchestrator:
                         # NOT exempted — the sqlite-0016 fragment write rode
                         # a structural-provenance candidate, and this
                         # journal-only tripwire is the recurrence alarm.
+                        # s27-71 (fifth-pass A7): the allowlist now covers
+                        # every spelling the watched mechanisms actually
+                        # emit (the {side}-template family resolves to
+                        # current/replayed; _stage/_fallback/wholesale_floor
+                        # variants included) — only current_only was listed.
                         _del_prov = (
                             "deterministic_empty_side", "block_capture",
                             "deterministic_deletion_respect_prune",
-                            "deterministic_source_current_only")
+                            "deterministic_source_current_only",
+                            "deterministic_source_replayed_only",
+                            "deterministic_source_current_only_stage",
+                            "deterministic_source_replayed_only_stage",
+                            "deterministic_source_current_only_fallback",
+                            "deterministic_source_replayed_only_fallback",
+                            "deterministic_wholesale_floor_current",
+                            "deterministic_wholesale_floor_replayed")
                         _has_del = any(
                             (getattr(c, "provenance", "") or "") in _del_prov
                             for _u, c in accepted)
@@ -10649,6 +10698,12 @@ class Orchestrator:
                             _wsr = None
                         if _wsr is not None:
                             accepted, buffer, file_validation = _wsr
+                            # s27-71 (fifth-pass A4): the sibling of the
+                            # s27-66 map-update fix — the whole-side repair
+                            # rung installs a whole-file unit; without the
+                            # map update the reconciliation kept the stale
+                            # per-unit pairs for this path.
+                            accepted_by_path[path] = accepted
                             # The swapped-in side is a NEW buffer — its
                             # build test must run (the once-per-Phase-2
                             # flag refers to one buffer, not one file).
@@ -11131,7 +11186,7 @@ class Orchestrator:
                                 if not hasattr(self, "_takeover_landed_paths"):
                                     self._takeover_landed_paths = {}
                                 self._takeover_landed_paths[path] = _f1_side
-                                _f1_unit = unit.model_copy(
+                                _f1_unit = units[0].model_copy(
                                     update={
                                         "unit_id": f"{path}:f1_tier1",
                                         "unit_kind": "whole_file",
@@ -11301,7 +11356,7 @@ class Orchestrator:
                                                     whole_text=_ot,
                                                     pristine_side_texts=[_ot])
                                                 if _ov.passed:
-                                                    _ou = unit.model_copy(
+                                                    _ou = units[0].model_copy(
                                                         update={
                                                             "unit_id": f"{path}:f1_t2fb",
                                                             "unit_kind": "whole_file",
@@ -11343,7 +11398,7 @@ class Orchestrator:
                                     except Exception:  # noqa: BLE001 — fallback is best-effort
                                         pass
                                 if _f2_text.strip() and _f2_ok:
-                                    _f2_unit = unit.model_copy(
+                                    _f2_unit = units[0].model_copy(
                                         update={
                                             "unit_id": f"{path}:f1_tier2",
                                             "unit_kind": "whole_file",
@@ -11415,7 +11470,7 @@ class Orchestrator:
                                         {"side": _heuristic_side, "path": path},
                                         step_index=self.step, path=path,
                                     )
-                                    _hf_unit = unit.model_copy(
+                                    _hf_unit = units[0].model_copy(
                                         update={
                                             "unit_id": f"{path}:f1_churn_fallback",
                                             "unit_kind": "whole_file",
@@ -11455,7 +11510,11 @@ class Orchestrator:
                                 f"whole-file validation failed for {path}: "
                                 + "; ".join(f.message for f in file_validation.hard_failures)
                             )
-                        self._record_outcomes_to_memory(result)
+                        # s27-71 (fifth-pass A3): same as the Phase-1 exit —
+                        # reconcile before recording (earlier-staged files'
+                        # whole-file swaps must supersede their stale
+                        # per-unit outcomes in memory).
+                        self._reconcile_and_record(result)
                         # Enrich the bundle with the unit/candidate/validation so the
                         # human (and the interactive fallback) can see what was tried
                         # and why cargo rejected it — not just the bare reason.
@@ -11509,6 +11568,12 @@ class Orchestrator:
                 path, language, units, buffer=buffer)
             if _floor is not None:
                 accepted = _floor
+                # s27-71 (fifth-pass A1): the third floor site — the
+                # s27-67b fix covered the phase-1/phase-2 floors (10095/
+                # 10939) but missed this staging-tail one, so the file kept
+                # its stale per-unit pairs and the reconciliation skipped
+                # it (stale outcomes + memory positives — the D3 poison).
+                accepted_by_path[path] = accepted
                 buffer = _floor[0][1].resolved_text
             # Sprint-18 WS3: git's auto-merge can resurrect upstream-deleted
             # content OUTSIDE the marker blocks — the resolver only controls
@@ -13423,6 +13488,15 @@ class Orchestrator:
                 _sc_msgs = "\n".join(
                     getattr(f, "message", "") for f in failures)
                 if "invalid storage class for function" in _sc_msgs:
+                    # s27-71 (fifth-pass A5): this rung referenced unit /
+                    # _old_cand without a binding anywhere in
+                    # _whole_file_repair's scope — NameError on every
+                    # firing, swallowed by the rung's own except (dead
+                    # since written; the redis-0013-class repair never
+                    # landed). Bind from the fault-attributed pair.
+                    if not (0 <= fault_idx < len(accepted)):
+                        fault_idx = 0
+                    unit, _old_cand = accepted[fault_idx]
                     from capybase.verification import (
                         find_misplaced_declaration,
                         inject_symbol_declaration,
@@ -14549,7 +14623,9 @@ class Orchestrator:
 
     def _accept_r3(self, unit, candidate, context):
         """Accept an R3 best-of-N winning candidate."""
-        from capybase.conflict_model import UnitOutcome
+        # s27-71: UnitOutcome is defined in THIS module (line ~69); the old
+        # import from conflict_model raised ImportError on the accept path —
+        # latent since sprint-23 (R3 is harvest-only: enable_best_of_n).
         outcome = UnitOutcome(unit=unit)
         outcome.accepted = candidate
         outcome.attempts = [candidate]
@@ -18899,9 +18975,14 @@ class Orchestrator:
             # The full evidence envelope (s27-extend-42): per-oracle
             # outcome + scope + tool fingerprint + duration for each
             # accepted unit — attributable, reproducible acceptance.
+            # s27-71 (fifth-pass A8): skip superseded outcomes — the
+            # report and decide() do; double-rendering evidence for
+            # discarded candidates pollutes the journal record.
             from capybase.acceptance import evidence_envelope
             for o in result.outcomes:
                 if getattr(o, "accepted", None) is None:
+                    continue
+                if getattr(o, "superseded", False):
                     continue
                 env = evidence_envelope(o)
                 if env:

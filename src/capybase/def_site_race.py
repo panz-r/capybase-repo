@@ -4,14 +4,21 @@ The move-race shape: the replayed commit MOVED a definition and the
 target branch edited it in place — git surfaces an edit/edit conflict at
 the old location whose replayed side is the moved definition verbatim.
 
-EVIDENCE GATE (the actual contract): this module's resolver alone is
-NOT evidence — any two-sided conflict would resolve. The evidence is
-registered by the scenario harness (``orch._race_step_paths``): a path
-is registered only when the conflict block's content is a SUBSET of the
-source tip's tree at another home (the moved def's new home), i.e.
-cross-file move evidence computed from the repo. The orchestrator
-fires this resolver only on registered paths
-(``future.enable_def_site_race`` + evidence present).
+EVIDENCE GATE (the actual contract, corrected s27-71): this module's
+resolver alone is NOT evidence — any two-sided conflict would resolve.
+The evidence is registered by the scenario harness
+(``orch._race_step_paths``): a path is registered when the mined
+conflict block's replayed-side line set is a SUBSET of the SOURCE TIP's
+blob AT THE SAME PATH — i.e. the block's content survived to the source
+branch's final state unchanged. (The original s27-24 design intended a
+cross-file "moved to another home" check; the harness implements the
+same-path form above. The same-path check is weaker than the 833-record
+census band, which was correspondence-filtered to MOVED records — in
+practice multi-touch files fail the subset test and the gate's effective
+selectivity comes mostly from that plus the full validation pipeline.
+Known gap, ledger s27-71; the correspondence-gated registration is the
+documented follow-up.) The orchestrator fires this resolver only on
+registered paths (``future.enable_def_site_race`` + evidence present).
 
 Census (s27-22, 833 moved-race records): oracle = the moved
 (replayed-side) content verbatim in 59% of records; the remaining 41%

@@ -124,7 +124,33 @@ def read_manifest(out_dir: Path) -> list[dict]:
 
 
 def write_manifest(out_dir: Path, entries: list[dict]) -> None:
-    (out_dir / "manifest.json").write_text(json.dumps(entries, indent=2))
+    # s27-71 (C8): atomic (tmp + rename) — a kill mid-write left a
+    # truncated manifest that read back as [] and silently discarded all
+    # prior entries on the next append.
+    tmp = out_dir / "manifest.json.tmp"
+    tmp.write_text(json.dumps(entries, indent=2))
+    os.replace(tmp, out_dir / "manifest.json")
+
+
+def _preserve_killed_session(worktree, flights_dir: Path,
+                             scenario_id: str, tag: str) -> None:
+    """Copy a killed attempt's session dir into the flights tree (s27-71,
+    C6). The harness copies flights only on COMPLETION — on a hang/timeout
+    kill the journal (exactly the INFRA_HANG forensics) was destroyed with
+    the worktree."""
+    if worktree is None:
+        return
+    try:
+        sess = Path(worktree) / ".rebase-agent" / "sessions"
+        if not sess.is_dir():
+            return
+        dest = flights_dir / f"{scenario_id}-killed-{tag}-" \
+            f"{time.strftime('%H%M%S')}"
+        shutil.copytree(sess, dest, dirs_exist_ok=True)
+        print(f"  [{scenario_id}] preserved killed session -> {dest}",
+              flush=True)
+    except OSError:
+        pass
 
 
 def result_is_complete(path: Path) -> bool:
@@ -396,6 +422,10 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
     log = out_dir / "run.log"
 
     attempt = 0
+    # s27-71 (C4): the deadline is per-SCENARIO, not per-attempt — the old
+    # t0 reset inside the loop gave a retried scenario up to 2x the budget.
+    scenario_t0 = time.time()
+    timed_out = False
     while True:
         attempt += 1
         t0 = time.time()
@@ -461,14 +491,15 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
                 now = time.time()
                 # deadline
                 if (max_seconds is not None
-                        and now - t0 >= max_seconds):
+                        and now - scenario_t0 >= max_seconds):
+                    print(f"  [{scenario_id}] TIMEOUT after "
+                          f"{now - scenario_t0:.0f}s — killing process group",
+                          flush=True)
+                    _preserve_killed_session(
+                        worktree, flights_dir, scenario_id, "timeout")
                     _kill_tree(proc)
-                    _synthetic_result(
-                        out_file, scenario_id, "SCENARIO_TIMEOUT",
-                        f"exceeded --max-scenario-seconds {max_seconds}",
-                        attempt)
-                    return _entry(scenario_id, out_file, "SCENARIO_TIMEOUT",
-                                  attempt, infra=False)
+                    timed_out = True
+                    break  # fall through: a completed result file wins
                 # hang
                 journal = None
                 if worktree is not None:
@@ -481,11 +512,18 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
                 io_cpu = _proc_io_cpu_group(proc.pid)
                 jsz = _journal_size(journal)
                 if io_cpu is None:
-                    break  # process gone; outer loop will reap
+                    # s27-71 (C7): the process group is gone — do NOT break
+                    # (that skipped the tail drain, losing the harness's
+                    # final output lines); loop once more and let the
+                    # poll() branch reap + drain.
+                    time.sleep(min(poll_s, 2.0))
+                    continue
                 if detector.update(now, jsz, io_cpu[0], io_cpu[1]):
                     print(f"  [{scenario_id}] HANG: journal+io+cpu flat "
                           f"for {hang_after:.0f}s — killing process group",
                           flush=True)
+                    _preserve_killed_session(
+                        worktree, flights_dir, scenario_id, "hang")
                     _kill_tree(proc)
                     break
                 time.sleep(poll_s)
@@ -504,6 +542,18 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
             entry["files_ok"] = row.get("files_ok")
             entry["session_id"] = row.get("session_id", "")
             return entry
+
+        # s27-71 (C4): a timeout kill must respect a real result the
+        # harness wrote just before the deadline poll — the old arm
+        # unconditionally synthesized SCENARIO_TIMEOUT over it, and the
+        # resume path treats that verdict as final.
+        if timed_out:
+            _synthetic_result(
+                out_file, scenario_id, "SCENARIO_TIMEOUT",
+                f"exceeded --max-scenario-seconds {max_seconds}",
+                attempt)
+            return _entry(scenario_id, out_file, "SCENARIO_TIMEOUT",
+                          attempt, infra=False)
 
         # No result: hung (or crashed). Retry once, then INFRA_HANG.
         if attempt <= 1:
@@ -606,6 +656,16 @@ def main() -> int:
         if not scenarios:
             print("no scenarios selected")
             return 1
+        # s27-71 (C9): dataset batches silently dropped inner-merge /
+        # oracle-less scenarios — surface the exclusion so the operator
+        # doesn't read the smaller denominator as missing runs.
+        if args.dataset:
+            _corpus_total = len(list(
+                harness.SCENARIO_DIR.glob(f"{args.dataset}-rebase-*.json")))
+            _dropped = _corpus_total - len(scenarios)
+            if _dropped > 0:
+                print(f"batch: {_dropped} scenario(s) excluded by selection "
+                      f"(inner merges / no oracle)", flush=True)
         ids = [s["id"] for s in scenarios]
         print(f"batch: {len(ids)} scenario(s) -> {out_dir}", flush=True)
 

@@ -161,3 +161,28 @@ def test_with_variant_accepts_all_known_fields():
         variant = p.with_variant(**{f.name: getattr(p, f.name)})
         assert variant is not p  # returns a new instance
         assert getattr(variant, f.name) == getattr(p, f.name)  # same value
+
+
+def test_accept_r3_constructs_outcome_without_import_error():
+    """s27-71 (fifth-pass B2): _accept_r3 imported UnitOutcome from
+    conflict_model — where it does not exist (it is defined in
+    orchestrator.py) — so the R3 accept path raised ImportError the first
+    time a diverse-temperature candidate won (R3 is harvest-enabled via
+    enable_best_of_n). Drive the real method with stub state."""
+    from types import SimpleNamespace
+
+    from capybase.orchestrator import Orchestrator
+
+    emitted = []
+
+    class _Journal:
+        def emit(self, *args, **kwargs):
+            emitted.append(args)
+
+    stub = SimpleNamespace(journal=_Journal(), step=1)
+    unit = SimpleNamespace(unit_id="src/a.rs:1:0", path="src/a.rs")
+    cand = SimpleNamespace(candidate_id="src/a.rs:1:0:r3")
+    outcome = Orchestrator._accept_r3(stub, unit, cand, None)
+    assert outcome.accepted is cand
+    assert outcome.mechanism == "r3_best_of_n"
+    assert emitted and emitted[0][0] == "candidate_accepted"

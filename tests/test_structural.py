@@ -308,7 +308,10 @@ def test_ast_validator_inert_without_base_fingerprint():
     cand = _candidate("    return 3")
     res = _engine().verify(unit, cand)
     assert res.features.get("ast_checked") is False
-    assert res.features.get("ast_preserved") is True
+    # s27-71 (B6): an inert check records NO preservation credit — the
+    # old ast_preserved=True inflated the quality-proxy score for every
+    # unchecked candidate.
+    assert "ast_preserved" not in res.features
 
 
 # ---------------------------------------------------------------------------

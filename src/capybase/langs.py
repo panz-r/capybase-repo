@@ -121,10 +121,33 @@ _PROVENANCE_SAFETY: dict[str, SafetyClass] = {
     "deterministic_side_pick": SafetyClass.STRUCTURAL,
     "deterministic_block_capture": SafetyClass.STRUCTURAL,
     "block_capture": SafetyClass.STRUCTURAL,
-    # D2 — policy choices
+    # D2 — policy choices (census-validated fixed policies among valid
+    # options; s27-71: the produced mechanism strings were riding the
+    # unlisted-deterministic STRUCTURAL default, contradicting the class
+    # table's own doctrine — seeds/unions pick by POLICY, not transplant)
     "deterministic_policy": SafetyClass.POLICY,
     "deterministic_near_one_sided": SafetyClass.POLICY,
-    # D3 — reproducible search/repair
+    "deterministic_convergence_seed": SafetyClass.POLICY,
+    "deterministic_docs_union": SafetyClass.POLICY,
+    "deterministic_list_union": SafetyClass.POLICY,
+    "deterministic_empty_side": SafetyClass.POLICY,
+    "deterministic_def_site_race": SafetyClass.POLICY,
+    "deterministic_deletion_respect_prune": SafetyClass.POLICY,
+    "deterministic_source_current_only": SafetyClass.POLICY,
+    "deterministic_source_replayed_only": SafetyClass.POLICY,
+    # the f-string template family resolves to concrete keys at runtime
+    # (…{side}… → current/replayed; the matcher accepts exact keys only,
+    # so each concrete form is listed)
+    "deterministic_source_current_only_stage": SafetyClass.POLICY,
+    "deterministic_source_replayed_only_stage": SafetyClass.POLICY,
+    "deterministic_source_current_only_fallback": SafetyClass.POLICY,
+    "deterministic_source_replayed_only_fallback": SafetyClass.POLICY,
+    "deterministic_wholesale_floor_current": SafetyClass.POLICY,
+    "deterministic_wholesale_floor_replayed": SafetyClass.POLICY,
+    "test_gated_side": SafetyClass.POLICY,
+    # D3 — reproducible search/repair (s27-71: the compiler-repair family
+    # is acceptance's own textbook D3 example — the abstract keys below
+    # never matched the produced deterministic_{gcc,cc}_fixit strings)
     "combination_search": SafetyClass.HEURISTIC,
     "deterministic_symbol_injection": SafetyClass.HEURISTIC,
     "deterministic_brace_repair": SafetyClass.HEURISTIC,
@@ -132,6 +155,12 @@ _PROVENANCE_SAFETY: dict[str, SafetyClass] = {
     "deterministic_storage_class_relocation": SafetyClass.HEURISTIC,
     "compiler_fixit": SafetyClass.HEURISTIC,
     "deterministic_fixit": SafetyClass.HEURISTIC,
+    "deterministic_gcc_fixit": SafetyClass.HEURISTIC,
+    "deterministic_cc_repair": SafetyClass.HEURISTIC,
+    "deterministic_dup_eradication": SafetyClass.HEURISTIC,
+    "deterministic_side_consistency_repair": SafetyClass.HEURISTIC,
+    "deterministic_side_consensus_repair": SafetyClass.HEURISTIC,
+    "micro_patch_repair": SafetyClass.HEURISTIC,
 }
 
 

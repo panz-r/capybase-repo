@@ -81,6 +81,18 @@ def _unit_evidence(outcome) -> UnitEvidence:
     prov = str(getattr(cand, "provenance", "") or "")
     warnings = list(getattr(val, "warnings", None) or []) if val is not None else []
     _sc = _safety_class(outcome)
+    # s27-71: MISSING evidence is not complete evidence — the mirror of
+    # "unknown is not pass". An accepted unit whose validation is None
+    # (reconciliation-appended whole-file outcomes, R3 accepts) or whose
+    # features carry no syntax record at all (fast-verify accepts) used to
+    # read as "not unknown, not failed" and could stamp Tier A "complete
+    # oracles" on units no oracle ever saw — the inverse of the s27-67d
+    # V1 defect (inflated trust instead of a false STOP).
+    syntax_missing = (
+        val is None
+        or ("syntax_passed" not in feats
+            and not feats.get("syntax_checked")
+            and feats.get("syntax_outcome") != "fail"))
     return UnitEvidence(
         unit_id=str(getattr(outcome, "unit", None) and outcome.unit.unit_id
                     or getattr(outcome, "unit_id", "") or "?"),
@@ -88,7 +100,8 @@ def _unit_evidence(outcome) -> UnitEvidence:
         # prefix but is the purest D0 — the class, not the string, decides).
         deterministic=_sc is not None,
         safety=_sc.value if _sc is not None else None,
-        syntax_unknown=feats.get("syntax_outcome") == "unknown",
+        syntax_unknown=(feats.get("syntax_outcome") == "unknown"
+                        or syntax_missing),
         syntax_failed=feats.get("syntax_passed") is False,
         markers_remaining=bool(feats.get("markers_remaining")),
         verifier_disagreement=bool(
