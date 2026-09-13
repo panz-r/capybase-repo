@@ -8172,7 +8172,7 @@ class Orchestrator:
         provs = [
             getattr(o.accepted, "provenance", "") or ""
             for o in result.outcomes
-            if o.accepted is not None
+            if o.accepted is not None and not getattr(o, "superseded", False)
         ]
         if not provs:
             # No accepted outcomes (e.g. escalated) — treat as deterministic so
@@ -8756,6 +8756,8 @@ class Orchestrator:
         for outcome in result.outcomes:
             if outcome.accepted is None:
                 continue
+            if getattr(outcome, "superseded", False):
+                continue  # discarded by a whole-file swap — nothing to probe
             unit = outcome.unit
             ctx = self._history_context_for(unit)
             if ctx is None or not ctx.has_future_region_touches:
@@ -9094,6 +9096,8 @@ class Orchestrator:
             for outcome in result.outcomes:
                 if outcome.accepted is None or outcome.validation is None:
                     continue
+                if getattr(outcome, "superseded", False):
+                    continue  # discarded candidate — not the session's SLO
                 # The intent-coverage check's detail carries per-side preserved/
                 # total. Aggregate both sides into one (preserved, total) sample.
                 detail = None
@@ -10263,11 +10267,14 @@ class Orchestrator:
                     _orig_lines = len(original.splitlines())
                     _buf_lines = len(buffer.splitlines())
                     if _orig_lines >= 40 and _buf_lines < _orig_lines * 0.25:
+                        # NOTE: deterministic_structural is deliberately
+                        # NOT exempted — the sqlite-0016 fragment write rode
+                        # a structural-provenance candidate, and this
+                        # journal-only tripwire is the recurrence alarm.
                         _del_prov = (
                             "deterministic_empty_side", "block_capture",
                             "deterministic_deletion_respect_prune",
-                            "deterministic_source_current_only",
-                            "deterministic_structural")
+                            "deterministic_source_current_only")
                         _has_del = any(
                             (getattr(c, "provenance", "") or "") in _del_prov
                             for _u, c in accepted)
@@ -16903,6 +16910,11 @@ class Orchestrator:
         from capybase.memory.store import Experience
 
         for outcome in result.outcomes:
+            # s27-67c: superseded outcomes describe candidates a whole-file
+            # swap later DISCARDED — recording them as positive examples
+            # would teach exact_reuse to replay overruled text.
+            if getattr(outcome, "superseded", False):
+                continue
             unit = outcome.unit
             accepted = outcome.accepted
             # Collect a conflict-chain observation (#9 step 7) for every outcome,

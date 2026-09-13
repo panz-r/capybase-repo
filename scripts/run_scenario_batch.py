@@ -508,7 +508,6 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
             return entry
 
         # No result: hung (or crashed). Retry once, then INFRA_HANG.
-        del hang_declared  # recorded via the synthetic reason below
         if attempt <= 1:
             print(f"  [{scenario_id}] no result (hang/crash) — retrying "
                   f"once", flush=True)
