@@ -17311,8 +17311,12 @@ class Orchestrator:
             # all-regressed run (compute the diff); output WITHOUT them never
             # reached the tests or can't be parsed — skip.
             import re as _re
+            # s27-77: SKIPPED/XFAIL are NOT decisive — an all-skipped run
+            # (rc 0, e.g. an importorskip dependency the merge broke) has
+            # node lines but zero passing, and diffing it flagged the whole
+            # baseline. Only PASSED/FAILED/ERROR lines prove the tests ran.
             if not _re.search(
-                    r"::\S+\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL)",
+                    r"::\S+\s+(PASSED|FAILED|ERROR)",
                     postmerge_stdout or ""):
                 return []
         regressed = sorted(baseline - postmerge_passing)

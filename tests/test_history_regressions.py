@@ -737,14 +737,8 @@ def test_continuity_diff_skips_unparsable_and_non_run_output():
     passing-set (the default bare-`pytest` gate parses to {} while the
     -v baseline is populated — baseline-minus-empty flags the whole
     baseline as regressed, polluting the drift channel)."""
-    import sys
-    sys.path.insert(0, "scripts")
-    import importlib.util
-    from types import SimpleNamespace
-    spec = importlib.util.spec_from_file_location(
-        "lvr", "scripts/live_eval_realworld.py")
-    _ = importlib.util  # noqa: F841 — lvr import unused; guard path below
-    orch = Orchestrator(Config(), repo=str(tmp_repo := (None or __import__('pathlib').Path("."))),
+    from pathlib import Path
+    orch = Orchestrator(Config(), repo=str(Path(".")),
                         out=lambda *_a, **_k: None)
     orch._test_continuity_baseline = {"test_a.py::test_one"}
     # empty postmerge parse (bare pytest output, no -v lines) -> skip

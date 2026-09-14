@@ -2699,6 +2699,15 @@ def _denorm_index(raw: str, norm_offset: int) -> int:
             in_ws = False
             norm_i += 1
             raw_i += 1
+    # s27-77: a collapsed run counts as ONE normalized char AT ITS FIRST
+    # char — when the walk exits on that boundary, consume the run's
+    # remainder so the mapped index lands at the run's END. Without this,
+    # a line-start fuzzy span mapped raw_start one char into the
+    # indentation (eating it: "if x:\n<12sp>return  1" + edit
+    # "return 1"->"return 2" produced "if x:\nreturn 2").
+    if in_ws:
+        while raw_i < len(raw) and raw[raw_i].isspace():
+            raw_i += 1
     return raw_i
 
 
@@ -2736,7 +2745,8 @@ def _apply_repair_edits(
         # fallback returned a success-shaped EMPTY candidate (burning a
         # NonEmptyResolution failure) — the previous text (a no-op retry,
         # already routed to the risk engine by the warnings above) is the
-        # honest shape. s27-76.
+        # honest shape (reaching the CEGIS convergence-hash machinery via
+        # the wasted retry, not a loop). s27-76.
         if not (cand.resolved_text or "").strip():
             cand.resolved_text = prev_candidate.resolved_text
         return cand

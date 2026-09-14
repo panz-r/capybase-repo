@@ -561,3 +561,38 @@ def test_cegis_convergence_threshold_config_exists():
     cfg = Config()
     assert cfg.policy.cegis_convergence_threshold == 2
 
+
+
+def test_apply_search_replace_preserves_line_start_indent():
+    """s27-77: the fuzzy span map consumed a collapsed whitespace run at
+    its FIRST char, so a line-anchored fuzzy edit mapped raw_start into
+    the indentation and ate it ("if x:\\n<12sp>return  1" + edit
+    "return 1"->"return 2" produced "if x:\\nreturn 2" — zero warnings).
+    The mapped index must land at the run's END."""
+    from capybase.resolution_engine import apply_search_replace
+    prev = "if x:\n            return  1\ny = 3\n"
+    out, warns = apply_search_replace(
+        prev, [{"search": "return 1", "replace": "return 2"}])
+    assert out == "if x:\n            return 2\ny = 3\n", repr(out)
+    assert warns == []
+
+    prev2 = "def f():\n    a =  1\n    b =  2\n"
+    out2, _ = apply_search_replace(
+        prev2, [{"search": "a = 1\n    b = 2",
+                 "replace": "a = 1\n    b = 9"}])
+    assert "    b = 9" in out2, repr(out2)   # replacement's own indent
+    assert "def f():\na = 1" not in out2     # pre-fix corruption shape
+
+
+def test_repair_edits_only_no_full_text_falls_back_to_prev():
+    """s27-76's edits-only arm: when the model sends edits and NO full
+    text and all edits miss, the fallback is the PREVIOUS text — not a
+    success-shaped empty candidate (which burned a NonEmptyResolution
+    failure)."""
+    from capybase.resolution_engine import ResolutionEngine, _apply_repair_edits
+    cand = _candidate("")            # edits-only response: no full text
+    cand._repair_edits = [{"search": "NONEXISTENT", "replace": "x"}]
+    prev = _candidate("    return [0, 9]")
+    out = _apply_repair_edits(cand, prev)
+    assert out.resolved_text == "    return [0, 9]"
+    assert out.failure_kind == ""  # not success-shaped-empty; prev is a no-op retry

@@ -137,7 +137,8 @@ def test_runner_never_retries_a_passed_run(repo):
     text must not burn retries."""
     from unittest.mock import patch
     orch = _orch(repo)
-    ok = _Proc(0, "test_blocked_transient.py::test_lock PASSED\n", "")
+    ok = _Proc(0, "test_x.py::test_lock PASSED\n"
+                   "warning: resource temporarily unavailable\n", "")
     with patch("capybase.adapters.tests.subprocess.Popen",
                return_value=ok) as mock:
         run = orch._run_test_command("pytest -q")
