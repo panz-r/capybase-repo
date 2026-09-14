@@ -599,11 +599,18 @@ def test_repair_edits_only_no_full_text_falls_back_to_prev():
 
 
 def test_apply_search_replace_skips_empty_search():
-    """s27-77 self-review: an empty SEARCH block with text.find("") == 0
-    PREPENDED the replacement at position 0."""
+    """s27-79: an empty search was caught by the pre-existing `not search`
+    guard, but a WHITESPACE-ONLY search slipped through it and
+    text.find("  ") matched inside the body, corrupting it (both shapes
+    reproduced by the twelfth pass). Both must skip with a warning."""
     from capybase.resolution_engine import apply_search_replace
     out, warns = apply_search_replace(
         "intact body\n",
         [{"search": "", "replace": "PREPENDED GARBAGE\n"}])
     assert out == "intact body\n"
     assert any("empty search" in w for w in warns)
+    out2, warns2 = apply_search_replace(
+        "intact body\n",
+        [{"search": "  ", "replace": "GARBAGE\n"}])
+    assert out2 == "intact body\n", repr(out2)
+    assert any("empty search" in w for w in warns2)

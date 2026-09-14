@@ -435,3 +435,26 @@ def test_resolve_directive_refactor_fn_rides_rules(monkeypatch):
     assert "identifier" in prompt
     # the base rules remain intact before the directive
     assert prompt.index(_RESOLVE_RULES_JSON_V6) < prompt.index("MERGE GUIDANCE")
+
+
+def test_set_outline_variant_preserves_non_outline_axes():
+    """s27-80: the back-compat shim delegated to with_variant — the old
+    rebuild named 5 of 10 axes, silently resetting rule_emphasis,
+    conflict_summary_mode, side_ordering, parse_repair_mode and
+    retry_schedule to defaults against its own docstring."""
+    from capybase import prompt_profile as pp
+    profile = pp.PromptProfile(
+        output_layout=pp.OutputLayout.JSON_V6,
+        rule_emphasis=pp.RuleEmphasis.FORMATTED,   # non-default
+    )
+    pp.set_active_profile(profile)
+    try:
+        pp.set_outline_variant(3)
+        live = pp.active_profile()
+        assert live.outline == pp._INT_TO_OUTLINE[3]
+        # the twelfth pass: the old rebuild reset this axis to PLAIN
+        assert live.rule_emphasis == pp.RuleEmphasis.FORMATTED, (
+            "non-outline axis reset by the shim")
+        assert live.output_layout == pp.OutputLayout.JSON_V6
+    finally:
+        pp.set_active_profile(profile)

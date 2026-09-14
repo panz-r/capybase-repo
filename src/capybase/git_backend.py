@@ -681,6 +681,21 @@ class GitBackend:
             return []
         return [p for p in res.stdout.split("\0") if p]
 
+    def blob_oid_at(self, rev: str, path: str) -> str | None:
+        """The OID of ``path``'s blob at ``rev``, or ``None`` if absent.
+
+        Byte-faithful equality primitive (s27-80): ``blob_at`` decodes with
+        errors="replace", so two DISTINCT blobs differing only in
+        invalid-UTF-8 bytes compare equal as bytes. The seeds family must
+        compare OIDs (what the harness does) or a corrupted
+        replacement-char file gets written as a "converged final state".
+        """
+        res = self._run(["rev-parse", f"{rev}:{path}"])
+        if not res.ok:
+            return None
+        oid = (res.stdout or "").strip()
+        return oid or None
+
     def blob_at(self, rev: str, path: str) -> bytes | None:
         """The raw content of ``path`` at ``rev``, or ``None`` if absent.
 

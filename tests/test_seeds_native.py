@@ -126,3 +126,29 @@ def _cfg():
     cfg = Config()
     cfg.future.enable_convergence_seed = True
     return cfg
+
+
+def test_invalid_utf8_blobs_are_not_false_convergence(repo):
+    """s27-80: blob_at decodes with errors="replace", so two DISTINCT blobs
+    differing only in invalid-UTF-8 bytes compared EQUAL as bytes and the
+    convergence arm wrote a corrupted replacement-char file as a "decided
+    final state". Equality must be OID-based (what the harness does)."""
+    repo = Path(repo)
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+    base = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "checkout", "-q", "-b", "feat")
+    (repo / "f.bin").write_bytes(b"\xff payload\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "feat: invalid utf8 A")
+    feat = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "checkout", "-q", "main")
+    (repo / "f.bin").write_bytes(b"\xfe payload\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "main: invalid utf8 B")
+    main = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    backend = GitBackend(repo)
+    seeds = compute_convergence_seeds(
+        backend, target_tip=main, source_tip=feat, merge_base=base)
+    assert seeds == {}, seeds   # distinct oids, non-generator name: no arm fires

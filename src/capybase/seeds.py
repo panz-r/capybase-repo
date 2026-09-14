@@ -77,21 +77,30 @@ def compute_convergence_seeds(
         if time.monotonic() > deadline:
             break  # keep partial coverage; mechanisms decline on misses
         try:
-            cur = git.blob_at(target_tip, p)
-            src = git.blob_at(source_tip, p)
+            # s27-80: equality via blob OIDs — blob_at's decode-with-replace
+            # is not byte-faithful, and two distinct blobs differing only in
+            # invalid-UTF-8 bytes compared EQUAL as bytes, writing a
+            # corrupted replacement-char file as a "converged final state".
+            # The harness compares rev-parse OIDs; so does the native
+            # registrar now. Bytes are fetched only when a seed needs them.
+            cur_oid = git.blob_oid_at(target_tip, p)
+            src_oid = git.blob_oid_at(source_tip, p)
         except Exception:  # noqa: BLE001 — on-demand fetch / IO trouble
             continue
-        if cur is None and src is None:
+        if cur_oid is None and src_oid is None:
             # TRANSIENT FILE: absent at both tips — born and deleted inside
             # the replay window. Final state is deletion (census 499/499).
             seeds[p] = ""
             continue
-        if cur is None or src is None or cur != src:
+        if cur_oid is None or src_oid is None or cur_oid != src_oid:
             # Generator-output exception: when the sides disagree, the
             # regenerated (source) version wins — 30/30 census.
-            if src is not None and _GEN_OUTPUT.search(p.rsplit("/", 1)[-1]):
-                seeds[p] = src.decode("utf-8", errors="replace")
-        # else: tips agree — the convergence seed IS the shared content.
-        elif cur is not None:
-            seeds[p] = cur.decode("utf-8", errors="replace")
+            if src_oid is not None and _GEN_OUTPUT.search(p.rsplit("/", 1)[-1]):
+                src = git.blob_at(source_tip, p)
+                if src is not None:
+                    seeds[p] = src.decode("utf-8", errors="replace")
+        elif cur_oid is not None:
+            cur = git.blob_at(target_tip, p)
+            if cur is not None:
+                seeds[p] = cur.decode("utf-8", errors="replace")
     return seeds
