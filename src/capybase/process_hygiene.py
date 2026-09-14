@@ -31,7 +31,7 @@ import time
 
 _BUILD_TOOLS = frozenset({
     "make", "gmake", "ccache", "gcc", "g++", "cc1", "cc1plus", "ld",
-    "libtool", "cargo", "rustc", "ninja", "python3",
+    "libtool", "cargo", "rustc", "ninja",
 })
 
 
@@ -65,11 +65,9 @@ def kill_stale_build_processes() -> int:
             cwd = os.readlink(f"/proc/{pid_dir}/cwd")
         except (OSError, ValueError):
             continue
-        # s27-86: strip the kernel's " (deleted)" suffix BEFORE matching —
-        # orphaned build tools have a DELETED cwd (the worktree the harness
-        # removed), and readlink appends this suffix verbatim. Without the
-        # strip, the s27-85 isdir guard inverted the sweep: it SPARED the
-        # orphans (isdir False) and killed processes in LIVE trees instead.
+        # Strip the kernel's " (deleted)" suffix so the cwd prefix match
+        # and the orphan test below see the original path (orphaned build
+        # tools have a DELETED cwd — the worktree the harness removed).
         cwd = str(cwd).replace(" (deleted)", "")
         # s27-85: marker matching on whole ARGV TOKENS, not a substring of
         # the joined cmdline — `bash -c '<text mentioning capy-rw->'` (a

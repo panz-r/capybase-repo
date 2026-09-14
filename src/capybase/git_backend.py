@@ -162,7 +162,9 @@ class GitBackend:
         return self._run_ok(["rev-parse", "HEAD"], what="rev-parse HEAD").strip()
 
     def rebase_progress(self) -> "tuple[int, int] | None":
-        """(msgnum, end) of an in-progress rebase, or None when not rebasing.
+        """(applied, total) of an in-progress rebase, or None when not
+        rebasing. Merge backend: rebase-merge/{msgnum,end}; apply backend:
+        rebase-apply/{next,last}.
 
         A dropped-empty pick CONSUMES its slot without moving HEAD — the
         rebase-merge state files advance where the commit graph does not.

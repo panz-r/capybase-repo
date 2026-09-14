@@ -6,7 +6,6 @@ traceback (stillborn fix #9 in the series).
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import subprocess
