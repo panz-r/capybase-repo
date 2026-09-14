@@ -555,8 +555,16 @@ def _run_calibrate(
         text = _format_report(report, resolved, written=written)
         if written:
             text += f"\nwrote new profile: {written_path}"
+            # s27-93: the activation NAME is the stem minus the
+            # "model_profile." prefix — profile_path_for maps a bare name to
+            # model_profile.<name>.json, and the raw stem (which still
+            # carries the prefix) would expand to a double-prefixed path
+            # that doesn't exist.
+            _name = written_path.stem
+            if _name.startswith("model_profile."):
+                _name = _name[len("model_profile."):]
             text += ("\nactivate: set the provider config's \"profile\" "
-                     f"field to \"{written_path.stem}\"")
+                     f"field to \"{_name}\"")
         if dry_run:
             text += "\n(dry-run: profile not written)"
         elif not report.ok:
