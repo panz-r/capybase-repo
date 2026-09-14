@@ -43,17 +43,11 @@ _SUBDIR = {"tikv": "tikv", "polars": "polars", "cython": "cython",
            "scikit-learn": "scikit-learn", "php": "php-src", "libuv": "libuv",
            "duckdb": "duckdb", "prusaslicer": "prusaslicer"}
 
-# Generator-output basename pattern (S27-57/60; module-scope since s27-71
-# so smoke() asserts the PRODUCTION pattern instead of a diverging inline
-# copy — the copy had already silently kept the pre-s27-67 dead
-# `/generated_` alternative). Census: every corpus match (12 paths,
-# duckdb/cython families incl. two hand-written generated-COLUMN feature
-# tests) is oracle-equal-or-inert — 12/12 benign, s27-71.
-_GEN_OUTPUT = re.compile(
-    r"(compiled_grammar|inlined_grammar|\.pb\.cc|\.pb\.h|"
-    r"\.generated\.|\.tab\.c|\.yy\.c|"
-    r"transform_generated_|_generated\.|generated_)",
-    re.IGNORECASE)
+# Generator-output basename pattern (S27-57/60): the single source of
+# truth moved to capybase.seeds in s27-78 (the native registrar uses the
+# same object); this alias keeps smoke()/tests pinning the production
+# regex. Census: every corpus match (12 paths) is oracle-equal-or-inert.
+from capybase.seeds import _GEN_OUTPUT  # noqa: E402 — src path set above
 
 
 def _is_partial(clone: Path) -> bool:

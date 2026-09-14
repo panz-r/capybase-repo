@@ -6796,6 +6796,29 @@ class Orchestrator:
         )
         return outcome
 
+    def _register_native_convergence_seeds(self) -> None:
+        """Compute the seeds family from THIS rebase's two final states
+        (s27-78): rebase-merge/orig-head is the source tip, onto is the
+        target tip — the same two oids the harness mines. Best-effort
+        armor: any failure leaves the dict empty and the cascade runs.
+        Harness runs pre-register the dict; the registrar then skips
+        (harness precedence, free parity check)."""
+        if getattr(self, "_convergence_seeds", None) is not None:
+            return
+        orig_head = self.git.rebase_orig_head_oid()
+        onto = self.git.rebase_onto_oid()
+        if not orig_head or not onto:
+            return  # apply-backend or exotic rebase — graceful dormancy
+        from capybase.seeds import compute_convergence_seeds
+        seeds = compute_convergence_seeds(
+            self.git, target_tip=onto, source_tip=orig_head,
+            merge_base=self.git.merge_base(onto, orig_head) or onto)
+        self._convergence_seeds = seeds or {}
+        if seeds:
+            self.journal.emit(
+                "native_convergence_seeds", {"paths": len(seeds)},
+                step_index=self.step)
+
     def _try_convergence_seed(
         self, path: str, units: list, result: "StepResult",
     ) -> "tuple[list, str] | None":
@@ -9504,6 +9527,18 @@ class Orchestrator:
         # from the rebase-merge state so the same history features apply.
         if self._history_plan is None:
             self._lazy_build_history_from_rebase_state()
+
+        # Seeds family, orchestrator-native (s27-78): compute the census-
+        # backed convergence/transient/generator seeds from THIS rebase's
+        # two final states. Gated on the same dormancy flag as the
+        # mechanism; a pre-registered dict (the eval harness) wins.
+        if getattr(self.config.future, "enable_convergence_seed", False):
+            try:
+                self._register_native_convergence_seeds()
+            except Exception:  # noqa: BLE001 — seeds are advisory armor
+                self.journal.emit(
+                    "native_seeds_failed", {"phase": "register"},
+                    step_index=self.step)
 
         # Loop over rebase stops until clean or escalated.
         last: StepResult | None = None
