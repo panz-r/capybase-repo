@@ -596,3 +596,14 @@ def test_repair_edits_only_no_full_text_falls_back_to_prev():
     out = _apply_repair_edits(cand, prev)
     assert out.resolved_text == "    return [0, 9]"
     assert out.failure_kind == ""  # not success-shaped-empty; prev is a no-op retry
+
+
+def test_apply_search_replace_skips_empty_search():
+    """s27-77 self-review: an empty SEARCH block with text.find("") == 0
+    PREPENDED the replacement at position 0."""
+    from capybase.resolution_engine import apply_search_replace
+    out, warns = apply_search_replace(
+        "intact body\n",
+        [{"search": "", "replace": "PREPENDED GARBAGE\n"}])
+    assert out == "intact body\n"
+    assert any("empty search" in w for w in warns)

@@ -6805,14 +6805,25 @@ class Orchestrator:
         (harness precedence, free parity check)."""
         if getattr(self, "_convergence_seeds", None) is not None:
             return
-        orig_head = self.git.rebase_orig_head_oid()
-        onto = self.git.rebase_onto_oid()
-        if not orig_head or not onto:
-            return  # apply-backend or exotic rebase — graceful dormancy
         from capybase.seeds import compute_convergence_seeds
-        seeds = compute_convergence_seeds(
-            self.git, target_tip=onto, source_tip=orig_head,
-            merge_base=self.git.merge_base(onto, orig_head) or onto)
+        plan = self._history_plan
+        if plan is not None:
+            # reuse the plan the lazy build just walked — a second
+            # replayed_commit_sequence would redo the per-commit patch-id
+            # walk on every production run
+            paths = {p for c in plan.source_commits
+                     for p in (c.touched_files or ())}
+            seeds = compute_convergence_seeds(
+                self.git, target_tip=plan.target_tip_oid,
+                source_tip=plan.source_tip_oid,
+                merge_base=plan.target_base_oid, paths=paths)
+        else:
+            orig_head = self.git.rebase_orig_head_oid()
+            onto = self.git.rebase_onto_oid()
+            if not orig_head or not onto:
+                return  # apply-backend or exotic rebase — graceful dormancy
+            seeds = compute_convergence_seeds(
+                self.git, target_tip=onto, source_tip=orig_head)
         self._convergence_seeds = seeds or {}
         if seeds:
             self.journal.emit(

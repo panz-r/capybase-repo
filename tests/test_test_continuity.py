@@ -133,3 +133,17 @@ def test_continuity_inert_when_no_tests(repo):
     orch._capture_test_continuity_baseline()
     # Either None (no passing tests parsed) or empty — both mean inert.
     assert not orch._test_continuity_baseline
+
+
+def test_continuity_all_skipped_is_not_a_regression(repo):
+    """s27-77: SKIPPED/XFAIL node lines are NOT decisive — an all-skipped
+    run (rc 0; an importorskip dependency the merge broke) must not flag
+    the whole baseline as regressed on a passing gate."""
+    _repo_with_passing_test(repo)
+    orch = _orch(repo)
+    orch._capture_test_continuity_baseline()
+    postmerge_out = (
+        "tests/test_app.py::test_greet SKIPPED (importorskip broke)\\n"
+        "========================= 1 skipped in 0.1s =========================\\n"
+    )
+    assert orch._test_continuity_regressions(postmerge_out, "pytest -v") == []

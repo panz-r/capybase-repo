@@ -108,6 +108,18 @@ def test_registrar_populates_and_harness_precedence(repo):
     orch._register_native_convergence_seeds()
     assert orch._convergence_seeds == {"harness.txt": "harness"}
 
+    # the PLAN branch: with a history plan present (built from the same
+    # rebase state), the registrar reuses its universe — same seeds, no
+    # second walk
+    orch2 = Orchestrator(_cfg(), repo=str(repo), out=lambda *_a, **_k: None)
+    orch2.journal = _Journal()
+    orch2._history_plan = None
+    orch2._lazy_build_history_from_rebase_state()
+    assert orch2._history_plan is not None, "fixture must yield a plan"
+    orch2._register_native_convergence_seeds()
+    seeds2 = getattr(orch2, "_convergence_seeds", None)
+    assert seeds2 == seeds, (seeds2, seeds)   # identical via either branch
+
 
 def _cfg():
     from capybase.config import Config

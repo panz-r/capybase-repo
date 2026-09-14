@@ -2645,6 +2645,11 @@ def apply_search_replace(
         if search == replace or _norm_ws(search) == _norm_ws(replace):
             warnings.append(f"edit {i}: no-op (search == replace)")
             continue
+        if not search.strip():
+            # s27-76 review residue: an empty/whitespace search with
+            # text.find("") == 0 PREPENDS the replacement at position 0.
+            warnings.append(f"edit {i}: empty search block; skipped")
+            continue
         # Exact substring match (first occurrence).
         idx = text.find(search)
         if idx != -1:

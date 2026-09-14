@@ -41,7 +41,8 @@ def compute_convergence_seeds(
     *,
     target_tip: str,
     source_tip: str,
-    merge_base: str,
+    merge_base: str | None = None,
+    paths: set[str] | None = None,
     budget_seconds: float = 60.0,
 ) -> dict[str, str]:
     """Compute the seed dict for one rebase from its two final states.
@@ -60,19 +61,18 @@ def compute_convergence_seeds(
     Best-effort: any git failure or the wall-clock budget ends the scan
     with whatever was gathered. Returns {} when the refs don't resolve.
     """
-    try:
-        mb = git.merge_base(target_tip, source_tip) or merge_base
-    except Exception:  # noqa: BLE001 — seeds are advisory
-        mb = merge_base
     seeds: dict[str, str] = {}
     deadline = time.monotonic() + budget_seconds
-    try:
-        commits = git.replayed_commit_sequence(mb, source_tip)
-    except Exception:  # noqa: BLE001
-        return seeds
-    paths: set[str] = set()
-    for c in commits:
-        paths.update(c.get("touched_files") or [])
+    if paths is None:
+        # standalone path: derive the universe from the range walk
+        try:
+            mb = git.merge_base(target_tip, source_tip) or merge_base
+            commits = git.replayed_commit_sequence(mb, source_tip)
+        except Exception:  # noqa: BLE001 — seeds are advisory
+            return seeds
+        paths = set()
+        for c in commits:
+            paths.update(c.get("touched_files") or [])
     for p in sorted(paths):
         if time.monotonic() > deadline:
             break  # keep partial coverage; mechanisms decline on misses
