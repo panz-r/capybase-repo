@@ -17,7 +17,6 @@ Usage::
     capybase manual                   # interactive manual resolver, stage (no continue)
     capybase run [--resume ID]        # full auto loop with tests + continue
     capybase calibrate                # probe the model and store a tuned profile
-    capybase recalibrate              # redo calibration, overwriting the stored profile
     capybase --version
 
 Global flags (before the subcommand): --config DIR, --repo, --profile PATH,
@@ -354,11 +353,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--list-tasks",
         action="store_true",
         help="list available task families and their corpus sizes, then exit",
-    )
-
-    sub.add_parser(
-        "recalibrate",
-        help="redo calibration: overwrites the stored profile (alias for calibrate)",
     )
 
     sub.add_parser(
@@ -1114,7 +1108,7 @@ def main(argv: list[str] | None = None) -> int:
     # resolve the provider path instead).
     if args.profile:
         profile_path = args.profile
-    elif args.command in ("calibrate", "recalibrate", "calibrate-embeddings"):
+    elif args.command in ("calibrate", "calibrate-embeddings"):
         from capybase.config import default_config_dir
         _cfg_dir = Path(args.config) if args.config else default_config_dir()
         profile_path = str(_cfg_dir / "model_profile.json")
@@ -1123,8 +1117,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.profile:
         config.calibration.model_profile_path = args.profile
 
-    # calibrate / recalibrate don't need an orchestrator or a git repo session.
-    if args.command in ("calibrate", "recalibrate"):
+    # calibrate doesn't need an orchestrator or a git repo session.
+    if args.command == "calibrate":
         # --list-tasks: print available task families + corpus sizes, then exit.
         if getattr(args, "list_tasks", False):
             from capybase.calibration_corpus import ALL_CONFLICTS_BY_TASK

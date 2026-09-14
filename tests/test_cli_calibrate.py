@@ -208,34 +208,6 @@ def test_calibrate_overwrites_existing_profile(tmp_path: Path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_recalibrate_subcommand_uses_default_profile_path(tmp_path: Path, monkeypatch):
-    """``recalibrate`` is a bare alias for ``calibrate`` with the default path.
-    Verify the CLI routes it through ``_run_calibrate`` and writes the profile.
-
-    The default profile path now lives in the config dir (not the repo), so we
-    point ``--config`` at an isolated dir and assert the profile lands there.
-    """
-    from capybase.cli import main
-
-    cdir = tmp_path / "cfg"
-    cdir.mkdir()
-    # Run from inside a clean repo dir so no repo-local toml interferes.
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    monkeypatch.chdir(repo)
-    monkeypatch.setattr(
-        "capybase.cli._real_client", lambda _cfg: CalibClient(entropy=0.5)
-    )
-    rc = main(["--config", str(cdir), "--repo", str(repo), "recalibrate"])
-    assert rc == 0
-    assert (cdir / "model_profile.json").is_file()
-
-
-# ---------------------------------------------------------------------------
-# global --profile flag (shared by all commands: read + write location)
-# ---------------------------------------------------------------------------
-
-
 def test_global_profile_flag_directs_calibrate_write(tmp_path: Path, monkeypatch):
     """``--profile PATH`` (top-level) tells calibrate WHERE to write, overriding
     the default memory path."""
