@@ -1298,7 +1298,14 @@ def _reconstruct_sides_from_markers(marker_text: str) -> tuple[str, str]:
             _in_cur, _in_rep, _in_base = True, False, False
         elif _mk == "|||||||":
             _in_cur, _in_rep, _in_base = False, False, True
-        elif _mk == "=======":
+        elif _mk == "=======" and (_in_cur or _in_base):
+            # s27-85: the divider is only a divider INSIDE a conflict block
+            # (after the current side, or ending a diff3 base section) — a
+            # shared-context exact-7-underline (RST/Markdown heading) has
+            # both state flags False and stays CONTENT; the old unguarded
+            # form flipped the state machine to "replayed" for the rest of
+            # the file, corrupting both reconstructed sides (the same class
+            # parsers' scanner guards).
             _in_cur, _in_rep, _in_base = False, True, False
         elif _mk == ">>>>>>>":
             _in_cur = _in_rep = _in_base = False
@@ -11145,6 +11152,14 @@ class Orchestrator:
                                     # round may have left it off.
                                     self._f1_tier1_mech.enabled = True
                                     self._f1_tier2_mech.enabled = False
+                                    # s27-85: clear the PREVIOUS file's compile
+                                    # verdicts — the mechanisms hold them as
+                                    # persistent state and Phase A never reset
+                                    # them, so file 1's Phase-B/D probes leaked
+                                    # into file 2's Phase A (a takeover engaged
+                                    # on never-verified-for-this-file sides).
+                                    self._f1_compile_clean_mech.set_compiling_sides(
+                                        {})
                                     try:
                                         _f1_result = _pipe.execute(
                                             Stage.POST_REPAIR_EXHAUSTION,
@@ -11153,7 +11168,15 @@ class Orchestrator:
                                         self._f1_tier2_mech.enabled = True
                                     _f1_text = ""
                                     if (_f1_result is not None
-                                            and _f1_result.action == "takeover"):
+                                            and _f1_result.action == "takeover"
+                                            # s27-85: Phase A accepts ONLY the
+                                            # tier-1 mechanism (tier-2 is
+                                            # latched off; compile-clean/churn
+                                            # consult Phase-B/D verdicts that
+                                            # don't exist for this file yet —
+                                            # every other phase filters on
+                                            # mechanism; Phase A didn't).
+                                            and _f1_result.mechanism == "f1_tier1_takeover"):
                                         _f1_side = _f1_result.metadata.get("side")
                                         _f1_text = _f1_result.resolved_text or ""
                                         # F1-smart (d): the takeover side must
@@ -18130,18 +18153,6 @@ class Orchestrator:
         # The asymmetry takeover needs only the gate winner — the loser is
         # by construction stale. The dup-pathology flow verifies both sides
         # (adjudication chooses between two plausibly-good versions).
-        if asym_winner is not None and asym_winner not in sides:
-            # s27-84: the gate winner was dropped from the pristine sides
-            # (whitespace-only stage blob) — decline the takeover LOUDLY
-            # (the s27-82 version fell through to verifying the surviving
-            # side and returned None anyway, wasting a whole-file build).
-            self.journal.emit(
-                "asymmetry_takeover_declined",
-                {"reason": "gate winner side absent from pristine stages",
-                 "winner": asym_winner},
-                step_index=self.step, path=path,
-            )
-            return None
         if asym_winner is not None and asym_winner not in sides:
             # s27-84: the gate winner was dropped from the pristine sides
             # (whitespace-only stage blob) — decline the takeover LOUDLY

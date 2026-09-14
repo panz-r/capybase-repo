@@ -385,7 +385,7 @@ def _mine_one_merge(
             # s27-84: the replay branch leaked per candidate merge (up to
             # merge_limit refs accumulating in the shared clone).
             try:
-                _git(repo, "branch", "-D", replay_branch, check=False)
+                _git(clone, "branch", "-D", replay_branch, check=False)
             except Exception:  # noqa: BLE001
                 pass
             shutil.rmtree(wt_path, ignore_errors=True)

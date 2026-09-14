@@ -116,13 +116,25 @@ class GitBackend:
             full_env.update(env)
         cmd = ["git", "-C", str(self.repo), *args]
         try:
-            proc = subprocess.run(
-                cmd,
-                input=input_bytes,
-                env=full_env,
-                capture_output=capture,
-                timeout=self.timeout_seconds or None,
-            )
+            if input_bytes is not None:
+                proc = subprocess.run(
+                    cmd,
+                    input=input_bytes,
+                    env=full_env,
+                    capture_output=capture,
+                    timeout=self.timeout_seconds or None,
+                )
+            else:
+                # s27-85: stdin=DEVNULL — a git hook/subcommand that reads
+                # stdin must consume the void, not the orchestrator's
+                # terminal (or hang a non-interactive run).
+                proc = subprocess.run(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    env=full_env,
+                    capture_output=capture,
+                    timeout=self.timeout_seconds or None,
+                )
         except subprocess.TimeoutExpired:
             return GitResult(
                 ok=False, returncode=-1, stdout="", stderr="git command timed out",
@@ -156,21 +168,25 @@ class GitBackend:
         rebase-merge state files advance where the commit graph does not.
         The orchestrator's stuck-guard needs exactly this signal to tell a
         legitimately-dropped pick (progress) from a wedged continue (none).
+
+        s27-85: resolve the state dir via rev-parse --git-path (correct for
+        linked worktrees and relative gitdir pointers, unlike the old
+        hand-rolled .git-file parse) and cover the APPLY backend
+        (rebase-apply/{msgnum,last}) — a user-initiated apply rebase left
+        the stuck-guard silently disabled.
         """
         try:
-            base = Path(self.repo) / ".git"
-            if (base / "rebase-merge").is_dir():
-                git_dir = base
-            else:
-                # a linked worktree: .git is a file pointing at the parent's
-                # worktrees/<name> dir, where rebase-merge actually lives.
-                ptr = (Path(self.repo) / ".git").read_text().strip()
-                git_dir = Path(ptr.split("gitdir:", 1)[1].strip())
-            msgnum = (git_dir / "rebase-merge" / "msgnum")
-            end = (git_dir / "rebase-merge" / "end")
-            if msgnum.is_file() and end.is_file():
-                return (int(msgnum.read_text().strip()),
-                        int(end.read_text().strip()))
+            for state_dir, end_name in (("rebase-merge", "end"),
+                                        ("rebase-apply", "last")):
+                p_res = self._run(["rev-parse", "--git-path", state_dir])
+                if not p_res.ok or not p_res.stdout.strip():
+                    continue
+                sdir = Path(self.repo) / p_res.stdout.strip()
+                msgnum = sdir / "msgnum"
+                end_f = sdir / end_name
+                if msgnum.is_file() and end_f.is_file():
+                    return (int(msgnum.read_text().strip()),
+                            int(end_f.read_text().strip()))
         except Exception:  # noqa: BLE001 — diagnostic signal, never fatal
             pass
         return None
@@ -340,8 +356,15 @@ class GitBackend:
         import time
 
         slug = _branch_slug(label)
-        ts = time.strftime("%Y%m%d-%H%M%S")
-        ref = f"{self.BACKUP_NAMESPACE}/{slug}@{ts}"
+        base_ts = time.strftime("%Y%m%d-%H%M%S")
+        # s27-85: probe for a free ref — same-second retries on the same
+        # branch silently REPOINTED the earlier backup (update-ref
+        # overwrites), losing the safety net.
+        ref = f"{self.BACKUP_NAMESPACE}/{slug}@{base_ts}"
+        n = 1
+        while self._run(["rev-parse", "--verify", "--quiet", ref]).ok:
+            n += 1
+            ref = f"{self.BACKUP_NAMESPACE}/{slug}@{base_ts}-{n}"
         self._run_ok(["update-ref", ref, source_oid], what=f"create backup {ref}")
         return ref
 
@@ -961,8 +984,16 @@ class GitBackend:
         return any(True for _ in self._iter_unmerged_quick())
 
     def _iter_unmerged_quick(self):
-        out = self._run(["ls-files", "-u", "-z"]).stdout
-        for record in out.split("\0"):
+        # s27-85: FAIL CLOSED — a git failure (index.lock, ENOSPC) used to
+        # yield stdout "" = "no unmerged paths", silently skipping the
+        # unmerged-remain escalation guard and declaring the interactive
+        # fallback resolved. Check the return code and raise.
+        res = self._run(["ls-files", "-u", "-z"])
+        if not res.ok:
+            raise GitError(
+                f"ls-files -u failed (rc={res.returncode}): "
+                f"{res.stderr.strip()[:120]}")
+        for record in res.stdout.split("\0"):
             if record.strip():
                 yield record
 

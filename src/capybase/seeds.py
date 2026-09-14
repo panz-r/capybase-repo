@@ -99,10 +99,28 @@ def compute_convergence_seeds(
             # regenerated (source) version wins — 30/30 census.
             if src_oid is not None and _GEN_OUTPUT.search(p.rsplit("/", 1)[-1]):
                 src = git.blob_at(source_tip, p)
-                if src is not None:
-                    seeds[p] = src.decode("utf-8", errors="replace")
+                if src is None:
+                    continue
+                try:
+                    src.decode("utf-8")
+                except UnicodeDecodeError:
+                    # s27-85: non-UTF-8 generator output — same skip
+                    # rationale as the convergence arm above.
+                    continue
+                seeds[p] = src.decode("utf-8", errors="replace")
         elif cur_oid is not None:
             cur = git.blob_at(target_tip, p)
-            if cur is not None:
-                seeds[p] = cur.decode("utf-8", errors="replace")
+            if cur is None:
+                continue
+            try:
+                cur.decode("utf-8")
+            except UnicodeDecodeError:
+                # s27-85: a non-UTF-8 converged blob (generated/compiled
+                # content) would be written lossily through the text
+                # pipeline (errors="replace" mangles bytes -> the
+                # "converged final state" is a mangled file). Skip — the
+                # file doesn't conflict textually, so the cascade or the
+                # byte-faithful checkout handles it.
+                continue
+            seeds[p] = cur.decode("utf-8", errors="replace")
     return seeds

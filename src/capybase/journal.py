@@ -100,10 +100,18 @@ class Journal:
     def write_artifact(self, subdir: Path, name: str, data: bytes | str) -> Path:
         subdir.mkdir(parents=True, exist_ok=True)
         target = subdir / name
+        # s27-85: atomic (tmp + rename) — a crash mid-write left torn
+        # artifacts, sharpest on store_gate_buffer whose whole purpose is
+        # crash forensics ("every gate stall was undebuggable past that
+        # point" — a torn gate buffer on the crash it captures is the lost
+        # evidence).
+        import os as _os
+        tmp = target.with_suffix(target.suffix + ".tmp")
         if isinstance(data, str):
-            target.write_text(data, encoding="utf-8")
+            tmp.write_text(data, encoding="utf-8")
         else:
-            target.write_bytes(data)
+            tmp.write_bytes(data)
+        _os.replace(tmp, target)
         return target
 
     def store_prompt(self, unit_id: str, attempt: int, text: str) -> Path:

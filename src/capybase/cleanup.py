@@ -69,7 +69,8 @@ def _dir_size(path: Path) -> int:
 #: escalation cleanup removes the branch; a reboot wipes the temp dir;
 #: the admin entry always survives) — matching on ANY signal is what
 #: makes crashed-run cleanup safe and complete.
-OWNED_ADMIN_PREFIXES = ("capybase-candidate-", "capybase-dryrun-")
+OWNED_ADMIN_PREFIXES = ("capybase-candidate-", "capybase-dryrun-",
+                        "capybase-futureprobe-")
 
 
 @dataclass
@@ -149,7 +150,11 @@ def _owned_worktrees(git: GitBackend, repo: Path) -> list[str]:
             return True
         if admin_name.startswith(OWNED_ADMIN_PREFIXES):
             return True
-        return any(p in wt_path for p in OWNED_ADMIN_PREFIXES)
+        # s27-85: prefix at a PATH-SEGMENT boundary — the substring check
+        # force-removed a user worktree at e.g.
+        # /home/x/capybase-candidate-experiment.
+        normalized = wt_path.replace("\\", "/") + "/"
+        return any(f"/{p}" in normalized for p in OWNED_ADMIN_PREFIXES)
 
     # Signal 1: live branches via worktree list.
     out = git._run_ok(["worktree", "list", "--porcelain"],

@@ -483,7 +483,8 @@ class EmbeddingRetriever:
         ]
 
     def retrieve(
-        self, query: str, *, k: int = 3, language: str | None = None
+        self, query: str, *, k: int = 3, language: str | None = None,
+        path: str | None = None,
     ) -> list[HistoricalExample]:
         """Return the top-k semantically-similar past merges for ``query``.
 
@@ -732,7 +733,10 @@ class HybridRetriever:
         """
         # Prefer the lexical retriever's explained view (it has the metadata),
         # but honor the hybrid's fused ordering by re-scoring against fusion.
-        scored = self.retrieve_scored(query, k=k, language=language)
+        # s27-85: thread `path` — the same-path boost was dropped here, and
+        # this is the path production actually takes (context_builder
+        # prefers retrieve_explained).
+        scored = self.retrieve_scored(query, k=k, language=language, path=path)
         # Reuse the lexical retriever to build explanations from metadata.
         try:
             lex_explained = dict(

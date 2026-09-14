@@ -119,6 +119,17 @@ class run_lock_guard:
         self.repo = repo
 
     def __enter__(self) -> "run_lock_guard":
+        # s27-85: refuse a LIVE lock — write_lock overwrites unconditionally
+        # (stale-lock recovery), so a second run on the same repo silently
+        # stole the first's liveness beacon and `clean` would then see no
+        # live run mid-rebase. Dead/stale locks are still overwritten.
+        live = live_lock(self.repo)
+        if live is not None:
+            raise RuntimeError(
+                f"another capybase run is live on this repo "
+                f"(pid {live.get('pid')}, started {live.get('started', '?')}). "
+                f"Refusing to start. Delete {lock_path(self.repo)} only if "
+                f"that process is really gone.")
         write_lock(self.repo)
         return self
 

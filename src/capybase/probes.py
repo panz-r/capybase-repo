@@ -1492,9 +1492,13 @@ def probe_two_phase(
                             f"existing beats best-so-far ({existing_score.n_correct}/"
                             f"{existing_score.total} correct); keeping it"
                         )
-            else:
-                # Baseline unavailable: adopt best-so-far iff it has positive
-                # correctness; else keep existing.
+            elif not interrupted:
+                # Baseline unavailable (eval-failure path): adopt best-so-far
+                # iff it has positive correctness; else keep existing.
+                # s27-85: `not interrupted` — an interrupt-during-baseline
+                # already decided via the majority rule above; falling
+                # through here re-adopted on n_correct > 0 (the s27-84
+                # unification was stillborn).
                 if best_score.n_correct > 0:
                     decoded_kwargs, best_profile = _decode_point(best_point)
                     best_cfg_kwargs.update(decoded_kwargs)
