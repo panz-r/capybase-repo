@@ -87,7 +87,9 @@ def _load_json(path: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_calibrate_writes_profile_and_returns_zero(tmp_path: Path):
+def test_calibrate_writes_new_unique_profile(tmp_path: Path):
+    """s27-92: calibrate writes a NEW, UNIQUE profile and never overwrites
+    an existing one — activation is an explicit separate step."""
     client = CalibClient(truncate_below=8192, entropy=0.5)
     profile_path = tmp_path / "model_profile.json"
     rc = _run_calibrate(
@@ -98,8 +100,10 @@ def test_calibrate_writes_profile_and_returns_zero(tmp_path: Path):
         out=io.StringIO(),
     )
     assert rc == 0
-    assert profile_path.is_file()
-    data = _load_json(profile_path)
+    assert not profile_path.exists(), "the active path must stay untouched"
+    written = sorted(tmp_path.glob("model_profile.*.json"))
+    assert len(written) == 1, written
+    data = _load_json(written[0])
     assert data["model"] == "vibethink"
     assert data["max_tokens"] == 16384  # 8192 first success -> 1.5x headroom -> snap to 16384
     assert data["capture_token_entropy"] is True
@@ -118,7 +122,8 @@ def test_calibrate_profile_path_resolves_relative_to_repo(tmp_path: Path):
         out=io.StringIO(),
     )
     assert rc == 0
-    assert (repo / DEFAULT_PROFILE_PATH).is_file()
+    written = sorted(repo.glob(str(Path(DEFAULT_PROFILE_PATH).parent) + "/model_profile*.json"))
+    assert len(written) == 1, written
 
 
 def test_calibrate_dry_run_does_not_write(tmp_path: Path):
@@ -177,8 +182,9 @@ def test_calibrate_unreachable_returns_one_and_does_not_write(tmp_path: Path):
     assert "unreachable" in out.getvalue().lower()
 
 
-def test_calibrate_overwrites_existing_profile(tmp_path: Path, monkeypatch):
-    # First calibration writes a profile.
+def test_calibrate_never_overwrites_writes_new_unique(tmp_path: Path):
+    """s27-92: each calibrate writes its OWN unique profile; the previous
+    one stays byte-identical (nothing overwrites an existing profile)."""
     profile_path = tmp_path / "model_profile.json"
     _run_calibrate(
         Config(),
@@ -187,10 +193,10 @@ def test_calibrate_overwrites_existing_profile(tmp_path: Path, monkeypatch):
         client_factory=_factory(CalibClient(entropy=0.5)),
         out=io.StringIO(),
     )
-    first = _load_json(profile_path)
-    assert first["max_tokens"] == 2048  # 1024 first success -> 1.5x headroom -> snap to 2048
+    first_files = sorted(tmp_path.glob("model_profile*.json"))
+    assert len(first_files) == 1
+    first_bytes = first_files[0].read_bytes()
 
-    # A model that needs more tokens → recalibrate overwrites the same file.
     _run_calibrate(
         Config(),
         repo=str(tmp_path),
@@ -198,9 +204,10 @@ def test_calibrate_overwrites_existing_profile(tmp_path: Path, monkeypatch):
         client_factory=_factory(CalibClient(truncate_below=16384, entropy=0.5)),
         out=io.StringIO(),
     )
-    second = _load_json(profile_path)
-    assert second["max_tokens"] == 32768  # 16384 first success -> 1.5x -> snap to 32768
-    assert first["probed_at"] != second["probed_at"] or first["max_tokens"] != second["max_tokens"]
+    second_files = sorted(tmp_path.glob("model_profile*.json"))
+    assert len(second_files) == 2, second_files
+    untouched = [f for f in second_files if f.read_bytes() == first_bytes]
+    assert len(untouched) == 1, "the first profile must stay byte-identical"
 
 
 # ---------------------------------------------------------------------------
@@ -218,9 +225,10 @@ def test_global_profile_flag_directs_calibrate_write(tmp_path: Path, monkeypatch
     monkeypatch.setattr("capybase.cli._real_client", lambda _cfg: CalibClient(entropy=0.5))
     rc = main(["--repo", str(tmp_path), "--profile", str(custom), "calibrate"])
     assert rc == 0
-    # Written to the EXPLICIT path, not the default.
-    assert custom.is_file()
-    assert not (tmp_path / DEFAULT_PROFILE_PATH).is_file()
+    # Written BESIDE the explicit path with a unique name — never at (or
+    # over) the explicit path itself.
+    written = sorted(custom.parent.glob(custom.stem + ".*.json"))
+    assert written and not custom.exists(), (written, custom)
 
 
 def test_global_profile_flag_default_unchanged(tmp_path: Path, monkeypatch):
@@ -235,7 +243,11 @@ def test_global_profile_flag_default_unchanged(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("capybase.cli._real_client", lambda _cfg: CalibClient(entropy=0.5))
     rc = main(["--config", str(cdir), "--repo", str(repo), "calibrate"])
     assert rc == 0
-    assert (cdir / "model_profile.json").is_file()
+    # s27-92: a unique new file per run — the active model_profile.json is
+    # never created/touched by calibrate.
+    written = sorted(cdir.glob("model_profile.*.json"))
+    assert len(written) == 1, written
+    assert not (cdir / "model_profile.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -287,10 +299,14 @@ def test_calibrate_preserves_embeddings_floor_across_retune(tmp_path: Path):
         out=io.StringIO(),
     )
     assert rc == 0
-    data = _load_json(profile_path)
-    # LLM knobs freshly re-tuned...
-    assert data["max_tokens"] == 2048  # 1024 first success -> 1.5x -> snap 2048
-    # ...but the embeddings floor + envelope carried over intact.
+    # s27-92: the run writes a NEW unique profile beside the seeded one —
+    # the seeded active profile must stay byte-identical...
+    active = _load_json(profile_path)
+    assert active["embedding_min_similarity"] == 0.71
+    # ...and the WRITTEN profile carries the floor + envelope intact.
+    written = sorted(tmp_path.glob("model_profile.*.json"))
+    assert len(written) == 1, written
+    data = _load_json(written[0])
     assert data["embedding_min_similarity"] == 0.71
     assert data["embedding_calibration"]["min_similarity"] == 0.71
     assert data["embedding_calibration"]["estimates"]["quantile_gap"] == 0.71
@@ -312,10 +328,14 @@ def test_calibrate_drops_embeddings_floor_on_model_swap(tmp_path: Path):
         out=io.StringIO(),
     )
     assert rc == 0
-    data = _load_json(profile_path)
+    written = sorted(tmp_path.glob("model_profile.*.json"))
+    assert len(written) == 1, written
+    data = _load_json(written[0])
     assert data["model"] == "new-model"
     assert data["embedding_min_similarity"] == 0.35  # default, not carried over
     assert data["embedding_calibration"] == {}
+    # the seeded active profile stays untouched
+    assert _load_json(profile_path)["model"] == "old-model"
 
 
 def test_calibrate_preserves_floor_first_run_has_default(tmp_path: Path):
@@ -330,6 +350,8 @@ def test_calibrate_preserves_floor_first_run_has_default(tmp_path: Path):
         out=io.StringIO(),
     )
     assert rc == 0
-    data = _load_json(profile_path)
+    written = sorted(tmp_path.glob("model_profile.*.json"))
+    assert len(written) == 1, written
+    data = _load_json(written[0])
     assert data["embedding_min_similarity"] == 0.35
     assert data["embedding_calibration"] == {}

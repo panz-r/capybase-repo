@@ -447,6 +447,26 @@ def _format_report(report, profile_path: Path, *, written: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _unique_profile_path(resolved: str | Path) -> Path:
+    """A NEW unique destination for a calibration result (s27-92).
+
+    Nothing overwrites an existing profile: every calibrate writes its own
+    file — ``<stem>.<YYYYmmdd-HHMMSS>-<id>.json`` beside the resolved path —
+    probed for a free name. Activation is then an explicit act (point the
+    provider config's ``profile`` field at the written file's name).
+    """
+    import time as _t
+    from uuid import uuid4 as _u4
+
+    p = Path(resolved)
+    suffix = p.suffix or ".json"
+    while True:
+        cand = p.with_name(
+            f"{p.stem}.{_t.strftime('%Y%m%d-%H%M%S')}-{_u4().hex[:6]}{suffix}")
+        if not cand.exists():
+            return cand
+
+
 def _run_calibrate(
     config: Config,
     repo: str,
@@ -517,8 +537,12 @@ def _run_calibrate(
             report.profile.embedding_min_similarity = prior.embedding_min_similarity
             report.profile.embedding_calibration = prior.embedding_calibration
             report.profile.fusion_method = prior.fusion_method
-        report.profile.save(resolved)
+        # s27-92: write a NEW, UNIQUE profile — nothing overwrites an
+        # existing profile. The written path is the activation target.
+        out_path = _unique_profile_path(resolved)
+        report.profile.save(out_path)
         written = True
+        written_path = out_path
 
     if json_output:
         import json
@@ -529,6 +553,10 @@ def _run_calibrate(
         print(json.dumps(payload, indent=2), file=out)
     else:
         text = _format_report(report, resolved, written=written)
+        if written:
+            text += f"\nwrote new profile: {written_path}"
+            text += ("\nactivate: set the provider config's \"profile\" "
+                     f"field to \"{written_path.stem}\"")
         if dry_run:
             text += "\n(dry-run: profile not written)"
         elif not report.ok:
