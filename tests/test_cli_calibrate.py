@@ -1,4 +1,4 @@
-"""Tests for the ``capybase calibrate`` / ``recalibrate`` CLI commands.
+"""Tests for the ``capybase calibrate`` CLI commands.
 
 These exercise the CLI wiring via the ``_run_calibrate`` seam (which accepts an
 injectable ``client_factory``) so no network is needed. The probe logic itself
@@ -211,7 +211,7 @@ def test_calibrate_never_overwrites_writes_new_unique(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# recalibrate subcommand wiring (just argparse → _run_calibrate)
+# calibrate subcommand wiring (just argparse → _run_calibrate)
 # ---------------------------------------------------------------------------
 
 

@@ -95,7 +95,7 @@ completion_reserve = 1024
 # diverse_sampling, enable_self_consistency, samples) — when the model name
 # matches. The mechanism choices are picked empirically by resolving a small
 # corpus of known-correct merges under each strategy on vs off. `capybase
-# recalibrate` redoes it (slow: runs the corpus many times); `--dry-run` is a
+# calibrate` redoes it (slow: runs the corpus many times); `--dry-run` is a
 # fast capabilities-only check. Delete the file to revert to the values here.
 # All mechanisms default off (samples = 1) until calibration turns one on.
 
@@ -297,7 +297,7 @@ min_examples_for_retrieval = 3
 [calibration]
 enabled = false
 model_path = ".rebase-agent/memory/calibration.json"
-# Model capability profile written by `capybase calibrate` / `recalibrate`.
+# Model capability profile written by `capybase calibrate`.
 # When its model name matches [model] model, its tuned knobs override the [model]
 # settings at runtime ("Profile wins"). Absent/mismatched/corrupt = no-op.
 # The default path (".rebase-agent/memory/model_profile.json") is a sentinel:

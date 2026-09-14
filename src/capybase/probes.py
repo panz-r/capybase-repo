@@ -1209,7 +1209,7 @@ def probe_two_phase(
 
     Below ``_MIN_CORPUS_FOR_MECHANISM_SELECTION`` the probe refuses and returns
     the existing choices/profile (or defaults), preserving a hand-tuned config
-    through a recalibrate on a small corpus.
+    through a calibrate on a small corpus.
 
     ``run_phase2=False`` runs only Epoch 1 (screening) and reports the factor
     ranking without adopting — useful on slow models to read which dimensions
@@ -1651,10 +1651,6 @@ def run_calibration(
     ranking without committing to a Phase-2 selection (keeps existing config) —
     useful on slow models to read which dimensions matter before paying for
     refinement.
-
-    ``existing_profile``: when the sweep is SKIPPED, its choices are seeded from
-    this prior profile (when its model matches) so a partial recalibrate
-    preserves the known settings rather than silently resetting them.
 
     ``model_cfg`` is the active config (its ``model``/``base_url``/``api_key``
     identify the target). The returned profile's ``model`` is taken from

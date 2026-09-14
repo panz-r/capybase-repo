@@ -276,7 +276,9 @@ def test_apply_profile_model_mismatch_is_ignored_and_warns():
         new_cfg, overridden = apply_profile(cfg, profile)
     assert new_cfg.max_tokens == cfg.max_tokens  # unchanged
     assert overridden == []
-    assert any("recalibrate" in str(w.message) for w in caught)
+    # s27-93: the stale advice says `capybase recalibrate` — the command is
+    # gone; the honest pointer is `capybase calibrate`.
+    assert any("capybase calibrate" in str(w.message) for w in caught)
 
 
 def test_apply_profile_reports_only_changed_knobs():

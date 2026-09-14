@@ -11,7 +11,7 @@ Design contract (``Profile wins``):
 - A stored profile **overrides** the corresponding ``ModelConfig`` knobs at
   runtime — but ONLY when its ``model`` name matches the active config's model.
 - A name mismatch means the profile was fit for a different model and is
-  ignored: the user is expected to ``capybase recalibrate`` for the new one.
+  ignored: the user is expected to ``capybase calibrate`` for the new one.
 - The overlay is reversible: deleting the profile file restores pure-TOML
   behavior. Missing or corrupt profiles are a no-op (never crash resolution).
 - The overlay touches only the tuned knobs; every other ``ModelConfig`` field
@@ -430,7 +430,7 @@ class ModelProfile:
         # output). STRICT (user directive): an INVALID section fails the
         # load with the underlying message — never a silent default. A
         # MISSING section is a legacy profile: it also fails, naming the
-        # fix (recalibrate) — the profile is the required calibration and
+        # fix (calibrate) — the profile is the required calibration and
         # must be complete.
         raw_prompt = d.get("prompt")
         if not isinstance(raw_prompt, dict):
@@ -468,7 +468,7 @@ class ModelProfile:
         if probs:
             warnings.warn(
                 f"Model profile for {profile.model!r} is invalid and will be "
-                f"ignored ({'; '.join(probs)}); run `capybase recalibrate`.",
+                f"ignored ({'; '.join(probs)}); run `capybase calibrate`.",
                 stacklevel=2,
             )
             return None
@@ -552,7 +552,7 @@ def apply_profile(
 
     "Profile wins" — but ONLY when ``profile.model`` matches ``model_cfg.model``.
     On a name mismatch the profile is ignored (it was fit for a different model)
-    and a warning is emitted so the user knows to ``capybase recalibrate``.
+    and a warning is emitted so the user knows to ``capybase calibrate``.
 
     ``force=True`` disables the name-match gate: the caller selected this
     profile EXPLICITLY (a provider config's ``profile`` field), which is the
@@ -572,7 +572,7 @@ def apply_profile(
             warnings.warn(
                 f"Model profile is for {profile.model!r} but active model is "
                 f"{model_cfg.model!r}; ignoring the profile. Run "
-                f"`capybase recalibrate` to fit it for the current model.",
+                f"`capybase calibrate` to fit it for the current model.",
                 stacklevel=2,
             )
             return model_cfg, []

@@ -467,6 +467,26 @@ def _unique_profile_path(resolved: str | Path) -> Path:
             return cand
 
 
+def _unique_profile_path(resolved: str | Path) -> Path:
+    """A NEW unique destination for a calibration result (s27-92).
+
+    Nothing overwrites an existing profile: every calibrate writes its own
+    file — ``<stem>.<YYYYmmdd-HHMMSS>-<id>.json`` beside the resolved path —
+    probed for a free name. Activation is then an explicit act (point the
+    provider config's ``profile`` field at the written file's name).
+    """
+    import time as _t
+    from uuid import uuid4 as _u4
+
+    p = Path(resolved)
+    suffix = p.suffix or ".json"
+    while True:
+        cand = p.with_name(
+            f"{p.stem}.{_t.strftime('%Y%m%d-%H%M%S')}-{_u4().hex[:6]}{suffix}")
+        if not cand.exists():
+            return cand
+
+
 def _run_calibrate(
     config: Config,
     repo: str,
@@ -550,9 +570,17 @@ def _run_calibrate(
         payload = report.profile.to_dict()
         payload["_written"] = written
         payload["_ok"] = report.ok
+        # s27-94: surface the ACTUAL written path + activation name — the
+        # operator (or a wrapper) needs them to point the provider config
+        # at the new profile.
+        payload["_written_path"] = str(written_path) if written else None
+        payload["_activation_name"] = (
+            written_path.stem.removeprefix("model_profile.")
+            if written else None)
         print(json.dumps(payload, indent=2), file=out)
     else:
-        text = _format_report(report, resolved, written=written)
+        text = _format_report(report, written_path if written else resolved,
+                              written=written)
         if written:
             text += f"\nwrote new profile: {written_path}"
             # s27-93: the activation NAME is the stem minus the
