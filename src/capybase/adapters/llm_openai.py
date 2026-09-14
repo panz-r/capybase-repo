@@ -499,7 +499,18 @@ class OpenAICompatibleClient:
                     # Early termination: as soon as a complete fenced JSON
                     # answer is present, stop reading. Closing the response
                     # context manager aborts the underlying connection.
-                    if _has_complete_answer("".join(content_parts)):
+                    accumulated = "".join(content_parts)
+                    if _has_complete_answer(accumulated):
+                        early_stop = True
+                        break
+                    # s27-83: the markdown_code layout's answer is a code
+                    # fence + a metadata object (no resolved_text key) — the
+                    # resolved_text-only check never fired, so every
+                    # md-layout stream was read to [DONE]. A CLOSED json
+                    # fence whose body parses to a metadata-like object
+                    # (explanation present) means the answer is complete.
+                    if "```" in accumulated and _md_metadata_complete(
+                            accumulated):
                         early_stop = True
                         break
         except socket.timeout as exc:
@@ -561,6 +572,29 @@ def _mean_token_entropy_from_logprobs(entries: list[Any]) -> float | None:
     if not nlls:
         return None
     return sum(nlls) / len(nlls)
+
+
+def _md_metadata_complete(accumulated: str) -> bool:
+    """True when a CLOSED ```json fence strict-parses to a metadata-like
+    object (an ``explanation`` key) — the markdown_code layout's completion
+    signal (s27-83: the resolved_text-only early-stop never fired under
+    that layout, so every md stream was read to [DONE]).
+
+    STRICT parse only — no repair on partial streaming text (the same
+    discipline as _has_complete_answer)."""
+    import json as _json
+    idx = accumulated.rfind("```json")
+    if idx < 0:
+        return False
+    rest = accumulated[idx + len("```json"):]
+    end = rest.find("```")
+    if end < 0:
+        return False  # fence not closed — still streaming
+    try:
+        data = _json.loads(rest[:end].strip())
+    except ValueError:
+        return False
+    return isinstance(data, dict) and "explanation" in data
 
 
 def _has_complete_answer(accumulated: str) -> bool:

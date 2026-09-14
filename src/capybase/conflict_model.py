@@ -178,14 +178,17 @@ class TokenBudget(BaseModel):
 
 
 def estimate_tokens(text: str) -> int:
-    """Rough token estimate: ~4 chars/token, minimum 1 for any non-empty text.
+    """Rough token estimate, minimum 1 for any non-empty text.
 
-    A conservative heuristic (real tokenizers vary 3-4 chars/token by language).
-    Erring slightly high means we trim a touch more than strictly necessary,
-    which is the safe direction (an over-long prompt truncates silently on the
-    server side; a slightly-trimmed prompt just loses a little augmentation).
+    A conservative heuristic. Real tokenizers run 3-4 chars/token by
+    language, and CODE sits at the low end — the old //4 measured 15-25%
+    UNDER for source text, so budgets silently overfilled and server-side
+    truncation hit the output contract. //3 errs high instead: we trim a
+    touch more than strictly necessary, which is the safe direction (an
+    over-long prompt truncates silently on the server side; a
+    slightly-trimmed prompt just loses a little augmentation). s27-83.
     """
-    return max(1, len(text) // 4) if text else 0
+    return max(1, len(text) // 3) if text else 0
 
 
 class ContextBundle(BaseModel):

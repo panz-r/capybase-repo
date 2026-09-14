@@ -23,7 +23,9 @@ def test_estimate_tokens_empty_is_zero():
 
 
 def test_estimate_tokens_roughly_four_chars_per_token():
-    assert estimate_tokens("a" * 100) == 25
+    # s27-83: //3 — the //4 heuristic measured 15-25% UNDER for code, so
+    # budgets silently overfilled; the conservative direction errs high.
+    assert estimate_tokens("a" * 100) == 33
     assert estimate_tokens("abcd") == 1
 
 

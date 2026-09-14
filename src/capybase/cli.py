@@ -345,7 +345,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FAMILY",
         help="calibrate a specific task family (config_merge, test_port, "
              "merge_conflict_resolution). The winning profile is stored as a "
-             "task-specific override rather than the global default",
+             "calibrate on a task-filtered corpus subset; the winning profile is\n"
+             "still stored as the ONE global model_profile.json (no per-task\n"
+             "override exists at runtime)",
     )
     cal_p.add_argument(
         "--list-tasks",

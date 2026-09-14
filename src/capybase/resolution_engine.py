@@ -671,16 +671,21 @@ def _function_local_context(unit: ConflictUnit) -> str:
     # (ident followed by ( and then {).
     brace_depth = 0
     func_sig_line = None
-    # Count braces from the conflict start backward to find depth-0
+    # Count braces from the conflict start backward to find depth-0.
+    # s27-83: walking BACKWARD, an opening brace EXITS a scope (depth -1)
+    # and a closing brace ENTERS one (depth +1) — the old inverted signs
+    # skipped the function's own K&R opening line and tunneled into the
+    # PREVIOUS function's signature (runtime-confirmed garbling:
+    # "void g(void) { int a; } void f(int x) {").
     for i in range(conflict_start - 1, -1, -1):
         line = lines[i] if i < len(lines) else ""
         # Count braces in this line (rough — strings masked by stripping)
         stripped = line
         for ch in stripped:
             if ch == '{':
-                brace_depth += 1
-            elif ch == '}':
                 brace_depth -= 1
+            elif ch == '}':
+                brace_depth += 1
         if brace_depth <= 0:
             # We're at or above depth 0 — this might be the function signature
             # or a line before it. Check if this line or a nearby line looks
@@ -1596,7 +1601,6 @@ def _resolve_prompt_parts(
     # Shape-specific strategic hint: a 1-2 sentence nudge for the hardest
     # conflict shapes (refactor-vs-lint, rewrite-vs-edit). Advisory only —
     # doesn't change the contract or validation.
-    shape_hint = _shape_hint_block(unit)
     # 3-way structural context annotation (Improvement #6): aligns the file's
     # structural units across base/left/right and renders a compact summary —
     # which units each side changed, whether there are structural conflicts,
@@ -1637,8 +1641,12 @@ def _resolve_prompt_parts(
         _sides = _base_block + _cur_block + _rep_block
     else:
         _sides = _cur_block + _rep_block + _base_block
+    # s27-83: `_shape_hint_block` was folded here for budget accounting but
+    # never rendered into data_block (born dead, b9fb65b) — it inflated the
+    # never-trimmed "essential" estimate with text the model never saw.
+    # Removed; re-add BEHIND the hint block's render if ever wanted.
     sides_text = (
-        f"{struct_ctx}{side_intent}{shape_hint}{semantic_change}{value_resolution}{_sides}"
+        f"{struct_ctx}{side_intent}{semantic_change}{value_resolution}{_sides}"
     )
     anchor_t, siblings_t, deps_t, few_shot_t, primary_t, history_t, obls_t, trims, skeleton_block = _fit_to_budget(
         budget=budget,
@@ -2497,17 +2505,26 @@ def _render_repair_output(profile: PromptProfile) -> str:
             "Fix the specific errors, keeping all parts that were correct. Output the code "
             "block first, then the json block; nothing after the json block."
         )
+    # s27-83: align with the resolve path's json_v6 contract — the old arm
+    # never mentioned the ```json fence, omitted the escape rule (the top
+    # small-model failure the pre-processor exists to patch), and had no
+    # "nothing after" terminator (leading prose then hit the parser's
+    # whole-response repair tier).
     return (
         "OUTPUT: emit the COMPLETE corrected replacement text (not a search/replace patch\n"
         "— small models are unreliable at exact substring matching). Fix the specific\n"
         "errors, keeping all parts that were correct.\n"
+        "```json\n"
         "{\n"
         '  "plan": "<one sentence per failure: why + the fix>",\n'
         '  "resolved_text": "<the full fixed replacement text, exact indentation>",\n'
         '  "explanation": "<what you changed and why>",\n'
         '  "suspected_validator_error": false,\n'
         '  "self_reported_confidence": 0.0\n'
-        "}"
+        "}\n"
+        "```\n"
+        "Escape newlines as \\n and double quotes as \\\" inside resolved_text.\n"
+        "Output nothing after the closing fence."
     )
 
 
@@ -4318,6 +4335,16 @@ def build_shattered_repair_prompt(
     cand_text = candidate.resolved_text or ""
     lines = cand_text.split("\n")
     # Locate the first error line from the failures (file:line:col).
+    # s27-83 (three arithmetic fixes):
+    # - the parsed line is in SPLLED-FILE coordinates (compile runs on the
+    #   splice); clamp it into the candidate's own line range instead of
+    #   indexing past it (a file line 500 error on a 30-line candidate made
+    #   the window `range(496, 30)` — an EMPTY snippet);
+    # - 1-based -> 0-based conversion means err_line can be 0; the old
+    #   `err_line or ...` falsy-check mis-centered the window on the middle;
+    # - when no message carries a line, the error text now falls back to
+    #   failures[0].message (the old guard `if err_msg and not err_line`
+    #   was dead for exactly that case).
     err_line = None
     err_msg = ""
     for f in failures:
@@ -4326,11 +4353,13 @@ def build_shattered_repair_prompt(
             err_line = int(m.group(1)) - 1
             err_msg = f.message
             break
-    if err_msg and not err_line:
-        err_msg = failures[0].message if failures else "validation failed"
+    if not err_msg and failures:
+        err_msg = failures[0].message
+    err_line = max(0, min(err_line if err_line is not None
+                          else len(lines) // 2, len(lines) - 1))
     window = 8
-    lo = max(0, (err_line or len(lines) // 2) - window)
-    hi = min(len(lines), (err_line or len(lines) // 2) + window + 1)
+    lo = max(0, err_line - window)
+    hi = min(len(lines), err_line + window + 1)
     snippet = "\n".join(f"{i + 1:5d}| {lines[i]}" for i in range(lo, hi))
     # Audit-2 V3: branch the output instruction on the profile's layout (this
     # path previously hardcoded the v6 JSON schema under every profile).
