@@ -346,8 +346,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="calibrate a specific task family (config_merge, test_port, "
              "merge_conflict_resolution). The winning profile is stored as a "
              "calibrate on a task-filtered corpus subset; the winning profile is\n"
-             "still stored as the ONE global model_profile.json (no per-task\n"
-             "override exists at runtime)",
+             "writes a NEW unique model_profile.<id>.json; the stored\n"
+             "profile is replaced, not consulted (s27-90/92 doctrine)",
     )
     cal_p.add_argument(
         "--list-tasks",
@@ -445,26 +445,6 @@ def _format_report(report, profile_path: Path, *, written: bool = False) -> str:
         else:
             lines.append(f"profile path: {profile_path} (not written)")
     return "\n".join(lines)
-
-
-def _unique_profile_path(resolved: str | Path) -> Path:
-    """A NEW unique destination for a calibration result (s27-92).
-
-    Nothing overwrites an existing profile: every calibrate writes its own
-    file — ``<stem>.<YYYYmmdd-HHMMSS>-<id>.json`` beside the resolved path —
-    probed for a free name. Activation is then an explicit act (point the
-    provider config's ``profile`` field at the written file's name).
-    """
-    import time as _t
-    from uuid import uuid4 as _u4
-
-    p = Path(resolved)
-    suffix = p.suffix or ".json"
-    while True:
-        cand = p.with_name(
-            f"{p.stem}.{_t.strftime('%Y%m%d-%H%M%S')}-{_u4().hex[:6]}{suffix}")
-        if not cand.exists():
-            return cand
 
 
 def _unique_profile_path(resolved: str | Path) -> Path:
