@@ -1265,13 +1265,19 @@ def main(argv: list[str] | None = None) -> int:
         # The run lock: one live capybase run per repo (clean reads it to
         # refuse cleaning under an active run; a crash leaves it stale,
         # which reads as dead).
+        # s27-86: the refusal raises in __enter__ (run_lock_guard's
+        # constructor only stores the repo) — the s27-86 catch guarded the
+        # constructor and the refusal still escaped as a traceback
+        # (stillborn #9). Enter explicitly, catch, then run the body under
+        # an explicit __exit__ (clearing the lock on any exit matches the
+        # with-statement semantics).
+        _lock_ctx = run_lock_guard(getattr(args, "repo", "."))
         try:
-            _lock_ctx = run_lock_guard(getattr(args, "repo", "."))
+            _lock_ctx.__enter__()
         except RuntimeError as exc:
-            # s27-85: a LIVE lock is a clean refusal, not a traceback.
             print(f"capybase: error: {exc}", file=sys.stderr)
             return 2
-        with _lock_ctx:
+        try:
             if args.command == "manual":
                 result = orch.manual()
                 return 1 if result.escalated else 0
@@ -1279,6 +1285,8 @@ def main(argv: list[str] | None = None) -> int:
                 result = orch.run()
                 return 1 if result.escalated else 0
             return _dispatch_rebase(args, config, orch)
+        finally:
+            _lock_ctx.__exit__(None, None, None)
     parser.error(f"unknown command: {args.command}")
     return 2
 

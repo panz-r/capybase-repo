@@ -62,10 +62,15 @@ def kill_stale_build_processes() -> int:
         try:
             with open(f"/proc/{pid_dir}/cmdline", "rb") as f:
                 argv = f.read().split(b"\0")
-            cmdline = b" ".join(argv).decode("utf-8", errors="replace")
             cwd = os.readlink(f"/proc/{pid_dir}/cwd")
         except (OSError, ValueError):
             continue
+        # s27-86: strip the kernel's " (deleted)" suffix BEFORE matching —
+        # orphaned build tools have a DELETED cwd (the worktree the harness
+        # removed), and readlink appends this suffix verbatim. Without the
+        # strip, the s27-85 isdir guard inverted the sweep: it SPARED the
+        # orphans (isdir False) and killed processes in LIVE trees instead.
+        cwd = str(cwd).replace(" (deleted)", "")
         # s27-85: marker matching on whole ARGV TOKENS, not a substring of
         # the joined cmdline — `bash -c '<text mentioning capy-rw->'` (a
         # grep/log command) matched the substring form and was SIGKILLed.
@@ -77,11 +82,12 @@ def kill_stale_build_processes() -> int:
         cwd_hit = str(cwd).startswith(("/tmp/capy-rw-", "/var/tmp/capy-rw-"))
         if not (marker_hit or cwd_hit):
             continue
-        # s27-85: the cwd rule requires the worktree dir to STILL EXIST —
-        # a live eval's worktree is present; a user shell cd'd into a
-        # since-deleted tree must not die for a stale-generation kill.
-        if cwd_hit and not os.path.isdir(str(cwd)):
-            continue
+        # s27-86: the cwd match with a DELETED directory is the orphan
+        # signature the sweep exists for — kill. An EXISTING directory is
+        # either a live eval (spared by the self/parent exclusion and the
+        # serial-run rule) or a retained candidate: still killable within
+        # the recency window below, as the original net behaved, but the
+        # deleted-dir case can never be skipped.
         # s27-85: recency guard for ALL candidates — only processes started
         # within the window a stale generation can occupy (12h) die. A
         # days-old `tail -f` on a build log has the marker in argv and must
