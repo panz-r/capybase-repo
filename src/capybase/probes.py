@@ -265,6 +265,13 @@ def _read_window_from_props(model_cfg: ModelConfig) -> int:
         n_ctx = params.get("n_ctx")
         if isinstance(n_ctx, (int, float)) and n_ctx > 0:
             return int(n_ctx)
+    # s27-93: this desktop's single-model build reports the window at
+    # default_generation_settings.n_ctx (8192 on the gemma slot) with
+    # params null — the old read returned 0 here, disabling prompt
+    # trimming for every profile calibrated against it.
+    n_ctx = settings.get("n_ctx")
+    if isinstance(n_ctx, (int, float)) and n_ctx > 0:
+        return int(n_ctx)
     return 0
 
 
