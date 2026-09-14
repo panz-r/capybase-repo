@@ -216,6 +216,8 @@ def run_candidate_rebase(
     autostash: bool = False,
     resolution_engine=None,
     reuse: bool = True,
+    abort_on_escalation: bool = True,
+    interactive: bool = True,
 ) -> CandidateReport:
     """Run the entire rebase on a candidate branch; never touch the source.
 
@@ -331,6 +333,7 @@ def run_candidate_rebase(
             pass
 
     worktree_path: Path | None = None
+    orch = None  # s27-84: bound at construction; the interrupt salvage reads it
     candidate_dir = Path(repo) / CANDIDATES_DIR / f"{source_slug}@{ts}"
     try:
         # 3. Linked worktree on the candidate branch at the source OID.
@@ -347,7 +350,11 @@ def run_candidate_rebase(
             kwargs["resolution_engine"] = resolution_engine
         orch = Orchestrator(config, **kwargs)
         report.session_id = orch.session_id
-        result = orch.rebase(target, autostash=autostash, abort_on_escalation=True)
+        # s27-84: honor the CLI flags — the default candidate mode
+        # silently ignored --no-interactive / --no-abort-on-escalation.
+        result = orch.rebase(target, autostash=autostash,
+                             abort_on_escalation=abort_on_escalation,
+                             interactive=interactive)
         report.would_succeed = not result.escalated
         report.escalated = bool(result.escalated)
         report.reason = result.reason or ""
@@ -421,11 +428,26 @@ def run_candidate_rebase(
 
         return report
     finally:
+        # s27-84: an interrupt (Interrupted/KeyboardInterrupt/BaseException)
+        # skipped the success-path copytree — the worktree removal below
+        # would destroy the journal + review bundle with zero forensics.
+        # Salvage first, best-effort.
+        try:
+            if (worktree_path is not None
+                    and orch is not None
+                    and getattr(orch, "paths", None) is not None
+                    and orch.paths.root.exists()
+                    and not (candidate_dir / "session").exists()):
+                shutil.copytree(
+                    orch.paths.root, candidate_dir / "session",
+                    dirs_exist_ok=True)
+        except Exception:  # noqa: BLE001 — salvage must never mask the interrupt
+            pass
         # The worktree is disposable in BOTH outcomes — the candidate
         # branch lives in the shared object store; the audit bundle was
-        # copied out above. ORDER MATTERS: the branch deletion must come
-        # AFTER remove_worktree (git refuses -D on a branch checked out
-        # in a live worktree).
+        # copied out above (or salvaged just now). ORDER MATTERS: the
+        # branch deletion must come AFTER remove_worktree (git refuses -D
+        # on a branch checked out in a live worktree).
         if worktree_path is not None and worktree_path.exists():
             git.remove_worktree(worktree_path, force=True)
         git.prune_worktrees()

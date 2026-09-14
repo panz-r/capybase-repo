@@ -27,15 +27,31 @@ _VERDICT_ORDER = {
 
 
 def _load(path: str) -> dict[str, dict]:
-    text = Path(path).read_text(encoding="utf-8")
+    p = Path(path)
+    if not p.exists():
+        raise SystemExit(f"verdict_diff: input not found: {path}")
+    text = p.read_text(encoding="utf-8")
     try:
         rs = json.loads(text)
     except json.JSONDecodeError:
-        # JSONL extract (docs/results/*): one case object per line
-        try:
-            rs = [json.loads(line) for line in text.splitlines() if line.strip()]
-        except json.JSONDecodeError:
-            return {}
+        # JSONL extract (docs/results/*): one case object per line.
+        # s27-84: a corrupt line used to silently drop the WHOLE baseline
+        # ("0 overlapping cases", exit 0) — skip the bad lines but count
+        # them loudly.
+        rs, bad = [], 0
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                rs.append(json.loads(line))
+            except json.JSONDecodeError:
+                bad += 1
+        if bad:
+            print(f"verdict_diff: WARNING: {bad} unparseable line(s) in "
+                  f"{path} skipped", file=sys.stderr)
+        if not rs:
+            raise SystemExit(
+                f"verdict_diff: no parseable cases in {path}")
     return {r.get("id"): r for r in rs if r.get("id")}
 
 

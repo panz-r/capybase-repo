@@ -458,7 +458,12 @@ class GitBackend:
         # move a developer's uncommitted work into a stash it might lose. The
         # ``autostash`` opt-in (``capybase rebase --autostash``) mirrors ``git
         # rebase --autostash`` for users who explicitly accept the stash dance.
-        args = ["rebase", "--autostash" if autostash else "--no-autostash", target]
+        # s27-84: pin the merge backend — a global rebase.backend=apply
+        # silently degrades rebase_progress, the lazy history build, and
+        # the seeds family (all read rebase-merge state). -c overrides
+        # the user's config for THIS invocation only.
+        args = ["-c", "rebase.backend=merge", "rebase",
+                "--autostash" if autostash else "--no-autostash", target]
         return self._run(args, what=f"rebase {target}")
 
     def continue_rebase(self) -> GitResult:

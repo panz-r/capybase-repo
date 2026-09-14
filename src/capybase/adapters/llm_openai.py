@@ -583,9 +583,17 @@ def _md_metadata_complete(accumulated: str) -> bool:
     STRICT parse only — no repair on partial streaming text (the same
     discipline as _has_complete_answer)."""
     import json as _json
+    # s27-84: gate on the md CONTRACT's shape — a closed NON-json fence (the
+    # code block) must PRECEDE the metadata fence, and the object must not
+    # carry resolved_text. Ungated, a v6-layout model drafting a json
+    # skeleton (with an explanation field) while PLANNING tripped the stop
+    # mid-answer.
     idx = accumulated.rfind("```json")
     if idx < 0:
         return False
+    before = accumulated[:idx]
+    if "```" not in before:
+        return False  # no code block yet — this may be a planning draft
     rest = accumulated[idx + len("```json"):]
     end = rest.find("```")
     if end < 0:
@@ -594,7 +602,8 @@ def _md_metadata_complete(accumulated: str) -> bool:
         data = _json.loads(rest[:end].strip())
     except ValueError:
         return False
-    return isinstance(data, dict) and "explanation" in data
+    return (isinstance(data, dict) and "explanation" in data
+            and "resolved_text" not in data)
 
 
 def _has_complete_answer(accumulated: str) -> bool:

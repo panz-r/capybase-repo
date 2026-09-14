@@ -433,7 +433,8 @@ class EmbeddingRetriever:
             self._vectors = []
 
     def retrieve_scored(
-        self, query: str, *, k: int = 3, language: str | None = None
+        self, query: str, *, k: int = 3, language: str | None = None,
+        path: str | None = None,
     ) -> list[tuple[float, HistoricalExample]]:
         """Return ``(score, example)`` pairs for the top-k matches.
 
@@ -657,7 +658,8 @@ class HybridRetriever:
         self.fusion = fusion if fusion in ("rrf", "dbsf") else "rrf"
 
     def retrieve_scored(
-        self, query: str, *, k: int = 3, language: str | None = None
+        self, query: str, *, k: int = 3, language: str | None = None,
+        path: str | None = None,
     ) -> list[tuple[float, HistoricalExample]]:
         """Return ``(fused_score, example)`` pairs for the top-k matches.
 
@@ -666,15 +668,21 @@ class HybridRetriever:
         method, and returns the top-k by fused score. The score is the FUSED
         value (RRF weight or summed normalized score), not either retriever's raw
         score — so it's comparable across examples but not on a raw-cosine scale.
+
+        ``path`` (s27-84): the Retriever Protocol's same-path boost — the
+        hybrid path previously rejected the kwarg with TypeError (shielded
+        only because callers preferred retrieve_explained).
         """
         # Each retriever contributes its own top-k. Retrieve failures degrade to
         # [] (the existing per-retriever contract), never raise.
         try:
-            lex_ranked = self.lexical.retrieve_scored(query, k=k, language=language)
+            lex_ranked = self.lexical.retrieve_scored(
+                query, k=k, language=language, path=path)
         except Exception:  # noqa: BLE001 - best-effort fusion
             lex_ranked = []
         try:
-            emb_ranked = self.embedding.retrieve_scored(query, k=k, language=language)
+            emb_ranked = self.embedding.retrieve_scored(
+                query, k=k, language=language, path=path)
         except Exception:  # noqa: BLE001 - best-effort fusion
             emb_ranked = []
 
@@ -705,10 +713,11 @@ class HybridRetriever:
         return fused[:k]
 
     def retrieve(
-        self, query: str, *, k: int = 3, language: str | None = None
+        self, query: str, *, k: int = 3, language: str | None = None,
+        path: str | None = None,
     ) -> list[HistoricalExample]:
         """Top-k past merges by fused rank. Delegates to :meth:`retrieve_scored`."""
-        return [ex for _, ex in self.retrieve_scored(query, k=k, language=language)]
+        return [ex for _, ex in self.retrieve_scored(query, k=k, language=language, path=path)]
 
     def retrieve_explained(
         self, query: str, *, k: int = 3, language: str | None = None,
@@ -826,14 +835,14 @@ class QualityFilteredRetriever:
         path: str | None = None,
     ) -> list[tuple[float, HistoricalExample]]:
         # Over-fetch so the quality filter still yields k survivors.
-        got = self.inner.retrieve_scored(query, k=max(k * 3, k), language=language)  # type: ignore[attr-defined]
+        got = self.inner.retrieve_scored(query, k=max(k * 3, k), language=language, path=path)  # type: ignore[attr-defined]
         return self._filtered(got, k)
 
     def retrieve(
         self, query: str, *, k: int = 3, language: str | None = None,
         path: str | None = None,
     ) -> list[HistoricalExample]:
-        return [ex for _, ex in self.retrieve_scored(query, k=k, language=language)]
+        return [ex for _, ex in self.retrieve_scored(query, k=k, language=language, path=path)]
 
     def retrieve_explained(
         self, query: str, *, k: int = 3, language: str | None = None,
@@ -846,7 +855,7 @@ class QualityFilteredRetriever:
                 region_kind=region_kind, conflict_shape=conflict_shape,
             )
         except Exception:  # noqa: BLE001 - delegate to scored path
-            scored = self.retrieve_scored(query, k=k, language=language)
+            scored = self.retrieve_scored(query, k=k, language=language, path=path)
             return [(RetrievalExplanation(score=s, prior_outcome=""), ex) for s, ex in scored]
         if not got:
             return []
@@ -863,11 +872,9 @@ class QualityFilteredRetriever:
         return out
 
     def refresh(self) -> None:
+        # s27-84: a stray copy of HybridRetriever.refresh shadowed this
+        # delegating def (AttributeError on 'lexical' — the wrapper wraps
+        # `inner`, not the two sub-retrievers).
         fn = getattr(self.inner, "refresh", None)
         if fn is not None:
             fn()
-
-    def refresh(self) -> None:
-        """Force both sub-retrievers to rebuild their indexes/caches."""
-        self.lexical.refresh()
-        self.embedding.refresh()

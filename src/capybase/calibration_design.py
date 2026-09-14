@@ -140,7 +140,7 @@ def _sign_matrix(k: int) -> list[tuple[int, ...]]:
     # Standard Res-IV relations (verified): no generator is a single factor or
     # a product that aliases a main effect with a two-factor interaction.
     generators = {
-        5: {4: (0, 1, 2)},                              # E = ABC        (Res-V)
+        5: {4: (0, 1, 2)},                              # E = ABC        (Res-IV)
         # s27-82: k=6/8 were Res-III (defining words of length 3: ABE/ACF,
         # ABE/ACF/ADG) — main effects aliased with two-factor interactions,
         # so a real samples x diverse_sampling interaction projected onto a

@@ -192,9 +192,12 @@ class ContextBuilder:
                             high_trust_constraints.append(cleaned)
             except Exception:  # noqa: BLE001 — masking is advisory
                 pass
-        # Rough token estimate (~4 chars/token). Good enough for budgeting;
-        # a real tokenizer can be swapped in later without interface change.
-        est = max(1, len(primary) // 4)
+        # s27-84: use the canonical estimator — the old //4 copy drifted
+        # from estimate_tokens (//3 since s27-83) and under-measured code
+        # 15-25%, so the orchestrator's oversized-prompt fast-fail never
+        # fired for prompts already at >=90% of the window.
+        from capybase.conflict_model import estimate_tokens
+        est = estimate_tokens(primary)
         # RAG few-shot: retrieve similar past merges from the experience store
         # and inject them as dynamic demonstrations. The query is the conflict
         # "signature" (the three sides concatenated). Skipped when the retriever
@@ -228,7 +231,11 @@ class ContextBuilder:
                         query, k=self.retriever_k, language=unit.language,
                         path=unit.path,
                     )
-                if len(scored) >= self.min_examples or scored:
+                # s27-84: the `or scored` arm made the min_examples gate a
+                # no-op — a single score-0.01 unrelated conflict was shown
+                # as a demonstration (the failure mode the calibrated floor
+                # exists to prevent on the embedding path).
+                if len(scored) >= self.min_examples:
                     retrieval_scores = [round(s, 4) for s, _ in scored]
                     retrieved = [ex for _, ex in scored]
             except Exception as exc:  # noqa: BLE001 - retrieval is best-effort

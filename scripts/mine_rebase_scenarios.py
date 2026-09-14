@@ -138,6 +138,20 @@ class RebaseScenario:
 # ---------------------------------------------------------------------------
 
 
+def _git_env() -> dict:
+    """s27-84: hermetic + locale-stable git env — a global
+    rebase.backend=apply made _rebase_in_progress read every stop as
+    done (all scenarios dropped as "clean rebase"); gpgsign broke every
+    --continue silently. Same isolation as the test shims."""
+    import os
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["LC_ALL"] = "C"
+    env["GIT_PAGER"] = "cat"
+    return env
+
+
 def _git(repo: Path, *args: str, check: bool = True, input_bytes: bytes | None = None) -> str:
     """Run git in ``repo``; return stdout. Raise on failure when check=True."""
     import subprocess
@@ -146,6 +160,7 @@ def _git(repo: Path, *args: str, check: bool = True, input_bytes: bytes | None =
         ["git", "-C", str(repo), *args],
         capture_output=True,
         input=input_bytes,
+        env=_git_env(),
     )
     if check and proc.returncode != 0:
         raise RuntimeError(
@@ -158,7 +173,8 @@ def _git(repo: Path, *args: str, check: bool = True, input_bytes: bytes | None =
 def _git_raw(repo: Path, *args: str, check: bool = True) -> bytes:
     import subprocess
 
-    proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True)
+    proc = subprocess.run(["git", "-C", str(repo), *args],
+                          capture_output=True, env=_git_env())
     if check and proc.returncode != 0:
         raise RuntimeError(
             f"git {args[0]} failed (rc={proc.returncode}): "
@@ -366,6 +382,12 @@ def _mine_one_merge(
                 gb.prune_worktrees()
             except Exception:  # noqa: BLE001
                 pass  # s27-67: a prune failure must not abort a mined result
+            # s27-84: the replay branch leaked per candidate merge (up to
+            # merge_limit refs accumulating in the shared clone).
+            try:
+                _git(repo, "branch", "-D", replay_branch, check=False)
+            except Exception:  # noqa: BLE001
+                pass
             shutil.rmtree(wt_path, ignore_errors=True)
 
 

@@ -402,8 +402,15 @@ def select_comment_frontier_with_fast_paths(
             if len(normalized) == 1:
                 continue  # both-same-normalized → keep verbatim
         # Fall through: needs LLM reconciliation.
+        # s27-84: when a resolved variant exists, ALSO carry the
+        # base/current/replayed variants — the §8 prompt's rewrite rules
+        # ("update renamed identifiers…") are unanswerable with only the
+        # resolved text, which was exactly the provenance the docstring
+        # promised. The resolved entry stays LAST (the model's anchor).
         resolved_entries = [e for e in entries if e.version == "resolved"]
         if resolved_entries:
+            frontier.extend(
+                e for e in entries if e.version != "resolved")
             frontier.extend(resolved_entries)
         else:
             frontier.extend(entries)

@@ -615,9 +615,19 @@ def _git(repo: Path, *args: str, binary: bool = False) -> subprocess.CompletedPr
     with UnicodeDecodeError. Surfaced mining sqlite's deep history: a binary
     blob caused 'utf-8' codec to fail on byte 0xf8.
     """
+    # s27-84: hermetic + locale-stable — a global merge.conflictStyle
+    # changed every emitted marker_original (machine-dependent corpus
+    # bytes), and localized git broke the CONFLICT-line parses (silent
+    # zero-yield). Same isolation as the test shims.
+    import os as _os
+    env = dict(_os.environ)
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["LC_ALL"] = "C"
+    env["GIT_PAGER"] = "cat"
     return subprocess.run(
         ["git", "-C", str(repo), *args],
-        capture_output=True, text=not binary,
+        capture_output=True, text=not binary, env=env,
         **({} if binary else {"errors": "replace"}),
     )
 

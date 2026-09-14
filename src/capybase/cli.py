@@ -27,6 +27,7 @@ Global flags (before the subcommand): --config DIR, --repo, --profile PATH,
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 from typing import Callable
@@ -520,9 +521,11 @@ def _run_calibrate(
         # ``calibrate-embeddings`` derived. Carry them over ONLY when the stored
         # profile is for the same model — a model swap correctly drops them (the
         # calibrated floor was fit for the old model and would be wrong now).
-        from capybase.calibration_profile import ModelProfile
-
-        prior = ModelProfile.load(resolved)
+        # s27-84: reuse the PRE-SWEEP tolerant load — a strict load here
+        # crashed AFTER the multi-hour sweep on a corrupt/legacy profile,
+        # saving nothing (the exact deadlock class s27-82 fixed for
+        # calibrate-embeddings).
+        prior = _prior_profile
         if prior is not None and prior.model == report.profile.model:
             report.profile.embedding_min_similarity = prior.embedding_min_similarity
             report.profile.embedding_calibration = prior.embedding_calibration
@@ -1035,6 +1038,8 @@ def _dispatch_rebase(args, config, orch):
             config, repo=args.repo, target=args.target,
             autostash=args.autostash,
             reuse=not getattr(args, "fresh", False),
+            abort_on_escalation=getattr(args, "abort_on_escalation", True),
+            interactive=getattr(args, "interactive", True),
         )
         print(report.summary())
         return 0 if report.would_succeed else 1
@@ -1062,6 +1067,20 @@ def _dispatch_rebase(args, config, orch):
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # s27-84: normalize the repo to the worktree's TOPLEVEL — invoked from
+    # a subdirectory, every repo-relative conflict path misresolved
+    # (extraction errors -> "all conflicted paths are unsupported") and
+    # .rebase-agent/ landed in the subdir where `status` never finds it.
+    if getattr(args, "repo", None):
+        try:
+            top = subprocess.run(
+                ["git", "-C", str(args.repo), "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if top.returncode == 0 and top.stdout.strip():
+                args.repo = top.stdout.strip()
+        except Exception:  # noqa: BLE001 — not a repo / git absent: let the
+            pass           # downstream handlers produce their clean errors
     # Startup sweep of stale build processes from prior (killed/timed-out)
     # runs — defense-in-depth under _run_shell_tree's group-kill teardown
     # (sprint-20 S20.5b: every entry point shares the same net). Best-effort,
@@ -1144,12 +1163,23 @@ def main(argv: list[str] | None = None) -> int:
 
     # check / status don't need an orchestrator (they use the git backend
     # directly and never drive a resolution loop).
-    if args.command == "check":
-        return _run_check(config, repo=args.repo)
-    if args.command == "status":
-        return _run_status(config, repo=args.repo, session_id=args.session)
-    if args.command == "metrics":
-        return _run_metrics(config, repo=args.repo)
+    # s27-84: degenerate-repo guards — a non-repo path or an unborn HEAD
+    # crashed these read-only commands with a raw traceback (the Orchestrator
+    # path below has always had this try/except).
+    if args.command in ("check", "status", "metrics"):
+        try:
+            if args.command == "check":
+                return _run_check(config, repo=args.repo)
+            if args.command == "status":
+                return _run_status(config, repo=args.repo,
+                                   session_id=args.session)
+            return _run_metrics(config, repo=args.repo)
+        except Exception as exc:  # noqa: BLE001 — read-only commands: report, don't trace
+            from capybase.git_backend import GitError
+            if isinstance(exc, (GitError, OSError)):
+                print(f"capybase: error: {exc}", file=sys.stderr)
+                return 2
+            raise
     if args.command == "provider":
         return _run_provider(args)
     # promote/publish: pure git operations over retained candidate state —

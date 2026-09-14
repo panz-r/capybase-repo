@@ -5607,8 +5607,13 @@ class Orchestrator:
                 f"  (restored the raw conflict markers to {path} — the previous "
                 "resolution attempt was broken; resolve the conflict fresh.)"
             )
+        # s27-84: give the ABSOLUTE path — in candidate/dry-run mode the
+        # orchestrator's repo is a throwaway worktree, and the repo-relative
+        # path sent the human to edit their OWN checkout (the worktree copy
+        # never changed; 50 re-prompts; unit skipped).
+        _abs = (Path(self.git.repo) / path)
         self.out(
-            f"  edit {path} in your editor now (resolve the conflict markers,\n"
+            f"  edit {_abs} in your editor now (resolve the conflict markers,\n"
             "  save, and return here). Press Enter when done."
         )
         max_reprompts = 50  # generous; a human genuinely working won't hit this
@@ -14099,7 +14104,12 @@ class Orchestrator:
             # then leaves the pre-repair (splice-shaped) state instead.
             _wf_max_out = int(getattr(
                 self.config.model, "max_tokens", 8192) or 8192)
-            _wf_est_out = len(spliced) // 4  # ~4 chars/token
+            # s27-84: the canonical estimator — the old //4 copy
+            # under-measured code 15-25%, passing output budgets that
+            # were already overflowing (truncated re-resolves written
+            # as the file).
+            from capybase.conflict_model import estimate_tokens as _est_tok
+            _wf_est_out = _est_tok(spliced)
             if _wf_est_out > _wf_max_out * 0.9:
                 self.journal.emit(
                     "whole_file_repair_skipped",
@@ -18120,10 +18130,31 @@ class Orchestrator:
         # The asymmetry takeover needs only the gate winner — the loser is
         # by construction stale. The dup-pathology flow verifies both sides
         # (adjudication chooses between two plausibly-good versions).
+        if asym_winner is not None and asym_winner not in sides:
+            # s27-84: the gate winner was dropped from the pristine sides
+            # (whitespace-only stage blob) — decline the takeover LOUDLY
+            # (the s27-82 version fell through to verifying the surviving
+            # side and returned None anyway, wasting a whole-file build).
+            self.journal.emit(
+                "asymmetry_takeover_declined",
+                {"reason": "gate winner side absent from pristine stages",
+                 "winner": asym_winner},
+                step_index=self.step, path=path,
+            )
+            return None
+        if asym_winner is not None and asym_winner not in sides:
+            # s27-84: the gate winner was dropped from the pristine sides
+            # (whitespace-only stage blob) — decline the takeover LOUDLY
+            # (the s27-82 version fell through to verifying the surviving
+            # side and returned None anyway, wasting a whole-file build).
+            self.journal.emit(
+                "asymmetry_takeover_declined",
+                {"reason": "gate winner side absent from pristine stages",
+                 "winner": asym_winner},
+                step_index=self.step, path=path,
+            )
+            return None
         _candidates = (
-            # s27-82: a dropped side (whitespace-only stage blob) must
-            # decline the takeover, not raise KeyError (the caller swallows
-            # it into a silent decline — loud decline instead).
             [(asym_winner, sides[asym_winner])]
             if asym_winner is not None and asym_winner in sides
             else list(sides.items())

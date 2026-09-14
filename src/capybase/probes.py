@@ -1209,7 +1209,7 @@ def probe_two_phase(
     matter before paying for refinement (same semantics as the old ``--calibrate-
     phase1-only``).
     """
-    from capybase.calibration_corpus import CALIBRATION_CONFLICTS, conflicts_with_context
+    from capybase.calibration_corpus import conflicts_with_context
     from capybase.calibration_design import (
         DesignPoint, fractional_factorial_2k, rank_factors,
     )
@@ -1444,14 +1444,27 @@ def probe_two_phase(
             except KeyboardInterrupt:
                 # s27-82: a Ctrl-C landing HERE (the baseline sweep is a
                 # full-corpus eval) used to propagate out of run_calibration —
-                # no profile written, the entire probe lost. Degrade to the
-                # fast-finalize policy below.
+                # no profile written, the entire probe lost. s27-84: degrade
+                # to the SAME majority-correct fast-finalize policy as an
+                # epoch interrupt (the old fall-through adopted on
+                # n_correct > 0 via the baseline-unavailable arm).
                 interrupted = True
                 baseline_available = False
                 decisions.append(
-                    "baseline re-eval interrupted — adopting best-so-far "
-                    "without the existing comparison"
+                    "baseline re-eval interrupted — fast-finalize policy"
                 )
+                if best_score.n_correct * 2 >= best_score.total \
+                        and best_score.n_correct > 0:
+                    decoded_kwargs, best_profile = _decode_point(best_point)
+                    best_cfg_kwargs.update(decoded_kwargs)
+                    decisions.append(
+                        f"adopted best-so-far {best_point.config_id} "
+                        f"({best_score.n_correct}/{best_score.total} correct)")
+                else:
+                    decisions.append(
+                        f"keeping existing (best-so-far "
+                        f"{best_score.n_correct}/{best_score.total} is not "
+                        f"majority-correct)")
             except Exception as exc:  # noqa: BLE001 - never crash on finalize
                 baseline_available = False
                 decisions.append(f"baseline eval failed ({exc}); adopting best-so-far")
