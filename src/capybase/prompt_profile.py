@@ -382,32 +382,15 @@ def set_outline_variant(variant: int | None) -> None:
     keeps the existing ``set_outline_variant`` call site in ``live_eval.py``
     working while the outline variants are unified into the profile layer.
     """
-    if not variant:
-        # 0/None → baseline outline, keep the other axes as-is.
-        base = active_profile()
-        set_active_profile(
-            PromptProfile(
-                output_layout=base.output_layout,
-                history_framing=base.history_framing,
-                instruction_position=base.instruction_position,
-                outline=OutlineMode.NONE,
-                example_limit=base.example_limit,
-            )
-        )
-        return
-    mode = _INT_TO_OUTLINE.get(variant)
-    if mode is None:
+    # s27-79: delegate to with_variant — the old shim REBUILT the profile
+    # naming 5 of 10 axes, silently resetting rule_emphasis,
+    # conflict_summary_mode, side_ordering, parse_repair_mode and
+    # retry_schedule to defaults against its own "preserving the other
+    # axes" docstring.
+    mode = _INT_TO_OUTLINE.get(variant) if variant else OutlineMode.NONE
+    if variant and mode is None:
         return  # unknown variant → no-op (matches the old guard)
-    base = active_profile()
-    set_active_profile(
-        PromptProfile(
-            output_layout=base.output_layout,
-            history_framing=base.history_framing,
-            instruction_position=base.instruction_position,
-            outline=mode,
-            example_limit=base.example_limit,
-        )
-    )
+    set_active_profile(active_profile().with_variant(outline=mode))
 
 
 def get_outline_variant() -> int | None:
