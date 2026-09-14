@@ -1220,8 +1220,13 @@ def probe_two_phase(
     choices = existing_choices if existing_choices is not None else MechanismChoices()
     winner_profile = existing_profile if existing_profile is not None else DEFAULT_PROFILE
 
-    if len(CALIBRATION_CONFLICTS) < _MIN_CORPUS_FOR_MECHANISM_SELECTION:
-        n = len(CALIBRATION_CONFLICTS)
+    # s27-82: the guard must test the corpus the mechanism A/B actually
+    # RUNS (the task-filtered one, computed below) — the old check tested
+    # the always-15 default corpus, so --task config_merge ran a full
+    # mechanism selection on 2 cases.
+    _task_corpus = conflicts_with_context()
+    if len(_task_corpus) < _MIN_CORPUS_FOR_MECHANISM_SELECTION:
+        n = len(_task_corpus)
         decisions.append(
             f"corpus too small for two-phase selection ({n} < "
             f"{_MIN_CORPUS_FOR_MECHANISM_SELECTION} min); keeping existing config"
@@ -1393,7 +1398,10 @@ def probe_two_phase(
             # positive correctness (it resolved SOMETHING during the epoch); keep
             # existing when nothing scored. This makes the anytime halt truly
             # prompt: finalize in milliseconds, not minutes.
-            if best_score.n_correct > 0:
+            # s27-82: adopt only on MAJORITY correctness — the old rule
+            # (n_correct > 0) let a 1-of-5 design point replace the existing
+            # config, which may be far better.
+            if best_score.n_correct * 2 >= best_score.total and best_score.n_correct > 0:
                 decoded_kwargs, best_profile = _decode_point(best_point)
                 best_cfg_kwargs.update(decoded_kwargs)
                 decisions.append(
@@ -1403,8 +1411,9 @@ def probe_two_phase(
                 )
             else:
                 decisions.append(
-                    "keeping existing on interrupt "
-                    "(best-so-far has no correct resolutions)"
+                    f"keeping existing on interrupt (best-so-far "
+                    f"{best_score.n_correct}/{best_score.total} is not "
+                    f"majority-correct)"
                 )
         else:
             # Completed run: evaluate the existing baseline at the SAME fidelity
@@ -1432,6 +1441,17 @@ def probe_two_phase(
                     _resolve_existing, model_cfg, n_reps=n_reps, corpus=existing_subset,
                 )
                 baseline_available = True
+            except KeyboardInterrupt:
+                # s27-82: a Ctrl-C landing HERE (the baseline sweep is a
+                # full-corpus eval) used to propagate out of run_calibration —
+                # no profile written, the entire probe lost. Degrade to the
+                # fast-finalize policy below.
+                interrupted = True
+                baseline_available = False
+                decisions.append(
+                    "baseline re-eval interrupted — adopting best-so-far "
+                    "without the existing comparison"
+                )
             except Exception as exc:  # noqa: BLE001 - never crash on finalize
                 baseline_available = False
                 decisions.append(f"baseline eval failed ({exc}); adopting best-so-far")

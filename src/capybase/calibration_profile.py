@@ -496,10 +496,19 @@ class ModelProfile:
                 f"calibration profile {p} is invalid: {exc}") from exc
 
     def save(self, path: str | Path) -> None:
-        """Write the profile as pretty JSON, creating parent dirs."""
+        """Write the profile as pretty JSON, creating parent dirs.
+
+        s27-82: ATOMIC (tmp + os.replace) — a plain write_text left a
+        truncated/invalid JSON on crash/ENOSPC/Ctrl-C, and the strict
+        loader then refused to run AND refused to recalibrate (the two
+        commands whose job is to replace the file died on load first).
+        Concurrent-reader tears are gone with the rename."""
+        import os as _os
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+        _os.replace(tmp, p)
 
 
 def _coerce_calibration(value: Any) -> dict[str, Any]:

@@ -176,7 +176,11 @@ class RiskEngine:
         # from overriding a proven-correct candidate. (The flag previously fired
         # often, but flight-data audits showed it over-rode passing candidates
         # far more often than it rescued a true false positive.)
-        if failure_kind == "no_op_repair":
+        # s27-82: gate on the candidate NOT passing — a verify-time repair
+        # rung (delimiter/brace) can legitimately flip a no-op-edit
+        # candidate to passing, and escalating a passing candidate was the
+        # asymmetry the suspected_validator_error arm already avoids.
+        if failure_kind == "no_op_repair" and not result.passed:
             return _escalate(result, [
                 "repair was a no-op (search == replace) — model sees nothing to fix",
                 "retrying would produce the identical candidate (infinite loop)",

@@ -310,6 +310,13 @@ def conflicts_with_context(
     """
     if task_type is None:
         task_type = _active_task_type or "merge_conflict_resolution"
+    # s27-82: an unknown --task value (typo) used to fall back to the
+    # default corpus SILENTLY — and the calibration still rewrote the
+    # global profile. Fail loudly instead.
+    if task_type and task_type not in ALL_CONFLICTS_BY_TASK:
+        raise ValueError(
+            f"unknown calibration task {task_type!r}; "
+            f"valid tasks: {', '.join(sorted(ALL_CONFLICTS_BY_TASK))}")
     corpus = ALL_CONFLICTS_BY_TASK.get(task_type, CALIBRATION_CONFLICTS)
     return [(c, _context(c.unit)) for c in corpus]
 

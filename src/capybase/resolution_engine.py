@@ -1471,6 +1471,7 @@ def _resolve_prompt_parts(
     budget: TokenBudget | None = None,
     *,
     profile: PromptProfile | None = None,
+    attempt: int = 0,
 ):
     """Build the reusable building blocks of the resolve prompt.
 
@@ -1601,7 +1602,11 @@ def _resolve_prompt_parts(
     # which units each side changed, whether there are structural conflicts,
     # and which units must survive the merge. Directly addresses the "dropped
     # replayed side" failure: the model sees unit boundaries explicitly.
-    struct_ctx = _structural_context_block(unit)
+    # s27-82: the retry path threads `attempt` so the over-constraining
+    # "preserve ALL units" directive strips on retries exactly as the
+    # repair path does (the pass-8 finding — the directive persisted on
+    # every blind-regeneration retry).
+    struct_ctx = _structural_context_block(unit, attempt=attempt)
     # Function-local context: enclosing function signature + ±3 lines around
     # the conflict. Gives the model local scope awareness (parameter types,
     # variable declarations) that the file-level skeleton can't provide.
@@ -2089,6 +2094,7 @@ def retry_prompt_with_trims(
     context: ContextBundle,
     failures: Iterable[VerificationFailure],
     budget: TokenBudget | None = None,
+    attempt: int = 0,
 ) -> tuple[str, list[dict]]:
     """THE retry prompt (single implementation — audit-2 D1).
 
@@ -2104,7 +2110,8 @@ def retry_prompt_with_trims(
     # repair path). This guard previously lived only in the orchestrator's
     # journal-mirror copy of the retry prompt; the model never saw it.
     _decl_guard = _missing_symbol_decl_guard(failures)
-    parts = _resolve_prompt_parts(unit, context, budget=budget)
+    parts = _resolve_prompt_parts(unit, context, budget=budget,
+                                  attempt=attempt)
     inner = _compose_resolve_prompt(
         active_profile(),
         intro=parts["intro"], data=parts["data"],
@@ -3368,6 +3375,14 @@ class ResolutionEngine:
             # now actually receives it (formerly journal-mirror-only).
             hist = self._repair_failure_history.setdefault(unit.unit_id, [])
             prevs = self._repair_prev_texts.setdefault(unit.unit_id, [])
+            # s27-82 (ninth-pass follow-up): bound the UNIT count too — the
+            # per-unit lists are trimmed but the dicts grew one key per unit
+            # for the whole session, and whole-file candidates are hundreds
+            # of KB each. Keep the 32 most recent units.
+            for _mem in (self._repair_failure_history,
+                         self._repair_prev_texts):
+                while len(_mem) > 32:
+                    _mem.pop(next(iter(_mem)))
             _current_sig = "; ".join(
                 f"{f.validator}: {f.message[:60]}" for f in failures[:2])
             if _current_sig and _current_sig not in [
@@ -3401,7 +3416,7 @@ class ResolutionEngine:
         if failures:
             pv = PROMPT_RETRY
             prompt, prompt_trims = retry_prompt_with_trims(
-                unit, context, failures, budget=_budget)
+                unit, context, failures, budget=_budget, attempt=attempt)
             prof_tag = active_profile().tag()
             if prof_tag:
                 pv = PROMPT_RETRY + prof_tag

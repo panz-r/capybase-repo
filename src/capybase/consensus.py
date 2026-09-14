@@ -277,7 +277,12 @@ def select(
             agreement_score=0.0, cluster_count=0,
         )
     # FactSelfCheck rationale-consistency, computed once over all candidates.
-    fc = fact_consistency(candidates)
+    # s27-82 (ninth/twelfth follow-up): failed/empty candidates carry
+    # default preserve-facts that dilute the pool — exclude them from the
+    # FACT POOL (the empty-cluster guard already excludes them from voting).
+    _voting = [c for c in candidates
+               if (getattr(c, "resolved_text", "") or "").strip()]
+    fc = fact_consistency(_voting or candidates)
     # Tie-break among same-size clusters: fact-consistency desc, then confidence
     # desc, then length asc.
     # s27-74 (eighth pass): a cluster of parse-failed/empty candidates must

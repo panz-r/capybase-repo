@@ -484,6 +484,15 @@ def _run_calibrate(
     # times); it's a quick capability check (max_tokens/json_mode/logprobs) only.
     # --calibrate-reps N makes each design point noise-robust (majority vote).
     # --calibrate-phase1-only runs the screening without Phase-2 refinement.
+    # s27-82: wire the existing_profile seam (it existed unused) — a
+    # recalibrate seeds its mechanism choices from the STORED profile
+    # instead of silently regressing them to TOML defaults.
+    from capybase.calibration_profile import ModelProfile as _MP
+    _resolved_profile = resolve_profile_path(repo, profile_path)
+    try:
+        _prior_profile = _MP.load(_resolved_profile)
+    except Exception:  # noqa: BLE001 — corrupt profile: calibrate fresh
+        _prior_profile = None
     report = run_calibration(
         client,
         config.model,
@@ -494,6 +503,7 @@ def _run_calibrate(
         force_factors=tuple(enable_factors),
         task=task,
         embeddings_model=config.memory.embeddings_model,
+        existing_profile=_prior_profile,
     )
 
     resolved = resolve_profile_path(repo, profile_path)
@@ -663,13 +673,23 @@ def _run_calibrate_embeddings(
     written = False
     prev_floor = 0.35
     drift = None  # advisory drift-vs-baseline report
+    # s27-82: the placeholder profile (used when no VALID profile exists —
+    # missing, corrupt, or invalid) carries the ACTIVE config's resolution
+    # knobs. The old placeholder hardcoded max_tokens=1, which passed
+    # validation (only <= 0 is rejected) and bricked every later
+    # generation once apply_profile overlaid it.
+    try:
+        _existing = ModelProfile.load(resolved)
+    except Exception:  # noqa: BLE001 — corrupt profile: the fresh save repairs it
+        _existing = None
+    placeholder = _existing is None
     if cal.ok:
         # Load the existing profile (preserving LLM-calibration knobs); a missing
         # profile is created fresh via from_dict (safe defaults for required
         # fields). Read the prior floor whenever the endpoint worked so the
         # "was X.XXX" delta in the report reflects the stored value — including
         # under --dry-run (the user runs it precisely to see what would change).
-        profile = ModelProfile.load(resolved)
+        profile = _existing
         if profile is None:
             # Construct a placeholder directly (not via from_dict, which now
             # validates load-bearing knobs and would reject a max_tokens of 0).
@@ -677,10 +697,11 @@ def _run_calibrate_embeddings(
             # defaults the code below reads; the resolution knobs are inert here.
             profile = ModelProfile(
                 model=config.model.model,
-                max_tokens=1,
+                max_tokens=config.model.max_tokens,
                 json_mode=True,
                 capture_token_entropy=False,
-                generation_timeout_seconds=60,
+                generation_timeout_seconds=max(
+                    180, config.model.generation_timeout_seconds),
             )
         if profile.model == config.model.model:
             prev_floor = profile.embedding_min_similarity
@@ -693,8 +714,21 @@ def _run_calibrate_embeddings(
                     drift = compare_calibration(cal, baseline)
                 except Exception:  # noqa: BLE001 - best-effort; a bad envelope is no-drift
                     drift = None
-        if not dry_run:
+        if not dry_run and not placeholder:
             profile.model = config.model.model  # keep the match key current
+            profile.embedding_min_similarity = cal.min_similarity
+            env = cal.to_dict()
+            if drift is not None:
+                env["drift"] = drift.to_dict()
+            profile.embedding_calibration = env
+            profile.save(resolved)
+            written = True
+        elif not dry_run:
+            # No VALID profile existed (missing / corrupt / invalid knobs):
+            # save the sane-placeholder profile carrying the calibrated
+            # floor — an explicit calibrate command is a profile-creation
+            # action, and the atomic save cannot leave a torn file.
+            profile.model = config.model.model
             profile.embedding_min_similarity = cal.min_similarity
             env = cal.to_dict()
             if drift is not None:
@@ -951,6 +985,12 @@ def _run_provider(args) -> int:
         return 0
     out = dataclasses.asdict(p)
     out["profile_model"] = resolved.profile.model if resolved.profile else None
+    # s27-82: mask the key in the JSON view (real keys in terminal
+    # scrollback / CI logs are the leak class); `--shell` still emits the
+    # real value because sourcing it is the point.
+    if out.get("api_key"):
+        key = str(out["api_key"])
+        out["api_key"] = (key[:4] + "***" + key[-2:]) if len(key) > 8 else "***"
     print(_json.dumps(out, indent=2))
     return 0
 

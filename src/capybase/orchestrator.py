@@ -9810,6 +9810,21 @@ class Orchestrator:
             _esc = next((o for o in last.outcomes if o.accepted is None), None)
             if _esc is None and last.outcomes:
                 _esc = last.outcomes[-1]
+            # s27-82 (ninth-pass LOW): when the whole-FILE gate failed, the
+            # unit-level validation of the last outcome often PASSED — the
+            # bundle then rendered "verification: passed" directly under an
+            # escalation stop. Prefer an outcome whose validation carries
+            # hard failures so the bundle shows the real rejection reason.
+            if _esc is not None and not (
+                    getattr(_esc, "validation", None) is not None
+                    and _esc.validation.hard_failures):
+                _failed = next(
+                    (o for o in last.outcomes
+                     if getattr(o, "validation", None) is not None
+                     and o.validation.hard_failures),
+                    None)
+                if _failed is not None:
+                    _esc = _failed
             write_review_bundle(
                 self.paths,
                 reason=last.reason or "escalated",
@@ -16112,7 +16127,12 @@ class Orchestrator:
             )
             _oversized_parse_fail = (
                 _empty_oversized and _tok_est >= 1500
-                and (cand.failure_kind or "") == "parse_failed"
+                and (cand.failure_kind or "") in ("parse_failed", "truncated")
+                # s27-82 (twelfth-pass residual): a batch on an oversized
+                # prompt hits finish_reason=length -> "truncated" — the same
+                # prompt-induced empty the fast-fail exists for; the old
+                # parse_failed-only check let the full ladder burn before
+                # escalating.
             )
             # C7' diagnostic (sprint-24 cycle B): journal the exact
             # condition values to find which one blocks the fast-fail
@@ -18101,7 +18121,11 @@ class Orchestrator:
         # by construction stale. The dup-pathology flow verifies both sides
         # (adjudication chooses between two plausibly-good versions).
         _candidates = (
-            [(asym_winner, sides[asym_winner])] if asym_winner
+            # s27-82: a dropped side (whitespace-only stage blob) must
+            # decline the takeover, not raise KeyError (the caller swallows
+            # it into a silent decline — loud decline instead).
+            [(asym_winner, sides[asym_winner])]
+            if asym_winner is not None and asym_winner in sides
             else list(sides.items())
         )
         if wall_deadline is not None:

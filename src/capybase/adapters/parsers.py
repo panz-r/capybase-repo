@@ -319,22 +319,26 @@ def splice_all_resolutions(
                 f"marker_span ({start}, {end}) out of range for {n} lines"
             )
         spans.append((start, end, text))
-    # Sort by start descending; detect overlap against the next-lower span.
-    spans.sort(key=lambda t: t[0], reverse=True)
-    prev_start: int | None = None
+    # Sort by start ascending; detect overlap against the previous span.
+    spans.sort(key=lambda t: t[0])
+    prev_end: int | None = None
     for start, end, _ in spans:
-        if prev_start is not None and end >= prev_start:
+        if prev_end is not None and start <= prev_end:
             raise ValueError(
-                f"overlapping spans: ({start},{end}) overlaps a span starting at {prev_start}"
+                f"overlapping spans: ({start},{end}) overlaps a span ending at {prev_end}"
             )
-        prev_start = start
-    # Apply bottom-to-top against the same accumulating buffer. Because we go
-    # from highest span down, each splice only touches lines at or below the
-    # spans we haven't processed yet, so their absolute indices stay valid.
-    buffer = original
+        prev_end = end
+    # Apply in a SINGLE forward line-list pass (s27-82, B4): the old loop
+    # re-ran splice_resolution (split + join of the whole buffer) per span —
+    # quadratic, seconds of CPU on generated multi-hunk files.
+    out: list[str] = []
+    cursor = 0  # next raw line index to copy (inclusive)
     for start, end, text in spans:
-        buffer = splice_resolution(buffer, (start, end), text)
-    return buffer
+        out.extend(lines[cursor:start])
+        out.append(text)
+        cursor = end + 1
+    out.extend(lines[cursor:])
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -421,15 +425,21 @@ def parse_resolution_json(
     data, ok = _try_json(preprocessed.strip())
     if ok:
         return _as_dict(data, warnings)
-    # Tier 2: lenient repair on the whole response (skipped under strict mode).
+    # 2b. s27-82 (B2): scan for balanced top-level objects BEFORE the
+    # whole-response repair tier — json_repair accepts essentially any
+    # non-empty input, so the old order returned a junk fragment-dict for
+    # prose+JSON responses (mislabeling them parse_failed) and the
+    # documented "prefer the last embedded object" scan was unreachable.
+    data, ok = _last_balanced_object(preprocessed.strip())
+    if ok:
+        warnings.append("parsed embedded JSON object (prose-wrapped)")
+        return _as_dict(data, warnings)
+    # Tier 3: lenient repair on the whole response (skipped under strict mode).
     if repair_mode != "strict":
         data, ok = _try_repair(preprocessed.strip())
         if ok:
             warnings.append("response salvaged via json-repair")
             return _as_dict(data, warnings)
-
-    # 3. Scan for balanced top-level objects; keep the last parseable one.
-    warnings.append("strict JSON parse failed; scanning for embedded object")
     candidates = _find_balanced_objects(preprocessed)
     for cand in reversed(candidates):
         data, ok = _try_json(cand)
@@ -678,6 +688,22 @@ def _extract_markdown_code_block(raw: str) -> str | None:
     return None
 
 
+#: The metadata keys the markdown-code layout's contract defines. The
+#: balanced-object scan accepts an object only when it carries at least one
+#: of these keys — an arbitrary dict-literal from the CODE body (a config
+#: default, a constant in the merged source) is not metadata.
+_METADATA_KEYS = frozenset({
+    "needs_human", "explanation", "merge_analysis", "current_side_intent",
+    "replayed_commit_intent", "preserved_current_side",
+    "preserved_replayed_commit_side", "self_reported_confidence",
+})
+
+
+def _is_metadata_like(data: object) -> bool:
+    return isinstance(data, dict) and bool(
+        _METADATA_KEYS & set(data))
+
+
 def _parse_markdown_metadata(raw: str) -> dict | None:
     """Return the metadata dict from the markdown-code layout's JSON fence.
 
@@ -686,25 +712,59 @@ def _parse_markdown_metadata(raw: str) -> dict | None:
     parses it tolerantly (reusing the repair + balanced-object scan). Returns
     ``None`` when no JSON fence / object is found. Bare top-level JSON (no
     fence) is also accepted so a terse model still parses.
+
+    s27-82 (tenth-pass follow-up B1/B3): the balanced-object scan previously
+    ran over the WHOLE response — a dict-literal INSIDE the merged code (a
+    config default, a ``REJECTION = {...}`` constant) was parsed as metadata,
+    fabricating a refusal from the code's own content; and a TRUNCATED
+    ```json fence was "repaired" into metadata despite never closing. Now:
+    objects are scanned only AFTER the last code fence, only CLOSED fences
+    qualify, and an accepted object must carry at least one contract key.
     """
     json_blocks: list[str] = []
-    for info, body, _closed in _iter_fenced_blocks(raw):
-        if info.lower().startswith("json"):
+    last_fence_end = 0
+    search_from = 0
+    for info, body, closed in _iter_fenced_blocks(raw):
+        pos = raw.find(body, search_from)
+        if pos < 0:
+            continue
+        search_from = pos + len(body)
+        if info.lower().startswith("json") and closed:
             json_blocks.append(body)
+        last_fence_end = max(last_fence_end, search_from)
     candidates: list[str] = []
     if json_blocks:
         candidates.append(json_blocks[-1])
-    # Also consider bare top-level objects (a model that emitted the metadata
-    # without a fence) — the balanced-object scan handles prose-prefixed JSON.
-    candidates.extend(_find_balanced_objects(raw))
+    # Bare top-level objects (a model that emitted the metadata without a
+    # fence) — scanned only in the text AFTER the last code fence: an object
+    # inside the CODE body is code content, not metadata.
+    tail = raw[last_fence_end:]
+    candidates.extend(_find_balanced_objects(tail))
     for cand in candidates:
         data, ok = _try_json(cand)
-        if ok:
-            return data if isinstance(data, dict) else None
-        data, ok = _try_repair(cand)
-        if ok:
-            return data if isinstance(data, dict) else None
+        if not ok:
+            data, ok = _try_repair(cand)
+        if ok and _is_metadata_like(data):
+            return data
     return None
+
+
+def _last_balanced_object(text: str) -> tuple[object, bool]:
+    """Parse the LAST balanced top-level ``{...}`` object in ``text``.
+
+    The prose-wrapped tier's primitive (s27-82): the documented contract is
+    "chain-of-thought prose followed by JSON — prefer the last one", which
+    the whole-response json-repair tier was shadowing.
+    """
+    try:
+        objects = _find_balanced_objects(text)
+    except Exception:  # noqa: BLE001 — scanner must not raise
+        return None, False
+    for cand in reversed(objects):
+        data, ok = _try_json(cand)
+        if ok:
+            return data, True
+    return None, False
 
 
 def _find_balanced_objects(text: str) -> list[str]:

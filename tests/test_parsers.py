@@ -348,9 +348,11 @@ def test_parse_resolution_prose_then_json():
     raw = "user: let me think...\nso the answer is\n{\"resolved_text\": \"z\"}\n"
     data, warns = parse_resolution_json(raw)
     assert data["resolved_text"] == "z"
-    # The JSON repair tier (json-repair) now salvages this BEFORE the scan runs;
-    # the warning reflects the repair path, not the scan fallback.
-    assert any("salvaged" in w or "scan" in w for w in warns)
+    # s27-82 (B2): the prose-wrapped object parses via the balanced-object
+    # scan BEFORE the whole-response json-repair tier — the old order let
+    # json-repair (which accepts nearly anything) return a junk fragment
+    # dict and mislabel the response parse_failed.
+    assert any("prose-wrapped" in w for w in warns)
 
 
 def test_parse_resolution_ignores_braces_in_strings():

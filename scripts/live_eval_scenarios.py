@@ -788,7 +788,23 @@ def main() -> int:
     results = []
     for sc in sel:
         print(f"[scenario] {sc['id']} ...", flush=True)
-        row = run_scenario(sc, client, flights_dir=Path(args.preserve_flights) if args.preserve_flights else None)
+        # s27-82: a single scenario's crash must not discard the sweep's
+        # completed rows (the results JSON is written only after the loop).
+        # Synthesize an infra row so the run is countable and resumable.
+        try:
+            row = run_scenario(sc, client, flights_dir=Path(args.preserve_flights) if args.preserve_flights else None)
+        except KeyboardInterrupt:
+            print(f"[scenario] {sc['id']} interrupted by user", flush=True)
+            break
+        except Exception as exc:  # noqa: BLE001 — one bad scenario ≠ lost sweep
+            print(f"[scenario] {sc['id']} harness error: "
+                  f"{type(exc).__name__}: {str(exc)[:160]}", flush=True)
+            results.append({"id": sc["id"], "dataset": sc["dataset"],
+                            "steps": len(sc.get("conflict_steps", [])),
+                            "verdict": "ESCALATE", "escalated": True,
+                            "terminal_reason": "SETUP_FAILED",
+                            "reason": f"harness error: {exc}"[:200]})
+            continue
         results.append(row)
         print(f"  {row.get('verdict')} {row.get('elapsed', '?')}s "
               f"files_ok={row.get('files_ok', '-')} {row.get('reason', '')[:60]}",

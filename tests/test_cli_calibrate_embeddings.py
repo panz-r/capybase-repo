@@ -131,10 +131,34 @@ def test_calibrate_embeddings_preserves_llm_calibration_knobs(tmp_path: Path):
     assert data["embedding_calibration"]["ok"] is True
 
 
-def test_calibrate_embeddings_creates_profile_when_absent(tmp_path: Path):
-    """No prior profile: a fresh one is created with safe defaults for the LLM
-    knobs and the calibrated embedding floor set."""
+def test_calibrate_embeddings_absent_profile_gets_sane_knobs(tmp_path: Path):
+    """s27-82: a created profile carries the ACTIVE config's resolution
+    knobs — the old placeholder hardcoded max_tokens=1, which passed
+    validation (only <= 0 is rejected) and bricked every later generation
+    once apply_profile overlaid it."""
     profile_path = tmp_path / "model_profile.json"
+    cfg = _config_with_model()
+    rc = _run_calibrate_embeddings(
+        cfg,
+        repo=str(tmp_path),
+        profile_path=str(profile_path),
+        client_factory=_factory(_DomainFakeClient()),
+        out=io.StringIO(),
+    )
+    assert rc == 0
+    p = ModelProfile.load(profile_path)
+    assert p is not None
+    assert p.max_tokens == cfg.model.max_tokens
+    assert p.max_tokens > 1
+    assert 0.0 < p.embedding_min_similarity <= 1.0
+
+
+def test_calibrate_embeddings_replaces_corrupt_profile(tmp_path: Path):
+    """s27-82: a CORRUPT existing profile must not deadlock the recovery
+    command (the strict loader raised before the write). The command
+    replaces it with a fresh, valid profile carrying the calibrated floor."""
+    profile_path = tmp_path / "model_profile.json"
+    profile_path.write_text('{"model": "vibethink", "trunc')
     rc = _run_calibrate_embeddings(
         _config_with_model(),
         repo=str(tmp_path),
@@ -145,7 +169,7 @@ def test_calibrate_embeddings_creates_profile_when_absent(tmp_path: Path):
     assert rc == 0
     p = ModelProfile.load(profile_path)
     assert p is not None
-    assert p.model == "vibethink"  # match key set from active config
+    assert p.model == "vibethink"
     assert 0.0 < p.embedding_min_similarity <= 1.0
 
 
