@@ -127,7 +127,7 @@ class run_lock_guard:
         if live is not None:
             raise RuntimeError(
                 f"another capybase run is live on this repo "
-                f"(pid {live.get('pid')}, started {live.get('started', '?')}). "
+                f"(pid {live.get('pid')}, started {live.get('start_time', '?')}). "
                 f"Refusing to start. Delete {lock_path(self.repo)} only if "
                 f"that process is really gone.")
         write_lock(self.repo)

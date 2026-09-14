@@ -148,8 +148,15 @@ def _owned_worktrees(git: GitBackend, repo: Path) -> list[str]:
     def _is_owned(wt_path: str, branch: str, admin_name: str) -> bool:
         if branch.startswith("refs/heads/capybase/"):
             return True
+        # s27-86: the prefix signal now ALSO requires the worktree to live
+        # in the tempdir — capybase creates candidate/dryrun/futureprobe
+        # worktrees under tempfile.gettempdir(); a user checkout merely
+        # NAMED capybase-candidate-experiment in their home directory must
+        # not be force-removed by the name match alone.
         if admin_name.startswith(OWNED_ADMIN_PREFIXES):
-            return True
+            import tempfile as _tf
+            if str(wt_path).startswith(_tf.gettempdir()):
+                return True
         # s27-85: prefix at a PATH-SEGMENT boundary — the substring check
         # force-removed a user worktree at e.g.
         # /home/x/capybase-candidate-experiment.

@@ -176,16 +176,20 @@ class GitBackend:
         the stuck-guard silently disabled.
         """
         try:
-            for state_dir, end_name in (("rebase-merge", "end"),
-                                        ("rebase-apply", "last")):
+            # s27-86: the apply backend writes {next,last} — the s27-85
+            # fix probed {msgnum,last} (msgnum is a git-am relic) and never
+            # matched, leaving the apply-backend guard stillborn.
+            for state_dir, counter, end_name in (
+                    ("rebase-merge", "msgnum", "end"),
+                    ("rebase-apply", "next", "last")):
                 p_res = self._run(["rev-parse", "--git-path", state_dir])
                 if not p_res.ok or not p_res.stdout.strip():
                     continue
                 sdir = Path(self.repo) / p_res.stdout.strip()
-                msgnum = sdir / "msgnum"
+                counter_f = sdir / counter
                 end_f = sdir / end_name
-                if msgnum.is_file() and end_f.is_file():
-                    return (int(msgnum.read_text().strip()),
+                if counter_f.is_file() and end_f.is_file():
+                    return (int(counter_f.read_text().strip()),
                             int(end_f.read_text().strip()))
         except Exception:  # noqa: BLE001 — diagnostic signal, never fatal
             pass

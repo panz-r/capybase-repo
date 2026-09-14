@@ -29,6 +29,12 @@ import signal
 import time
 
 
+_BUILD_TOOLS = frozenset({
+    "make", "gmake", "ccache", "gcc", "g++", "cc1", "cc1plus", "ld",
+    "libtool", "cargo", "rustc", "ninja", "python3",
+})
+
+
 def kill_stale_build_processes() -> int:
     """SIGKILL stale compiler/ccache processes from previous runs.
 
@@ -73,21 +79,30 @@ def kill_stale_build_processes() -> int:
             continue
         # s27-85: the cwd rule requires the worktree dir to STILL EXIST —
         # a live eval's worktree is present; a user shell cd'd into a
-        # since-deleted (or live!) tree must not die. Combined with a
-        # recency guard: only processes started within the window a stale
-        # generation can be (12h) are candidates.
+        # since-deleted tree must not die for a stale-generation kill.
         if cwd_hit and not os.path.isdir(str(cwd)):
             continue
-        if cwd_hit:
-            try:
-                with open(f"/proc/{pid_dir}/stat") as f:
-                    stat = f.read()
-                start_ticks = int(stat[stat.rindex(")") + 2:].split()[19])
-                uptime_s = float(open("/proc/uptime").read().split()[0])
-                age_s = uptime_s - start_ticks / os.sysconf("SC_CLK_TCK")
-                if age_s > 12 * 3600:
-                    continue  # older than any stale generation window
-            except (OSError, ValueError, IndexError):
+        # s27-85: recency guard for ALL candidates — only processes started
+        # within the window a stale generation can occupy (12h) die. A
+        # days-old `tail -f` on a build log has the marker in argv and must
+        # not be killed.
+        try:
+            with open(f"/proc/{pid_dir}/stat") as f:
+                stat = f.read()
+            start_ticks = int(stat[stat.rindex(")") + 2:].split()[19])
+            uptime_s = float(open("/proc/uptime").read().split()[0])
+            age_s = uptime_s - start_ticks / os.sysconf("SC_CLK_TCK")
+            if age_s > 12 * 3600:
+                continue  # older than any stale generation window
+        except (OSError, ValueError, IndexError):
+            continue
+        # s27-85: a cwd-only match (bare `make`/`ccache` carry no marker)
+        # is the leaked-orphan signature — kill. A MARKER-ONLY match (cwd
+        # elsewhere: `tail -f /var/tmp/capy-rw-x/build.log`) must ALSO be
+        # a build-tool binary, or `tail -f` on a live eval's log dies.
+        if not cwd_hit:
+            argv0 = tokens[0].rsplit("/", 1)[-1] if tokens else ""
+            if argv0 not in _BUILD_TOOLS:
                 continue
         try:
             os.kill(pid, signal.SIGKILL)

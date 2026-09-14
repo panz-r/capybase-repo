@@ -503,16 +503,12 @@ class OpenAICompatibleClient:
                     if _has_complete_answer(accumulated):
                         early_stop = True
                         break
-                    # s27-83: the markdown_code layout's answer is a code
-                    # fence + a metadata object (no resolved_text key) — the
-                    # resolved_text-only check never fired, so every
-                    # md-layout stream was read to [DONE]. A CLOSED json
-                    # fence whose body parses to a metadata-like object
-                    # (explanation present) means the answer is complete.
-                    if "```" in accumulated and _md_metadata_complete(
-                            accumulated):
-                        early_stop = True
-                        break
+                    # s27-85: NO md-metadata early-stop. The s27-83 shape
+                    # heuristic (closed json fence + explanation key) was
+                    # layout-blind and could truncate v6 planning drafts or
+                    # md bodies containing embedded json — the efficiency
+                    # gain never justified truncating a correct answer.
+                    # markdown_code streams read to [DONE] by design.
         except socket.timeout as exc:
             raise RuntimeError(
                 f"LLM request failed: socket read timed out after "
@@ -573,37 +569,6 @@ def _mean_token_entropy_from_logprobs(entries: list[Any]) -> float | None:
         return None
     return sum(nlls) / len(nlls)
 
-
-def _md_metadata_complete(accumulated: str) -> bool:
-    """True when a CLOSED ```json fence strict-parses to a metadata-like
-    object (an ``explanation`` key) — the markdown_code layout's completion
-    signal (s27-83: the resolved_text-only early-stop never fired under
-    that layout, so every md stream was read to [DONE]).
-
-    STRICT parse only — no repair on partial streaming text (the same
-    discipline as _has_complete_answer)."""
-    import json as _json
-    # s27-84: gate on the md CONTRACT's shape — a closed NON-json fence (the
-    # code block) must PRECEDE the metadata fence, and the object must not
-    # carry resolved_text. Ungated, a v6-layout model drafting a json
-    # skeleton (with an explanation field) while PLANNING tripped the stop
-    # mid-answer.
-    idx = accumulated.rfind("```json")
-    if idx < 0:
-        return False
-    before = accumulated[:idx]
-    if "```" not in before:
-        return False  # no code block yet — this may be a planning draft
-    rest = accumulated[idx + len("```json"):]
-    end = rest.find("```")
-    if end < 0:
-        return False  # fence not closed — still streaming
-    try:
-        data = _json.loads(rest[:end].strip())
-    except ValueError:
-        return False
-    return (isinstance(data, dict) and "explanation" in data
-            and "resolved_text" not in data)
 
 
 def _has_complete_answer(accumulated: str) -> bool:

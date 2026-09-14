@@ -1265,7 +1265,13 @@ def main(argv: list[str] | None = None) -> int:
         # The run lock: one live capybase run per repo (clean reads it to
         # refuse cleaning under an active run; a crash leaves it stale,
         # which reads as dead).
-        with run_lock_guard(getattr(args, "repo", ".")):
+        try:
+            _lock_ctx = run_lock_guard(getattr(args, "repo", "."))
+        except RuntimeError as exc:
+            # s27-85: a LIVE lock is a clean refusal, not a traceback.
+            print(f"capybase: error: {exc}", file=sys.stderr)
+            return 2
+        with _lock_ctx:
             if args.command == "manual":
                 result = orch.manual()
                 return 1 if result.escalated else 0
