@@ -1168,12 +1168,12 @@ def probe_two_phase(
     client: Any,
     model_cfg: ModelConfig,
     *,
-    existing_choices: "MechanismChoices | None" = None,
-    existing_profile: "PromptProfile | None" = None,
     n_reps: int = 1,
     run_phase2: bool = True,
     capabilities: "ModelCapability | None" = None,
     force_factors: tuple[str, ...] = (),
+    existing_choices: "MechanismChoices | None" = None,
+    existing_profile: "PromptProfile | None" = None,
 ) -> tuple[ProbeResult, "MechanismChoices", "PromptProfile"]:
     """Multi-fidelity epoch calibration: screen, refine, tie-break — anytime.
 
@@ -1217,13 +1217,14 @@ def probe_two_phase(
     from capybase.quality import evaluate_setting_replicated
 
     decisions: list[str] = []
-    choices = existing_choices if existing_choices is not None else MechanismChoices()
-    winner_profile = existing_profile if existing_profile is not None else DEFAULT_PROFILE
+    choices = MechanismChoices()
+    # s27-90: a new calibration is independent — it decides fresh from the
+    # TOML-known-good baseline; the stored profile it replaces is history.
+    winner_profile = DEFAULT_PROFILE
 
     # s27-82: the guard must test the corpus the mechanism A/B actually
     # RUNS (the task-filtered one, computed below) — the old check tested
     # the always-15 default corpus, so --task config_merge ran a full
-    # mechanism selection on 2 cases.
     _task_corpus = conflicts_with_context()
     if len(_task_corpus) < _MIN_CORPUS_FOR_MECHANISM_SELECTION:
         n = len(_task_corpus)
@@ -1231,9 +1232,15 @@ def probe_two_phase(
             f"corpus too small for two-phase selection ({n} < "
             f"{_MIN_CORPUS_FOR_MECHANISM_SELECTION} min); keeping existing config"
         )
+        # s27-90: the guard PRESERVES the stored mechanism config (never a
+        # fresh samples=1 decision — that would silently downgrade).
+        preserved_choices = existing_choices if existing_choices is not None \
+            else choices
+        preserved_profile = existing_profile if existing_profile is not None \
+            else winner_profile
         return (
             ProbeResult("two_phase", ok=False, detail="; ".join(decisions)),
-            choices, winner_profile,
+            preserved_choices, preserved_profile,
         )
 
     factors = _two_phase_factors(model_cfg, capabilities=capabilities,
@@ -1724,15 +1731,19 @@ def run_calibration(
     # short-circuit the DOE for near-perfect models (Part 2).
     mech_cfg = e2e_cfg
     choices = MechanismChoices()
-    existing_prompt = None
+    existing_choices = None
+    # s27-90: the DOE is INDEPENDENT of prior calibrations — baseline and
+    # Phase-2 inheritance come from the TOML-known-good levels; the stored
+    # profile is never seeded into the design. The stored mechanism choices
+    # are carried ONLY by the too-small-corpus guard below (preserve
+    # without decide).
     if existing_profile is not None and existing_profile.model == model_cfg.model:
         q = existing_profile.quality
-        choices = MechanismChoices(
+        existing_choices = MechanismChoices(
             samples=q.samples, two_pass=q.two_pass, plan_search=q.plan_search,
             prompt_variants=q.prompt_variants, diverse_sampling=q.diverse_sampling,
             enable_self_consistency=q.enable_self_consistency,
         )
-        existing_prompt = existing_profile.prompt.profile
 
     from capybase.prompt_profile import DEFAULT_PROFILE as _DEFAULT_PROMPT
 
@@ -1753,7 +1764,7 @@ def run_calibration(
                    f"of {capabilities.corpus_spotcheck_n} spot-check); "
                    "DOE skipped, cheap baseline locked in",
         ))
-        prompt_winner = existing_prompt if existing_prompt is not None else _DEFAULT_PROMPT
+        prompt_winner = _DEFAULT_PROMPT
         mech_result = ProbeResult(
             "mechanisms", ok=False,
             detail="skipped (early-exit: near-perfect model); samples=1, all off",
@@ -1767,7 +1778,7 @@ def run_calibration(
     elif run_mechanisms and run_prompt_profile:
         tp_result, choices, prompt_winner = probe_two_phase(
             client, mech_cfg,
-            existing_choices=choices, existing_profile=existing_prompt,
+            existing_choices=existing_choices,
             n_reps=n_reps, run_phase2=run_phase2,
             capabilities=capabilities, force_factors=force_factors,
         )
@@ -1789,19 +1800,13 @@ def run_calibration(
         )
         results.append(pp_result)
     else:
-        prompt_winner = existing_prompt if existing_prompt is not None else _DEFAULT_PROMPT
-        if choices.samples > 1 or any(getattr(choices, f) for f, _ in _CANDIDATE_MECHANISMS):
-            mech_result = ProbeResult(
-                "mechanisms", ok=False,
-                detail=f"skipped (sweep elided); preserved existing choices: "
-                       f"samples={choices.samples}, "
-                       f"{', '.join(f for f in ('two_pass','plan_search','prompt_variants','diverse_sampling','enable_self_consistency') if getattr(choices, f)) or 'all mechanisms off'}",
-            )
-        else:
-            mech_result = ProbeResult(
-                "mechanisms", ok=False,
-                detail="skipped (sweep elided); no existing choices to preserve",
-            )
+        # s27-90: independence — an elided sweep means NO mechanism decision
+        # was made; the profile records the plain defaults.
+        prompt_winner = _DEFAULT_PROMPT
+        mech_result = ProbeResult(
+            "mechanisms", ok=False,
+            detail="skipped (sweep elided); samples=1, all mechanisms off",
+        )
         results.append(mech_result)
         pp_result = ProbeResult(
             "prompt_profile", ok=False,

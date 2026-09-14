@@ -475,7 +475,7 @@ def _run_calibrate(
     profile unless ``dry_run``. Exits non-zero if the endpoint was unreachable
     (so a transient outage doesn't silently overwrite a good profile).
     """
-    from capybase.calibration_profile import resolve_profile_path
+    from capybase.calibration_profile import ModelProfile, resolve_profile_path
     from capybase.probes import run_calibration
 
     client = (
@@ -487,15 +487,7 @@ def _run_calibrate(
     # times); it's a quick capability check (max_tokens/json_mode/logprobs) only.
     # --calibrate-reps N makes each design point noise-robust (majority vote).
     # --calibrate-phase1-only runs the screening without Phase-2 refinement.
-    # s27-82: wire the existing_profile seam (it existed unused) — a
-    # recalibrate seeds its mechanism choices from the STORED profile
-    # instead of silently regressing them to TOML defaults.
-    from capybase.calibration_profile import ModelProfile as _MP
     _resolved_profile = resolve_profile_path(repo, profile_path)
-    try:
-        _prior_profile = _MP.load(_resolved_profile)
-    except Exception:  # noqa: BLE001 — corrupt profile: calibrate fresh
-        _prior_profile = None
     report = run_calibration(
         client,
         config.model,
@@ -506,7 +498,6 @@ def _run_calibrate(
         force_factors=tuple(enable_factors),
         task=task,
         embeddings_model=config.memory.embeddings_model,
-        existing_profile=_prior_profile,
     )
 
     resolved = resolve_profile_path(repo, profile_path)
@@ -521,11 +512,13 @@ def _run_calibrate(
         # ``calibrate-embeddings`` derived. Carry them over ONLY when the stored
         # profile is for the same model — a model swap correctly drops them (the
         # calibrated floor was fit for the old model and would be wrong now).
-        # s27-84: reuse the PRE-SWEEP tolerant load — a strict load here
-        # crashed AFTER the multi-hour sweep on a corrupt/legacy profile,
-        # saving nothing (the exact deadlock class s27-82 fixed for
-        # calibrate-embeddings).
-        prior = _prior_profile
+        # s27-84/90: tolerant load — a strict load here crashed AFTER the
+        # multi-hour sweep on a corrupt/legacy profile, saving nothing.
+        prior = None
+        try:
+            prior = ModelProfile.load(resolved)
+        except Exception:  # noqa: BLE001 — a corrupt stored profile yields
+            pass           # no carry-over; the fresh sweep data stands alone
         if prior is not None and prior.model == report.profile.model:
             report.profile.embedding_min_similarity = prior.embedding_min_similarity
             report.profile.embedding_calibration = prior.embedding_calibration
