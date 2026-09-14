@@ -143,7 +143,7 @@ def test_continuity_all_skipped_is_not_a_regression(repo):
     orch = _orch(repo)
     orch._capture_test_continuity_baseline()
     postmerge_out = (
-        "tests/test_app.py::test_greet SKIPPED (importorskip broke)\\n"
-        "========================= 1 skipped in 0.1s =========================\\n"
+        "tests/test_app.py::test_greet SKIPPED (importorskip broke)\n"
+        "========================= 1 skipped in 0.1s =========================\n"
     )
     assert orch._test_continuity_regressions(postmerge_out, "pytest -v") == []

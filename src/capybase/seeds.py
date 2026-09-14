@@ -12,9 +12,11 @@ is in progress.
 
 Semantics are rebase-relative, not harness-relative: "the two final states
 THIS rebase reconciles" replace "the two mined branch tips". The harness's
-replay IS a production-shaped rebase, so the census transfers; in harness
-runs the native computation yields the same dict (a free parity check —
-the harness's registration stays authoritative when already present).
+replay IS a production-shaped rebase, so the census transfers. The native
+universe is a DOCUMENTED SUPERSET of the harness's (--name-status records
+rename source paths that --name-only drops; absent-at-both still means
+deletion is the agreed state), so dicts can differ by those parity notes;
+the harness's registration stays authoritative when already present.
 
 Best-effort by contract: a blob read that fails or overruns the wall-clock
 budget just shrinks the seed dict (mechanisms decline; the cascade runs).

@@ -73,8 +73,6 @@ def test_compute_convergence_seeds_all_three_arms(repo):
 def test_registrar_populates_and_harness_precedence(repo):
     """The orchestrator registrar fills _convergence_seeds from the rebase
     state; an already-registered dict (the eval harness) wins."""
-    from types import SimpleNamespace
-
     from capybase.orchestrator import Orchestrator
 
     repo = Path(repo)
@@ -116,7 +114,13 @@ def test_registrar_populates_and_harness_precedence(repo):
     orch2._history_plan = None
     orch2._lazy_build_history_from_rebase_state()
     assert orch2._history_plan is not None, "fixture must yield a plan"
-    orch2._register_native_convergence_seeds()
+    # pin the plan-reuse claim: with a plan present, the registrar must NOT
+    # re-walk the range (the lazy build already paid the patch-id walk)
+    import unittest.mock as _mock
+    with _mock.patch.object(
+            GitBackend, "replayed_commit_sequence",
+            side_effect=AssertionError("second walk")):
+        orch2._register_native_convergence_seeds()
     seeds2 = getattr(orch2, "_convergence_seeds", None)
     assert seeds2 == seeds, (seeds2, seeds)   # identical via either branch
 

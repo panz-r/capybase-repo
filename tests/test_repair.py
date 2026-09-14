@@ -589,7 +589,7 @@ def test_repair_edits_only_no_full_text_falls_back_to_prev():
     text and all edits miss, the fallback is the PREVIOUS text — not a
     success-shaped empty candidate (which burned a NonEmptyResolution
     failure)."""
-    from capybase.resolution_engine import ResolutionEngine, _apply_repair_edits
+    from capybase.resolution_engine import _apply_repair_edits
     cand = _candidate("")            # edits-only response: no full text
     cand._repair_edits = [{"search": "NONEXISTENT", "replace": "x"}]
     prev = _candidate("    return [0, 9]")
