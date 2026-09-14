@@ -182,7 +182,6 @@ enabled = $CB_STRUCTURAL_ENABLED
 languages = ["python", "rust"]
 
 [future]
-enable_structural_context = $CB_STRUCTURAL_ENABLED
 enable_self_consistency = $CB_ENABLE_SELF_CONSISTENCY
 
 [tests]

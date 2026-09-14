@@ -4892,6 +4892,25 @@ class Orchestrator:
         self._shared_embedder: object | None = None
         self.paths = SessionPaths(self.session_id, repo)
         self.paths.mkdirs()
+        # s27-89: keep .rebase-agent/ out of `git status` — the session
+        # dirs carry journals/prompts/snapshots that must never be committed,
+        # and the repo-local info/exclude (not the tracked .gitignore) is
+        # the per-installation place for that. Best-effort, idempotent.
+        try:
+            _gx = self.git._run(["rev-parse", "--git-path", "info/exclude"])
+            if _gx.ok and _gx.stdout.strip():
+                from pathlib import Path as _P
+                _ex = _P(self.git.repo) / _gx.stdout.strip()
+                _ex.parent.mkdir(parents=True, exist_ok=True)
+                if _ex.exists():
+                    _txt = _ex.read_text(encoding="utf-8", errors="replace")
+                else:
+                    _txt = ""
+                if ".rebase-agent/" not in _txt:
+                    with open(_ex, "a", encoding="utf-8") as _fh:
+                        _fh.write("\n.rebase-agent/\n")
+        except Exception:  # noqa: BLE001 — visibility is advisory
+            pass
         self.journal = Journal(self.paths)
         # Cross-session operational log (vs the per-session journal, which is
         # the authoritative audit of THIS run). Logging is configured by the CLI

@@ -273,7 +273,6 @@ class PolicyConfig(BaseModel):
     # split. 0 = disabled (use the existing iteration-count-based loop).
     # Design: tiered verification for oversized C files (design v2).
     max_whole_file_repair_seconds: float = 0.0
-    allow_skip: bool = False
     allow_delete_conflicted_file: bool = False
     stage_only_validated_paths: bool = True
     context_lines: int = 15
@@ -637,7 +636,6 @@ class FutureConfig(BaseModel):
     # for eval runs; the store must be seeded (golden-path corpus at
     # /var/tmp/capybase-live/s21/memory or a per-repo store).
     enable_rag: bool = True
-    enable_structural_context: bool = False
     # Deterministic structural pre-resolution: BEFORE the
     # LLM, attempt a model-free resolution from base+sides via provably-safe
     # rules (identical sides, one-sided change, disjoint line edits). Every
@@ -1184,7 +1182,6 @@ class CalibrationConfig(BaseModel):
     # deliberate override (tests, experiments) — never repo-local by default.
     model_profile_path: str = ""
     escalate_threshold: float = 0.7
-    min_examples_for_calibration: int = 50
     # Consensus entropy above this → escalate (high-entropy splits mean no
     # candidate is trustworthy). 0=unanimous, 1=maximally split. Set high
     # (0.8) because even a 2-of-3 majority produces non-trivial entropy; we
@@ -1195,7 +1192,6 @@ class CalibrationConfig(BaseModel):
     # empirical guardrail tuned on capybase's own accepted/escalated outcomes
     # (a correctness proxy), NOT a proven coverage guarantee — see
     # ConformalRiskModel's caveat. Lower = escalate more.
-    conformal_alpha: float = 0.1
 
 
 class RoutingConfig(BaseModel):

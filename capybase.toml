@@ -126,7 +126,6 @@ critic_confidence_escalate_threshold = 0.8
 # escalates once exceeded instead of looping — bounds total latency. 0 =
 # disabled (retry-count budgets alone govern). Sits ABOVE the per-retry budgets.
 max_wall_time_per_unit_seconds = 0.0
-allow_skip = false
 allow_delete_conflicted_file = false
 stage_only_validated_paths = true
 # Number of context lines on each side of a conflict marker block.
@@ -307,13 +306,9 @@ model_path = ".rebase-agent/memory/calibration.json"
 # directory. Set an absolute or different relative path here to override.
 model_profile_path = ".rebase-agent/memory/model_profile.json"
 escalate_threshold = 0.7
-min_examples_for_calibration = 50
 # Consensus entropy above this → escalate (high-entropy splits mean no candidate
 # is trustworthy even if one passed validators). 0=unanimous, 1=max split.
 entropy_escalate_threshold = 0.8
-# Conformal prediction coverage (1-alpha). Fit with scripts/fit_calibration.py
-# --conformal; the p-value threshold guarantees this coverage of accepted merges.
-conformal_alpha = 0.1
 
 # Difficulty-aware routing (survey §6.1) + balance-aware SBCR/LLM routing
 # (survey §4.2). All opt-in; defaults keep behavior unchanged.
@@ -333,7 +328,6 @@ min_balance_for_sbcr_accept = 0.15
 [future]
 enable_self_consistency = false   # opt-in: raise [model] samples + set true for majority voting
 enable_rag = false                # set true + [memory] enabled = true for RAG few-shot
-enable_structural_context = false  # set true + [structural] enabled = true for AST context
 enable_verifier_model = true      # now wired + default-on in [validation] (opt-out)
 enable_mutation_testing = false
 # Deterministic structural pre-resolution (survey §6.4 layer 1): BEFORE the LLM,
