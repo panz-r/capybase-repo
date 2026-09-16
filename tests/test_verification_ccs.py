@@ -815,6 +815,91 @@ def test_compile_ccs_include_paths_resolves_sibling_header(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Session-degraded build skip (prior full-build timeout)
+# ---------------------------------------------------------------------------
+
+@skip_no_gcc
+def test_verify_file_c_session_degraded_skip_reports_fallback_failure(tmp_path):
+    """Pins the session-degraded contract (S28-40 followup): after a
+    prior full-build timeout, verify_file skips the build, takes the
+    syntax-only fallback, and when the fallback REJECTS the resolution
+    it reports a syntax hard failure — it must neither pass silently nor
+    (as in the duckdb-0061 cluster) crash while producing the verdict.
+    """
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    cfg = ValidationConfig()
+    cfg.cc_build_command = "make"  # truthy → the build block is entered
+    eng = VerificationEngine.default(cfg)
+    # A generic timeout degrades the session: full_build_available=False.
+    eng.build_state.note_timeout("generic", "make", 300)
+    # Brace-balanced but broken at line 5 — a DIFFERENT first error line
+    # than the marker baseline (line 2), so the "pre-existing parse error
+    # excused" logic does not excuse it and the fallback returns False.
+    resolved = (
+        "int compute(int n) {\n"
+        "    return n + 1;\n"
+        "}\n"
+        "\n"
+        "int broken(void) { return 0 }\n"
+    )
+    res = eng.verify_file(
+        "src/cfg.c", "c", _C_FILE_CONFLICT, [(span, resolved)],
+        repo_root=str(tmp_path),
+    )
+    assert res.features.get("build_skipped_prior_timeout") is True
+    assert not res.passed
+    syntax_fails = [f for f in res.hard_failures if f.validator == "syntax"]
+    assert syntax_fails, "the fallback's rejection must be reported"
+
+
+@skip_no_gcc
+def test_verify_file_c_build_timeout_fallback_reports_no_crash(tmp_path, monkeypatch):
+    """Regression for S28-40 (duckdb-0061, commit 4f76c4b): a build that
+    TIMES OUT used to leave ``err_lines`` unbound, and the shared
+    failing-probe tail read it — UnboundLocalError, fatal to the whole
+    harness process. The fix assigns err_lines from the timeout's
+    captured stderr/stdout; the timeout path must complete and report
+    the timeout + fallback outcome as a syntax failure.
+    """
+    import subprocess as _sp
+    import capybase.verification as _ver
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    cfg = ValidationConfig()
+    cfg.cc_build_command = "make"  # truthy, full build (no target template)
+    eng = VerificationEngine.default(cfg)
+    real_rst = _ver._run_shell_tree
+
+    def fake_rst(cmd, *a, **kw):
+        if "make" in str(cmd):
+            raise _sp.TimeoutExpired(
+                cmd=str(cmd), timeout=300,
+                output="make: Entering directory\n",
+                stderr="make[1]: *** [cfg.o] Interrupt\n")
+        return real_rst(cmd, *a, **kw)
+
+    monkeypatch.setattr(_ver, "_run_shell_tree", fake_rst)
+    # Broken resolved text at line 5 (a DIFFERENT first error line than the
+    # marker baseline's line 2, so it is NOT excused) — the syntax-only
+    # fallback rejects it and the not-syntax-ok probe-tail path is
+    # exercised to the end.
+    resolved = (
+        "int compute(int n) {\n"
+        "    return n + 1;\n"
+        "}\n"
+        "\n"
+        "int broken(void) { return 0 }\n"
+    )
+    res = eng.verify_file(
+        "src/cfg.c", "c", _C_FILE_CONFLICT, [(span, resolved)],
+        repo_root=str(tmp_path),
+    )
+    assert not res.passed
+    syntax_fails = [f for f in res.hard_failures if f.validator == "syntax"]
+    assert syntax_fails
+    assert "timed out" in syntax_fails[0].message
+
+
+# ---------------------------------------------------------------------------
 # Standalone gcc fallback: -Werror tolerance
 # ---------------------------------------------------------------------------
 
