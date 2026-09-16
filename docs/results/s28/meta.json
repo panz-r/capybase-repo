@@ -1,0 +1,259 @@
+{
+  "round": "s28",
+  "source": "/var/tmp/capybase-harvest-s28/full-harvest.json",
+  "recount": {
+    "total": 660,
+    "pass": 638,
+    "working": 10,
+    "era_dead": 1,
+    "pass_pct": 96.7,
+    "adj_pct": 96.8,
+    "pw_adj_pct": 98.3,
+    "by_language": {
+      "c": {
+        "cases": 204,
+        "pass": 200,
+        "working": 2,
+        "era_dead": 0,
+        "llm": 25
+      },
+      "cpp": {
+        "cases": 154,
+        "pass": 150,
+        "working": 1,
+        "era_dead": 0,
+        "llm": 25
+      },
+      "python": {
+        "cases": 108,
+        "pass": 99,
+        "working": 5,
+        "era_dead": 0,
+        "llm": 12
+      },
+      "rust": {
+        "cases": 194,
+        "pass": 189,
+        "working": 2,
+        "era_dead": 1,
+        "llm": 6
+      }
+    },
+    "mechanism_histogram": [
+      {
+        "mechanism": "deterministic_structural",
+        "cases": 312,
+        "pass": 306,
+        "working": 2,
+        "pw_pct": 98.7
+      },
+      {
+        "mechanism": "deterministic_source_current_only",
+        "cases": 143,
+        "pass": 136,
+        "working": 5,
+        "pw_pct": 98.6
+      },
+      {
+        "mechanism": "deterministic_source_current_only_stage",
+        "cases": 54,
+        "pass": 53,
+        "working": 1,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "combination_search",
+        "cases": 51,
+        "pass": 50,
+        "working": 1,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "plain_llm",
+        "cases": 38,
+        "pass": 38,
+        "working": 0,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "deterministic_source_replayed_only_stage",
+        "cases": 24,
+        "pass": 24,
+        "working": 0,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "deterministic_empty_side",
+        "cases": 7,
+        "pass": 6,
+        "working": 0,
+        "pw_pct": 85.7
+      },
+      {
+        "mechanism": "deterministic_wholesale_floor_replayed",
+        "cases": 7,
+        "pass": 7,
+        "working": 0,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "deterministic_wholesale_floor_current",
+        "cases": 7,
+        "pass": 6,
+        "working": 0,
+        "pw_pct": 85.7
+      },
+      {
+        "mechanism": "plain_llm+intent_coverage",
+        "cases": 4,
+        "pass": 3,
+        "working": 0,
+        "pw_pct": 75.0
+      },
+      {
+        "mechanism": "deterministic_deletion_respect_prune",
+        "cases": 3,
+        "pass": 2,
+        "working": 1,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "deterministic_source_replayed_only",
+        "cases": 3,
+        "pass": 3,
+        "working": 0,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "(unresolved)",
+        "cases": 2,
+        "pass": 0,
+        "working": 0,
+        "pw_pct": 0.0
+      },
+      {
+        "mechanism": "plain_llm+keyed_item_union",
+        "cases": 2,
+        "pass": 1,
+        "working": 0,
+        "pw_pct": 50.0
+      },
+      {
+        "mechanism": "deterministic_symbol_injection",
+        "cases": 1,
+        "pass": 1,
+        "working": 0,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "deterministic_docs_union",
+        "cases": 1,
+        "pass": 1,
+        "working": 0,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "deterministic_source_current_only+deletion_union",
+        "cases": 1,
+        "pass": 1,
+        "working": 0,
+        "pw_pct": 100.0
+      }
+    ],
+    "mechanism_participation": [
+      {
+        "mechanism": "deterministic_structural",
+        "cases": 341,
+        "pct_of_corpus": 51.7
+      },
+      {
+        "mechanism": "deterministic_source_current_only",
+        "cases": 164,
+        "pct_of_corpus": 24.8
+      },
+      {
+        "mechanism": "plain_llm",
+        "cases": 67,
+        "pct_of_corpus": 10.2
+      },
+      {
+        "mechanism": "combination_search",
+        "cases": 59,
+        "pct_of_corpus": 8.9
+      },
+      {
+        "mechanism": "deterministic_source_current_only_stage",
+        "cases": 54,
+        "pct_of_corpus": 8.2
+      },
+      {
+        "mechanism": "deterministic_source_replayed_only_stage",
+        "cases": 24,
+        "pct_of_corpus": 3.6
+      },
+      {
+        "mechanism": "deterministic_empty_side",
+        "cases": 9,
+        "pct_of_corpus": 1.4
+      },
+      {
+        "mechanism": "intent_coverage",
+        "cases": 8,
+        "pct_of_corpus": 1.2
+      },
+      {
+        "mechanism": "deterministic_wholesale_floor_replayed",
+        "cases": 7,
+        "pct_of_corpus": 1.1
+      },
+      {
+        "mechanism": "deterministic_wholesale_floor_current",
+        "cases": 7,
+        "pct_of_corpus": 1.1
+      },
+      {
+        "mechanism": "keyed_item_union",
+        "cases": 5,
+        "pct_of_corpus": 0.8
+      },
+      {
+        "mechanism": "deterministic_deletion_respect_prune",
+        "cases": 3,
+        "pct_of_corpus": 0.5
+      },
+      {
+        "mechanism": "deterministic_source_replayed_only",
+        "cases": 3,
+        "pct_of_corpus": 0.5
+      },
+      {
+        "mechanism": "block_capture",
+        "cases": 1,
+        "pct_of_corpus": 0.2
+      },
+      {
+        "mechanism": "deterministic_symbol_injection",
+        "cases": 1,
+        "pct_of_corpus": 0.2
+      },
+      {
+        "mechanism": "deterministic_docs_union",
+        "cases": 1,
+        "pct_of_corpus": 0.2
+      },
+      {
+        "mechanism": "deletion_union",
+        "cases": 1,
+        "pct_of_corpus": 0.2
+      }
+    ]
+  },
+  "generated": "2026-09-16",
+  "description": "Sprint-28 leg-1 harvest (README row): frozen 676-case s27-era corpus under the <desktop> profile + the s27 deterministic strengthening (~125 fixes, seeds family native, comment reconciliation, midband/subsumption adjudications, union certificates, deletion-respect arms). The 10 FALSE ESCALATE_TOOLCHAIN axum rows (cargo-cache corruption, S27-99) were dropped and re-run on the repaired cache: 10/10 PASS (7 at sim=1.000). Backup of the pre-rerun state: full-harvest-leg1-complete-backup.json alongside the results.",
+  "mechanism_commit": "5a44ee9 (dev; tree clean at harvest time)",
+  "state": "sprint-28: <desktop-profile-20260914> profile via provider <provider-name>; s27 full strengthening live in production; enable_convergence_seed=false; LSP/clippy off; rust_suppress_codes standalone-only. Post-harvest fix queue (S28-02/03/04/18/19/21/23/24 + S28-04 third arm) NOT yet applied \u2014 this row measures the pre-fix baseline.",
+  "command_template": "scripts/live_eval_realworld.py --provider <provider-name> --repeat-nonpass 3 --skip-existing --out full-harvest.json --preserve-flights flights-harvest (env CAPYBASE_WORKTREE_DIR=/var/tmp/capy-wt TMPDIR=/var/tmp CAPYBASE_SKIP_SIZE_GUARD=1); axum rerun = same command after dropping the 10 false rows",
+  "ran": "2026-09-15 10:31 UTC -> 2026-09-16 00:39 leg-1 complete (~14h wall incl. the dual-process incident + cargo-cache repair mid-run; all 676); axum rerun 2026-09-16 ~00:45 -> 00:55 (10/10 PASS)",
+  "verification": "recount from extracts (make_results_round.py, journal-fallback mechanism derivation); S28-27 full-overlap verdict diff vs s27 (zero mechanism regressions; 3 variance-class regressions ledgered S28-27/30/34, 4 deterministic improvements); S28-09+S28-32 PASS evidence audits clean corpus-wide; S28-12 exact-match oracle-leakage audit clean",
+  "outcome_summary": "638 PASS + 10 WORKING / 660 = 96.7% raw, 96.8% adj, 98.3% P+W (vs s27 637/660 = 96.5%: +4 deterministic improvements - 3 variance regressions = +1 net, at +17% median latency per S28-11); era 1 (sea-orm-0016 genuine); SAFE_SKIP 16 excluded; NEAR_MATCH 4, ORACLE_DIVERGENT 2, honest ESCALATE 5 (flask-0006, fmt-0003, nlohmann-0038, zenodo-0019, zenodo-0079); autopsy ledgered S28-01..34"
+}

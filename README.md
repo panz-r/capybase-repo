@@ -360,7 +360,9 @@ wired but off by default.
 
 All numbers were produced with **Google Gemma 4 E4B**, served by llama-server
 on local hardware. Non-PASS cases rerun up to 3 times; the verdict is the
-majority.
+majority. **llm** = cases whose resolution involved the model (the
+`resolution_bucket` is llm_one_shot or llm_cegis — the LLM
+participated, not that it solved the case alone).
 
 #### Corpus
 
@@ -369,7 +371,69 @@ git's own three-way merge leaves markers — anything git resolves
 cleanly is not a resolution problem) runs as a sharded harvest, one
 language at a time, fixes landing between rounds.
 
-#### Current round (s27)
+#### Current round (s28)
+
+All cases on the uniform commit `5a44ee9` — the sprint-28 leg-1
+round: the first full harvest under the newly calibrated **desktop
+profile** (2026-09-14), with the sprint-27 deterministic strengthening
+(deletion-respect arms, wholesale floor, midband and subsumption
+adjudications, union certificates, comment reconciliation). Δ is
+versus the prior full round (`71ac03a`, s27). 676 cases ran; the same
+16 git-resolvable skips leave the 660-row denominator. The 10 axum
+rows that failed on the corrupted cargo registry mid-run
+(infrastructure, not resolver capability) were re-run on the repaired
+cache: 10/10 PASS. Zero SETUP_FAILED post-repair; wall ~14h. Flip
+audit vs s27: 4 up (deterministic-arm wins — sqlite-0016, sqlite-0092,
+redis-0026, zenodo-0030), 3 down (repeat-3 profile variance under the
+new calibration — zenodo-0019/0079/0100); zero mechanism regressions.
+Era-dead stays 1 (sea-orm-0016, genuine). LLM participation fell
+106 → 68 cases; median per-case latency +17%.
+
+| lang | cases | PASS | WORKING | era-dead | llm | PASS % | adj % | P+W adj % | Δ P+W |
+|------|-------|------|---------|----------|-----|--------|-----------|-----------|-------|
+| python | 108 | 99 | 5 | 0 | 12 | 91.7% | 91.7% | 96.3% | −0.9pp |
+| c | 204 | 200 | 2 | 0 | 25 | 98.0% | 98.0% | 99.0% | +1.5pp |
+| rust | 194 | 189 | 2 | 1 | 6 | 97.4% | 97.9% | 99.0% | +0.0pp |
+| cpp | 154 | 150 | 1 | 0 | 25 | 97.4% | 97.4% | 98.1% | +0.0pp |
+| **total** | **660** | **638** | **10** | **1** | **68** | **96.7%** | **96.8%** | **98.3%** | **+0.3pp** |
+
+##### Mechanism breakdown
+
+Which mechanisms participate in accepted conflict resolutions, and how
+often each one does.
+
+Counting rules:
+
+- A case counts under each mechanism in its accepted candidates'
+  lineage.
+- Escalated cases have no accepted candidates and are excluded.
+- Rows sum to more than the 658 accepted cases: a case with several
+  participating mechanisms counts once per mechanism.
+
+| mechanism (participated in accepted) | cases | % of corpus |
+|---|---|---|
+| deterministic_structural | 341 | 51.7% |
+| deterministic_source_current_only | 164 | 24.8% |
+| plain_llm | 67 | 10.2% |
+| combination_search | 59 | 8.9% |
+| deterministic_source_current_only_stage | 54 | 8.2% |
+| deterministic_source_replayed_only_stage | 24 | 3.6% |
+| deterministic_empty_side | 9 | 1.4% |
+| intent_coverage | 8 | 1.2% |
+| deterministic_wholesale_floor_replayed | 7 | 1.1% |
+| deterministic_wholesale_floor_current | 7 | 1.1% |
+| keyed_item_union | 5 | 0.8% |
+| deterministic_deletion_respect_prune | 3 | 0.5% |
+| deterministic_source_replayed_only | 3 | 0.5% |
+| block_capture | 1 | 0.2% |
+| deterministic_symbol_injection | 1 | 0.2% |
+| deterministic_docs_union | 1 | 0.2% |
+| deletion_union | 1 | 0.2% |
+
+`meta.json` also contains `mechanism_histogram`: each case counted
+once, under the mechanism with the most accepted units.
+
+#### Prior round (s27)
 
 All cases on the uniform commit `71ac03a` — the sprint-27 round: the
 diff3 marker-leak fix family (validation no longer false-fails on
@@ -386,10 +450,6 @@ shift to WORKING (protobuf-0063); the one mechanism regression
 (sqlite-0016, an sbcr whole-file interleave) has its diagnosis thread
 open in the sprint ledger. The era floor collapsed again: 9 → 1
 (protobuf-0055, a supposed intrinsic, now passes).
-
-**llm** = cases whose resolution involved the model (the
-`resolution_bucket` is llm_one_shot or llm_cegis — the LLM
-participated, not that it solved the case alone).
 
 | lang | cases | PASS | WORKING | era-dead | llm | PASS % | adj % | P+W adj % | Δ P+W |
 |------|-------|------|---------|----------|-----|--------|-----------|-----------|-------|
@@ -453,9 +513,9 @@ not resolver failures).
 preserved, diverged from the human resolution below the PASS bar — the
 honest graded-success rate. Every number
 recomputes from the per-case extracts committed under `docs/results/`
-(current round: `s27/`, incl. its `meta.json` with the pinned
+(current round: `s28/`, incl. its `meta.json` with the pinned
 commit, the per-language recount, and the mechanism histogram; the
-prior rounds `s26/` and `s22r2/` remain for comparison).
+prior rounds `s27/`, `s26/` and `s22r2/` remain for comparison).
 
 ## Test suites
 
