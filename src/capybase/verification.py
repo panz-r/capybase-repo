@@ -6202,6 +6202,14 @@ class VerificationEngine:
                                             _chunk = _chunk.decode(
                                                 "utf-8", errors="replace")
                                         _to_out += _chunk
+                                # The shared failing-probe tail (:6448) reads
+                                # err_lines; the completed-build path assigns
+                                # it after the returncode check, but a timeout
+                                # never reaches that check. Without this, a
+                                # timeout whose syntax-only fallback ALSO
+                                # fails crashes here (duckdb-0061,
+                                # UnboundLocalError mid-harvest).
+                                err_lines = _to_out.splitlines()
                                 _kind = _classify_build_failure_kind(_to_out)
                                 if (
                                     _bs is not None and _is_full_build
