@@ -68,6 +68,14 @@ C_BUILD_COMMANDS: dict[str, str] = {
     "nlohmann-json-history": "cmake --build build",
     "clickhouse-history": "cmake --build build",
     "protobuf-history": "cmake --build build",
+    # S28-56 (leg-2): without an entry, libuv/prusaslicer get pre_continue
+    # "true" and NO whole-tree gate — whole-file validation degrades to
+    # standalone header-as-C syntax checks (false -Wimplicit-int
+    # REPAIR_FAILUREs on test-list.h's TEST_DECLARE expansions, and the
+    # D10 GATE_UNAVAILABLE oracle-probe can never fire). Both families
+    # are CMake-native; libuv-0022/0047/0002 re-run post-fix.
+    "libuv-history": "cmake --build build",
+    "prusaslicer-history": "cmake --build build",
 }
 
 # Build timeout. C builds at a specific commit can be slow (a full sqlite
