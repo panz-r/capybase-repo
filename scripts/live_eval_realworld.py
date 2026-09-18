@@ -571,6 +571,8 @@ def _classify_terminal_reason(reason: str) -> str:
       MODEL_EMPTY         — model returned empty (not oversized)
       MODEL_NEEDS_HUMAN   — model self-reported needs_human
       TIMEOUT_CONVERGENCE — CEGIS loop failed to converge (no-progress / wall-time)
+      VALIDATION_EXHAUSTED — unit unresolved: candidates repeatedly failed
+        validation (capability/repair, not budget)
       TIMEOUT_THROUGHPUT  — per-case timeout on a many-region file (>20 units)
       TIMEOUT_CAPABILITY  — per-case timeout on a small file (model can't solve it)
       REPAIR_FAILURE      — whole-file repair couldn't resolve a unit
@@ -619,7 +621,7 @@ def _classify_terminal_reason(reason: str) -> str:
         return "TIMEOUT_CONVERGENCE"
     if "could not resolve" in r:
         if "error:" in r or "syntax" in r or "delimiter" in r:
-            return "TIMEOUT_CONVERGENCE"
+            return "VALIDATION_EXHAUSTED"
         return "MODEL_EMPTY"
     return "OTHER"
 
