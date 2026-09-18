@@ -15846,52 +15846,14 @@ class Orchestrator:
                             outcome.validation = validation
                 except Exception:  # noqa: BLE001 — repair is best-effort
                     pass
-            # S28-79 v1.1: per-unit python string-balance repair. The live
-            # rerun showed the census's dominant python signature fires at
-            # the UNIT stage (the fragment carries the unterminated
-            # triple-quote; units never validate, so the whole-file ladder
-            # arm never engages — scikit-0052). Same candidate-generator
-            # doctrine as P6b above: repair the fragment, re-validate,
-            # adopt only on a pass.
-            if (not validation.passed
-                    and (unit.language or "").strip().lower() == "python"
-                    and cand.resolved_text
-                    and any("unterminated" in (getattr(f, "message", "") or "")
-                            and "string literal" in (getattr(f, "message", "") or "")
-                            for f in validation.hard_failures)):
-                try:
-                    from capybase.verification import (
-                        _py_string_imbalance, _try_close_unterminated_string,
-                    )
-                    _det = None
-                    for _f in validation.hard_failures:
-                        _m = re.search(r"detected at line (\d+)",
-                                       getattr(_f, "message", "") or "")
-                        if _m:
-                            _det = int(_m.group(1))
-                            break
-                    _fixed = None
-                    if _py_string_imbalance(cand.resolved_text) is not None:
-                        _fixed = _try_close_unterminated_string(
-                            cand.resolved_text, detected_line=_det)
-                    if _fixed is not None:
-                        _fixed_cand = cand.model_copy(update={
-                            "resolved_text": _fixed,
-                            "provenance": "deterministic_pystring_repair"})
-                        _f_val = self.verification.verify(unit, _fixed_cand)
-                        self._journal_validation(unit, _fixed_cand, _f_val)
-                        if _f_val.passed:
-                            self.journal.emit(
-                                "pystring_repair_applied",
-                                {"candidate_id": cand.candidate_id,
-                                 "unit_id": unit.unit_id},
-                                step_index=self.step, path=unit.path,
-                                unit_id=unit.unit_id)
-                            cand = _fixed_cand
-                            validation = _f_val
-                            outcome.validation = validation
-                except Exception:  # noqa: BLE001 — repair is best-effort
-                    pass
+            # S28-79 v1.2: per-unit python string-balance failures route
+            # through P6b's splice_level_delimiter_repair above — the
+            # imbalance lives on the SPLICED file (the fragment alone can
+            # be balanced; scikit-0052's ground truth), so the surgery
+            # must see the splice. delimiter_failure_shape classifies the
+            # "pystring" form; the whole-file ladder has its own arm
+            # (_try_deterministic_pystring_repair) for marker_span-less
+            # buffers the splice-level function cannot serve.
             # Sprint-19 P2: track this attempt's quality against a stashed
             # preservation-rejected candidate. Quality = passed validation
             # (warnings allowed — an equally-flagged retry is NOT strictly

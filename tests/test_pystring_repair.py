@@ -109,3 +109,31 @@ def test_repair_arm_declines_outside_its_shape():
         [_fail("unterminated string literal (detected at line 2)")],
         BROKEN, [(unit, _cand(BROKEN))], 0)
     assert diag == "repaired"
+
+
+def test_splice_level_pystring_form():
+    """S28-79 v1.2: the imbalance lives on the SPLICED file (the fragment
+    alone can be balanced — scikit-0052's ground truth), so P6b's
+    splice-level surgery owns the shape: repair the splice at the
+    detected line, remap the span, extract the region back out."""
+    from capybase.verification import splice_level_delimiter_repair
+
+    original = (
+        "def f():\n"
+        "    s = " + _DQ + "doc\n"          # conflict opens here (line 2)
+        "    return 1\n"
+    )
+    marker_span = (1, 1)  # 0-based inclusive: line 2
+    # The fragment alone is balanced; the SPLICE has the unterminated
+    # string (the fragment dropped the closer that lived after the span).
+    fragment = "    s = " + _DQ + "doc\n"
+    messages = [
+        "SyntaxError: unterminated triple-quoted string literal "
+        "(detected at line 4)",
+    ]
+    out = splice_level_delimiter_repair(
+        original, marker_span, fragment, messages, "python")
+    assert out is not None, "the pystring form must fire on the splice"
+    region, form = out
+    assert form == "pystring"
+    assert region.strip(), "the extracted region must be non-empty"

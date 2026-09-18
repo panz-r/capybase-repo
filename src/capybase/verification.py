@@ -3106,7 +3106,8 @@ def delimiter_failure_shape(messages: list[str]) -> str | None:
     """Classify failure messages into P6b's splice-repair shapes.
 
     Returns ``"delim"`` (unmatched paren/bracket), ``"brace"`` (mismatched
-    closing delimiter / brace imbalance / unmatched brace), or ``None``.
+    closing delimiter / brace imbalance / unmatched brace), ``"pystring"``
+    (unterminated python triple-quoted string — S28-79), or ``None``.
     Single source for both the candidate-level P6b check and the
     whole-file repair beam rung (s27-extend-21: they were two copies of
     the same string heuristics).
@@ -3119,6 +3120,9 @@ def delimiter_failure_shape(messages: list[str]) -> str | None:
                 or "brace imbalance detected" in m
                 or ("unmatched '" in m and "}" in m)):
             return "brace"
+    for m in messages:
+        if "unterminated" in m and "string literal" in m:
+            return "pystring"
     return None
 
 
@@ -3138,9 +3142,9 @@ def splice_level_delimiter_repair(
     and extracts the repaired REGION back out so the result stays
     splice-safe for any caller.
 
-    Returns ``(repaired_region, form)`` with form in ``{"delim", "brace"}``,
-    or None when the messages aren't a repairable shape / the repair didn't
-    change anything / the extracted region is empty.
+    Returns ``(repaired_region, form)`` with form in ``{"delim", "brace",
+    "pystring"}``, or None when the messages aren't a repairable shape /
+    the repair didn't change anything / the extracted region is empty.
 
     Used by BOTH the candidate-level P6b check (unit validation failures)
     and the whole-file repair beam rung (whole-file gate failures) —
@@ -3169,6 +3173,24 @@ def splice_level_delimiter_repair(
         if braced is not None and braced != spliced:
             repaired = braced
             shape = "brace"
+    if repaired is None and shape == "pystring":
+        # S28-79: unterminated python triple-quoted string on the SPLICED
+        # file. Position-correct close at the SyntaxError's detected line
+        # (the string swallows the rest of the file; the fragment alone
+        # can be balanced — the splice is what broke).
+        detected = None
+        import re as _re_splice
+        for m in messages:
+            _m = _re_splice.search(r"detected at line (\d+)", m or "")
+            if _m:
+                detected = int(_m.group(1))
+                break
+        if _py_string_imbalance(spliced) is not None:
+            repaired = _try_close_unterminated_string(
+                spliced, detected_line=detected)
+            if (repaired is not None
+                    and _py_string_imbalance(repaired) is not None):
+                repaired = None
     if repaired is None:
         return None
     # Remap the marker span through the line diff (the brace repair may
