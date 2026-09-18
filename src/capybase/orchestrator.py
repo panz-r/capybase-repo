@@ -1642,6 +1642,14 @@ def _micro_symbol_decls(symbol: str, *texts: str, limit: int = 6) -> list[str]:
     return decls
 
 
+# S28-86 heuristic-hygiene: the adjudication-confidence floor shared by the
+# side-collapse, whole-side, and subsumption adjudications — below it, an
+# adjudicator verdict is "too weak to trust" and the conservative direction
+# (accept the churn-based answer) applies. Documented at each call site;
+# named here so the four sites cannot drift apart.
+ADJUDICATION_CONFIDENCE_FLOOR = 0.70
+
+
 def _try_signature_injection(
     buffer: str, hard_failures: list, side_texts: list[str],
     declined: "set[tuple[str, str]] | None" = None,
@@ -18264,7 +18272,8 @@ class Orchestrator:
         # None (unparseable/absent/no endpoint) accepts — churn numbers alone
         # never escalate.
         if adj is None or (adj.get("verdict") == "superseded"
-                           and adj.get("confidence", 0.0) >= 0.70):
+                           and adj.get("confidence", 0.0)
+                           >= ADJUDICATION_CONFIDENCE_FLOOR):
             return False
         dropped = ("current" if det["collapsed_to"] == "replayed" else "replayed")
         dropped_churn = (det["current_churn"] if dropped == "current"
@@ -18438,7 +18447,7 @@ class Orchestrator:
                 mb_fires = bool(
                     adj is not None
                     and adj["verdict"] == "superseded"
-                    and adj["confidence"] >= 0.70)
+                    and adj["confidence"] >= ADJUDICATION_CONFIDENCE_FLOOR)
                 self.journal.emit(
                     "midband_subsumption_gate",
                     {**mb, "enabled": mb_enabled, "adjudication": adj,
@@ -18476,7 +18485,7 @@ class Orchestrator:
                     adj_fires = bool(
                         adj is not None
                         and adj["verdict"] == "superseded"
-                        and adj["confidence"] >= 0.70)
+                        and adj["confidence"] >= ADJUDICATION_CONFIDENCE_FLOOR)
                     self.journal.emit(
                         "phase1_fast_path_adjudication",
                         {"n_units": len(units), "enabled": adj_enabled,
