@@ -11205,7 +11205,10 @@ class Orchestrator:
                                         # synthetic sides that don't build)
                                         if _f1_text.strip():
                                             _f1_check = self.verification.verify_file(
-                                                path, language, _f1_text, [],
+                                                path, language,
+                                                units[0].original_worktree_text
+                                                or _base_f1 or "",
+                                                [],
                                                 repo_root=str(self.git.repo),
                                                 whole_text=_f1_text)
                                             if not _f1_check.passed:
@@ -11251,7 +11254,10 @@ class Orchestrator:
                                             if not _side_text.strip():
                                                 continue
                                             _side_check = self.verification.verify_file(
-                                                path, language, _side_text, [],
+                                                path, language,
+                                                units[0].original_worktree_text
+                                                or _base_f1 or "",
+                                                [],
                                                 repo_root=str(self.git.repo),
                                                 whole_text=_side_text)
                                             if not _side_check.passed:
@@ -11379,7 +11385,10 @@ class Orchestrator:
                                 if _f2_text.strip():
                                     try:
                                         _f2_check = self.verification.verify_file(
-                                            path, language, _f2_text, [],
+                                            path, language,
+                                            units[0].original_worktree_text
+                                            or _base_f1 or "",
+                                            [],
                                             repo_root=str(self.git.repo),
                                             whole_text=_f2_text)
                                         _f2_ok = bool(_f2_check.passed)
@@ -11431,7 +11440,9 @@ class Orchestrator:
                                                     if _patched:
                                                         _pv2 = self.verification.verify_file(
                                                             path, language,
-                                                            _patched, [],
+                                                            units[0].original_worktree_text
+                                                            or _base_f1 or "",
+                                                            [],
                                                             repo_root=str(self.git.repo),
                                                             whole_text=_patched)
                                                         if _pv2.passed:
@@ -14658,7 +14669,9 @@ class Orchestrator:
                         continue
                     _val_p2 = self.verification.verify_file(
                         unit.path, unit.language,
-                        _side_text, [],
+                        unit.original_worktree_text
+                        or _base_p2 or "",
+                        [],
                         repo_root=str(self.git.repo),
                         whole_text=_side_text)
                     if _val_p2.passed:
@@ -16566,7 +16579,9 @@ class Orchestrator:
                                         if _np_st.strip():
                                             _np_chk = self.verification.verify_file(
                                                 unit.path, unit.language,
-                                                _np_st, [],
+                                                unit.original_worktree_text
+                                                or _np_base or "",
+                                                [],
                                                 repo_root=str(self.git.repo),
                                                 whole_text=_np_st)
                                             _np_compiling[_np_sn] = bool(_np_chk.passed)

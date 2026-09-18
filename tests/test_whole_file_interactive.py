@@ -120,9 +120,14 @@ def test_whole_file_escalation_presents_menu_and_edit_resolves(repo, monkeypatch
     real_verify_file = orch.verification.verify_file
 
     def content_aware_verify_file(path, language, original, resolutions, **kwargs):
-        # Read the ACTUAL spliced content the human would see.
+        # Read the ACTUAL spliced content the human would see. With no
+        # resolutions, the candidate rides in as whole_text (the S28-18
+        # probe contract baselines against the marker file in `original`
+        # — keying on `original` would judge the baseline, not the
+        # candidate).
         from capybase.adapters.parsers import splice_all_resolutions
-        whole = splice_all_resolutions(original, resolutions) if resolutions else original
+        whole = (splice_all_resolutions(original, resolutions) if resolutions
+                 else (kwargs.get("whole_text") or original))
         # The human's fix writes a clean def; the model's splice doesn't match it
         # (WholeFileFailingClient produces "x = 1" which isn't the real merge).
         # Treat the fixed content as passing; everything else as a hard failure.
@@ -206,7 +211,11 @@ def test_whole_file_edit_restores_raw_conflict_markers(repo, monkeypatch):
 
     def content_aware(path, language, original, resolutions, **kw):
         from capybase.adapters.parsers import splice_all_resolutions
-        whole = splice_all_resolutions(original, resolutions) if resolutions else original
+        # Candidate = the spliced buffer, or whole_text when resolutions
+        # are empty (S28-18 probe contract: `original` is the marker-file
+        # baseline, not the candidate).
+        whole = (splice_all_resolutions(original, resolutions) if resolutions
+                 else (kw.get("whole_text") or original))
         if "a = 10" in whole and "b = 20" in whole:
             return real_vf(path, language, original, resolutions, **kw)
         return VerificationResult(
