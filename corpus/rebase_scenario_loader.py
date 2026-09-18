@@ -45,6 +45,18 @@ _GIT_HISTORY_CLONE_SUBDIR = {
     "redis-history": "redis",
     "jsonc-history": "json-c",
     "sqlite-history": "sqlite",
+    # S28-93: the leg-2 scenario datasets were missing from this registry —
+    # every scenario check for them raised KeyError (708 corpus FAILs) while
+    # the clones sat fetched in external-datasets/. Standard dash convention
+    # except php (the clone is php-src).
+    "cython-history": "cython",
+    "duckdb-history": "duckdb",
+    "libuv-history": "libuv",
+    "php-history": "php-src",
+    "polars-history": "polars",
+    "prusaslicer-history": "prusaslicer",
+    "scikit-learn-history": "scikit-learn",
+    "tikv-history": "tikv",
 }
 
 

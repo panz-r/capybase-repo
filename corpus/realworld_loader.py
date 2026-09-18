@@ -34,21 +34,12 @@ EXTERNAL_DIR = _DATA_ROOT / "external-datasets"
 # git-history dataset id -> the clone subdir name (matches the DATASETS registry
 # ``extract_subdir`` in the fetch script). Kept here so the test layer can find
 # a dataset's clone without importing the (side-effecting) fetch script.
-_GIT_HISTORY_CLONE_SUBDIR = {
-    "serde-history": "serde",
-    "sea-orm-history": "sea-orm",
-    "clap-history": "clap",
-    "tokio-history": "tokio",
-    "pydantic-history": "pydantic",
-    "requests-history": "requests",
-    "flask-history": "flask",
-    "rayon-history": "rayon",
-    "axum-history": "axum",
-    "ratatui-history": "ratatui",
-    "redis-history": "redis",
-    "jsonc-history": "json-c",
-    "sqlite-history": "sqlite",
-}
+# S28-93: single-source the dataset->clone-subdir registry (this file used
+# to carry its own copy, which diverged from rebase_scenario_loader's when
+# the leg-2 datasets were added — 708 corpus FAILs from the gap).
+from corpus.rebase_scenario_loader import (  # noqa: E402
+    _GIT_HISTORY_CLONE_SUBDIR,
+)
 
 
 @dataclass(frozen=True)
