@@ -422,3 +422,50 @@ def test_r43_deterministic_preservation_blanks_comments():
         f"dp={dp}"
     )
     assert dp.unanimous is False
+
+
+# ---------------------------------------------------------------------------
+# S28-77: deterministic candidates never reach the critic (model-when-needed)
+# ---------------------------------------------------------------------------
+
+
+def test_deterministic_provenance_skips_the_critic_without_a_call():
+    """A deterministic candidate is the cascade's deliberate answer — a
+    pristine side-take drops the other side BY DEFINITION, so the
+    intent-preservation judge has nothing to add. The critic must not bill
+    a model call for it (the harvest's block-capture census and the
+    side-take mechanisms are exactly this shape)."""
+    unit = _unit(
+        base="def f():\n    x = 1\n",
+        current="def f():\n    x = 1\n    y = 2\n",
+        replayed="def f():\n    x = 1\n    z = 3\n",
+        resolved="def f():\n    x = 1\n    y = 2\n",  # a current_only take
+    )
+    cand = _candidate(resolved="def f():\n    x = 1\n    y = 2\n")
+    cand.provenance = "deterministic_source_current_only"
+    client = _FakeClient([_VERDICT_DROPS_REPLAYED])  # would flag the take
+    res = _verify(client, unit, cand)
+    assert res.passed is True
+    assert len(client.calls) == 0, (
+        "the critic must not make a model call on a deterministic candidate")
+    assert res.features["verifier_checked"] is False
+    assert "deterministic" in (res.message or "")
+
+
+def test_model_candidates_still_reach_the_critic():
+    """Direction 2: a non-deterministic (LLM) candidate still gets judged —
+    the skip must not leak to the candidates the critic exists for."""
+    unit = _unit(
+        base="def f():\n    x = 1\n",
+        current="def f():\n    x = 1\n    y = 2\n",
+        replayed="def f():\n    x = 1\n    z = 3\n",
+        resolved="def f():\n    x = 1\n    y = 2\n",
+    )
+    cand = _candidate(resolved="def f():\n    x = 1\n    y = 2\n")
+    cand.provenance = "plain_llm"
+    client = _FakeClient([_VERDICT_DROPS_REPLAYED])
+    res = _verify(client, unit, cand)
+    assert len(client.calls) >= 1, (
+        "an LLM candidate must still be judged by the critic")
+    # (the two-phase flag/reassess outcome is covered by the Phase 2/3 tests
+    # above; here we only assert the critic was actually reached)

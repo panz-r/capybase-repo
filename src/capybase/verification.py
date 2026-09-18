@@ -1425,6 +1425,22 @@ class VerifierModelValidator:
                 message="verifier model disabled",
                 features={"verifier_checked": False},
             )
+        # S28-77 (model-when-needed audit): a DETERMINISTIC candidate is the
+        # cascade's deliberate answer, produced without the model — a pristine
+        # side-take "drops" the other side by definition, so an intent-preservation
+        # judge has nothing to add and its calls (two critics, every validated
+        # candidate) would re-introduce model cost into model-free resolutions.
+        # The same provenance convention as the tiered-budget model-used check.
+        if str(getattr(ctx.candidate, "provenance", "") or "").startswith(
+            "deterministic"
+        ):
+            return VerificationCheckResult(
+                name=self.name,
+                passed=True,
+                severity=getattr(cfg, "verifier_severity", "warning"),
+                message="deterministic candidate: intent-judging skipped",
+                features={"verifier_checked": False},
+            )
         from capybase.adapters.parsers import parse_resolution_json
 
         prompt = self._build_prompt(ctx.unit, ctx.candidate, _verifier_context(ctx))
