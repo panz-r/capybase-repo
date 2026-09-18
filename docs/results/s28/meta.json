@@ -3,40 +3,53 @@
   "source": "/var/tmp/capybase-harvest-s28/full-harvest.json",
   "recount": {
     "total": 1481,
-    "pass": 1321,
+    "pass": 1323,
     "working": 28,
     "era_dead": 40,
-    "pass_pct": 89.2,
-    "adj_pct": 91.7,
-    "pw_adj_pct": 93.6,
+    "accepted": 1388,
+    "pass_pct": 89.3,
+    "adj_pct": 91.8,
+    "pw_adj_pct": 93.8,
     "by_language": {
       "c": {
         "cases": 452,
-        "pass": 425,
+        "pass": 427,
         "working": 5,
         "era_dead": 0,
-        "llm": 52
+        "llm": 283,
+        "pass_pct": 94.5,
+        "adj_pct": 94.5,
+        "pw_adj_pct": 95.6
       },
       "cpp": {
         "cases": 453,
         "pass": 389,
         "working": 13,
         "era_dead": 0,
-        "llm": 49
+        "llm": 271,
+        "pass_pct": 85.9,
+        "adj_pct": 85.9,
+        "pw_adj_pct": 88.7
       },
       "python": {
         "cases": 314,
         "pass": 297,
         "working": 6,
         "era_dead": 0,
-        "llm": 38
+        "llm": 265,
+        "pass_pct": 94.6,
+        "adj_pct": 94.6,
+        "pw_adj_pct": 96.5
       },
       "rust": {
         "cases": 262,
         "pass": 210,
         "working": 4,
         "era_dead": 40,
-        "llm": 8
+        "llm": 141,
+        "pass_pct": 80.2,
+        "adj_pct": 94.6,
+        "pw_adj_pct": 96.4
       }
     },
     "mechanism_histogram": [
@@ -49,8 +62,8 @@
       },
       {
         "mechanism": "deterministic_source_current_only",
-        "cases": 390,
-        "pass": 368,
+        "cases": 389,
+        "pass": 367,
         "working": 9,
         "pw_pct": 96.7
       },
@@ -63,17 +76,17 @@
       },
       {
         "mechanism": "combination_search",
-        "cases": 89,
-        "pass": 85,
+        "cases": 90,
+        "pass": 86,
         "working": 4,
         "pw_pct": 100.0
       },
       {
         "mechanism": "plain_llm",
         "cases": 76,
-        "pass": 69,
+        "pass": 70,
         "working": 0,
-        "pw_pct": 90.8
+        "pw_pct": 92.1
       },
       {
         "mechanism": "(unresolved)",
@@ -91,17 +104,17 @@
       },
       {
         "mechanism": "deterministic_wholesale_floor_current",
-        "cases": 23,
-        "pass": 22,
+        "cases": 24,
+        "pass": 23,
         "working": 0,
-        "pw_pct": 95.7
+        "pw_pct": 95.8
       },
       {
         "mechanism": "plain_llm+intent_coverage",
-        "cases": 14,
+        "cases": 15,
         "pass": 13,
         "working": 0,
-        "pw_pct": 92.9
+        "pw_pct": 86.7
       },
       {
         "mechanism": "deterministic_empty_side",
@@ -118,18 +131,18 @@
         "pw_pct": 81.8
       },
       {
-        "mechanism": "deterministic_side_consistency_repair",
-        "cases": 11,
-        "pass": 4,
-        "working": 0,
-        "pw_pct": 36.4
-      },
-      {
         "mechanism": "deterministic_symbol_injection",
         "cases": 8,
         "pass": 2,
         "working": 0,
         "pw_pct": 25.0
+      },
+      {
+        "mechanism": "deterministic_side_consistency_repair",
+        "cases": 8,
+        "pass": 4,
+        "working": 0,
+        "pw_pct": 50.0
       },
       {
         "mechanism": "deterministic_source_replayed_only",
@@ -147,7 +160,7 @@
       },
       {
         "mechanism": "structural",
-        "cases": 3,
+        "cases": 4,
         "pass": 0,
         "working": 0,
         "pw_pct": 0.0
@@ -224,8 +237,13 @@
       },
       {
         "mechanism": "deterministic_source_current_only",
-        "cases": 422,
-        "pct_of_corpus": 28.5
+        "cases": 421,
+        "pct_of_corpus": 28.4
+      },
+      {
+        "mechanism": "plain_llm",
+        "cases": 139,
+        "pct_of_corpus": 9.4
       },
       {
         "mechanism": "deterministic_source_current_only_stage",
@@ -233,13 +251,8 @@
         "pct_of_corpus": 9.3
       },
       {
-        "mechanism": "plain_llm",
-        "cases": 138,
-        "pct_of_corpus": 9.3
-      },
-      {
         "mechanism": "combination_search",
-        "cases": 109,
+        "cases": 110,
         "pct_of_corpus": 7.4
       },
       {
@@ -254,7 +267,7 @@
       },
       {
         "mechanism": "deterministic_wholesale_floor_current",
-        "cases": 23,
+        "cases": 24,
         "pct_of_corpus": 1.6
       },
       {
@@ -307,14 +320,15 @@
         "cases": 1,
         "pct_of_corpus": 0.1
       }
-    ]
+    ],
+    "readme_table": "| lang | cases | PASS | WORKING | era-dead | llm | PASS % | adj % | P+W adj % |\n|------|-------|------|---------|----------|-----|--------|-----------|-----------|\n| python | 314 | 297 | 6 | 0 | 265 | 94.6% | 94.6% | 96.5% |\n| c | 452 | 427 | 5 | 0 | 283 | 94.5% | 94.5% | 95.6% |\n| cpp | 453 | 389 | 13 | 0 | 271 | 85.9% | 85.9% | 88.7% |\n| rust | 262 | 210 | 4 | 40 | 141 | 80.2% | 94.6% | 96.4% |\n| **total** | **1481** | **1323** | **28** | **40** | **960** | **89.3%** | **91.8%** | **93.8%** |"
   },
   "generated": "2026-09-16",
-  "description": "Sprint-28 FULL-CORPUS harvest (both legs): the frozen 676-case legacy corpus (leg 1) plus the 826-case monster tier (leg 2: cython/duckdb/libuv/php/polars/prusaslicer/scikit-learn/tikv) under the <desktop-profile> profile with the sprint-27 strengthening. 1,501 of 1,502 ran (zenodo-0044: E3 empty-oracle); 17 SAFE_SKIPs leave the 1,484-row capability denominator (the tool reports 1,481 rows scored). The S28-56 config fix (libuv/prusaslicer build gates) landed AFTER libuv ran; its 3 test-list.h casualties and the prusaslicer gate-less rows are re-run candidates. The S28-57 brace-fallback scoring defect downgraded 12 validated rows (php 8, prusaslicer 4); the recount table carries both views \u2014 as-scored here, corrected in the ledger's S28-57/S28-58 tables.",
-  "mechanism_commit": "4f76c4b (dev; includes the S28-40 crash fix mid-run)",
-  "state": "sprint-28: <desktop-profile-20260914> profile via provider <provider-name>; s27 full strengthening live in production; enable_convergence_seed=false; LSP/clippy off; rust_suppress_codes standalone-only. Post-harvest fix queue (S28-02/03/04/18/19/21/23/24 + S28-04 third arm) NOT yet applied \u2014 this row measures the pre-fix baseline.",
-  "command_template": "scripts/live_eval_realworld.py --provider <provider-name> --repeat-nonpass 3 --skip-existing --out full-harvest.json --preserve-flights flights-harvest (env CAPYBASE_WORKTREE_DIR=/var/tmp/capy-wt TMPDIR=/var/tmp CAPYBASE_SKIP_SIZE_GUARD=1); axum rerun = same command after dropping the 10 false rows",
-  "ran": "leg 1: 2026-09-15 10:31 UTC -> 2026-09-16 00:39; leg 2: 2026-09-16 14:15 -> 2026-09-18 ~08:30 (three harness generations: 2a pre-S28-40-fix, 2b/2c post-fix; one S28-42 allocation-bomb death recovered by the self-healing watcher)",
-  "verification": "S28-49..53 audit series (licenses re-verified, projections corrected); S28-52 oracle-leakage forensics (resolved clean, token-assembly); S28-57/S28-58 scoring-defect reclassification table (12 rows); S28-49's zero-duplicate rows-file check",
-  "outcome_summary": "638 PASS + 10 WORKING / 660 = 96.7% raw, 96.8% adj, 98.3% P+W (vs s27 637/660 = 96.5%: +4 deterministic improvements - 3 variance regressions = +1 net, at +17% median latency per S28-11); era 1 (sea-orm-0016 genuine); SAFE_SKIP 16 excluded; NEAR_MATCH 4, ORACLE_DIVERGENT 2, honest ESCALATE 5 (flask-0006, fmt-0003, nlohmann-0038, zenodo-0019, zenodo-0079); autopsy ledgered S28-01..34"
+  "description": "Sprint-28 FULL-CORPUS harvest (both legs) PLUS the sprint-28 fix pass: the frozen 676-case legacy corpus (leg 1) plus the 826-case large-repo tier (leg 2: cython/duckdb/libuv/php/polars/prusaslicer/scikit-learn/tikv) under the desktop profile. 1,501 of 1,502 ran (zenodo-0044: empty-oracle); the 1,481-row scored denominator. After the harvest, the six-item fix pass (rust probe baselines, churn-ordered empty_fast_fail, comment-plan truncation prongs, terminal-taxonomy split, telemetry, sibling-signature injection) landed, and 20 targeted cases were re-run under the fixed resolver; their rows REPLACE the first-pass rows in this extract (two libuv conversions, zenodo-0100 flipped to its oracle side, the duckdb weave band unchanged-in-class at large wall-time cost, prusaslicer brace-fallback rows unchanged as-scored).",
+  "mechanism_commit": "8c65a64 (dev; the sprint-28 fix pass through the S28-74 adjustment)",
+  "state": "desktop profile via provider <provider-name>; sprint-27 full strengthening live in production; enable_convergence_seed=false; LSP/clippy off; rust_suppress_codes standalone-only. The sprint-28 fix pass IS live in this extract's 20 re-run rows (S28-18/38/23 p1-3/29/54 + telemetry); the remaining 1,481 rows measure the pre-fix baseline.",
+  "command_template": "scripts/live_eval_realworld.py --provider <provider-name> --repeat-nonpass 3 --skip-existing --out full-harvest.json --preserve-flights flights-harvest (env CAPYBASE_WORKTREE_DIR=/var/tmp/capy-wt TMPDIR=/var/tmp CAPYBASE_SKIP_SIZE_GUARD=1); fix pass: same command with 20 --case ids, --preserve-flights flights-fixpass, over full-harvest.json with those 20 rows removed first",
+  "ran": "leg 1: 2026-09-15 10:31 UTC -> 2026-09-16 00:39; leg 2: 2026-09-16 14:15 -> 2026-09-18 ~08:30 (three harness generations: 2a pre-crash-fix, 2b/2c post-fix; one allocation-bomb death recovered by the self-healing watcher); fix pass: 2026-09-18 ~15:05 -> ~17:10 CEST (20 targeted cases, serial, provider <provider-name>)",
+  "verification": "S28-49..53 audit series (licenses re-verified, projections corrected); S28-52 oracle-leakage forensics (resolved clean); S28-57/S28-58 scoring-defect reclassification (4 php rows from harvest-session evidence, extended to the 8 prusaslicer rows from fix-pass session evidence \u2014 both views published); S28-68..74 fix-pass ledger entries (each fix stash-revert-proven, full gate, live validation on named fixtures); recount tool reproduces both tables from the committed extract",
+  "outcome_summary": "as-scored 1,323 PASS + 28 WORKING / 1,481 = 89.3% raw, 91.8% adj, 93.8% P+W (first pass was 1,321/89.2%/93.6%; the fix pass moved libuv-0002/0022 to PASS and zenodo-0100 to its oracle side, at a large wall-time cost on the duckdb weave band that reverted the signature-gap budget raise). Reclassified view (12 brace-fallback rows with recorded in-session syntax PASS -> PASS): 1,335 = 90.1% raw, 94.6% P+W. 40 era-dead rust rows excluded from adj denominators. S28-74 records the signature-injection negative result; S28-23 prong 1 built on its confirmed live trigger."
 }

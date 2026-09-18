@@ -379,7 +379,10 @@ run.
 1,501 of 1,502 cases ran (zenodo-0044: empty-oracle defect). 17
 git-resolvable skips and 3 infrastructure rows (duckdb-0057,
 php-0089, php-0122 — harness MemoryErrors) leave the **1,481-row
-denominator**.
+denominator**. Twenty targeted cases were re-run after resolver fixes
+and their verdicts replace the first-pass rows in place (two libuv
+cases converted to PASS; the duckdb weave band and the prusaslicer
+brace-fallback rows are unchanged or unchanged-in-class).
 
 The original corpus (660 counted) passes at 96.7% / 98.3% P+W —
 trajectory s26 90.0% → s27 96.5% → this run 96.7% (flip audit vs
@@ -389,10 +392,25 @@ mechanism regressions).
 | lang | cases | PASS | WORKING | era-dead | llm | PASS % | adj % | P+W adj % |
 |------|-------|------|---------|----------|-----|--------|-----------|------------|
 | python | 314 | 297 | 6 | 0 | 265 | 94.6% | 94.6% | 96.5% |
-| c | 452 | 425 | 5 | 0 | 284 | 94.0% | 94.0% | 95.1% |
-| cpp | 453 | 389 | 13 | 0 | 268 | 85.9% | 85.9% | 88.7% |
+| c | 452 | 427 | 5 | 0 | 283 | 94.5% | 94.5% | 95.6% |
+| cpp | 453 | 389 | 13 | 0 | 271 | 85.9% | 85.9% | 88.7% |
 | rust | 262 | 210 | 4 | 40 | 141 | 80.2% | 94.6% | 96.4% |
-| **total** | **1481** | **1321** | **28** | **40** | **958** | **89.2%** | **91.7%** | **93.6%** |
+| **total** | **1481** | **1323** | **28** | **40** | **960** | **89.3%** | **91.8%** | **93.8%** |
+
+Twelve rows score ORACLE_DIVERGENT only because the post-hoc
+brace-balance fallback overrode a recorded in-session compiler-syntax
+PASS (php 0007/0018/0039/0049, prusaslicer 0056/0058/0094/0110/0115/
+0139/0140/0149; every one carries a passing session validation and
+m ≥ 0.959). The reclassified view counts them as PASS; both views are
+reported, neither replaces the other:
+
+| lang | cases | PASS | WORKING | era-dead | PASS % | adj % | P+W adj % |
+|------|-------|------|---------|----------|--------|-----------|------------|
+| python | 314 | 297 | 6 | 0 | 94.6% | 94.6% | 96.5% |
+| c | 452 | 431 | 5 | 0 | 95.4% | 95.4% | 96.5% |
+| cpp | 453 | 397 | 13 | 0 | 87.6% | 87.6% | 90.5% |
+| rust | 262 | 210 | 4 | 40 | 80.2% | 94.6% | 96.4% |
+| **total** | **1481** | **1335** | **28** | **40** | **90.1%** | **92.6%** | **94.6%** |
 
 All 40 era-dead rows are rust — 39 in polars and tikv, one in
 sea-orm — each verified by the preflight's
@@ -410,8 +428,8 @@ Counting rules:
 - A case counts under each mechanism in its accepted candidates'
   lineage.
 - Escalated cases have no accepted candidates and are excluded.
-- Rows sum to more than the 1,386 accepted cases (1,481 counted minus
-  95 escalated): a case with several participating mechanisms counts
+- Rows sum to more than the 1,388 accepted cases (1,481 counted minus
+  93 escalated): a case with several participating mechanisms counts
   once per mechanism.
 
 | mechanism (participated in accepted) | cases | % of corpus |
