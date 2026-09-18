@@ -13,9 +13,13 @@ Design principles:
 Usage:
     pipeline = Pipeline(journal=orchestrator.journal)
     pipeline.register(F1Tier1Takeover())
-    pipeline.register(SymbolInjection())
+    pipeline.register(F1CompileCleanTakeover())
 
     result = pipeline.execute(Stage.POST_REPAIR_EXHAUSTION, context)
+
+Status (S28-85/86 reviews): only POST_REPAIR_EXHAUSTION is populated
+(the four F1 mechanisms); the remaining stages are the migration path
+for the inline cascade (S28-85's recorded architecture debt).
 """
 from __future__ import annotations
 
