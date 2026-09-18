@@ -131,12 +131,17 @@ def inject_declaration(
     identifier: str,
     reported_line: int | None,
     decl_line: str,
+    local_window: int = 50,
 ) -> str | None:
     """Insert ``decl_line`` before the identifier's usage line in ``buffer``.
 
     Returns the new buffer, or None when a guard declines:
-    - the buffer already declares ``identifier`` (present-in-resolution
-      guard — no duplicate declarations);
+    - ``buffer`` already declares ``identifier`` NEAR the usage (within
+      ``local_window`` lines before it — the same local scope, plausibly).
+      A declaration elsewhere in the file does NOT decline: gcc's
+      not-declared error is scope-specific, and duckdb-0126's blocker was
+      a declaration in an unrelated earlier function shadowing the guard
+      (S28-82);
     - the usage line cannot be located (``reported_line`` out of range or
       not naming the identifier, with no usable fallback line).
 
@@ -144,10 +149,6 @@ def inject_declaration(
     lands inside the usage's block, not at column 0.
     """
     pat = _decl_pattern(identifier)
-    for line in buffer.splitlines():
-        if pat.match(line) and line.rstrip().endswith(";"):
-            return None  # already declared in the resolution — no injection
-
     lines = buffer.splitlines()
     target: int | None = None
     if reported_line is not None and 1 <= reported_line <= len(lines):
@@ -156,17 +157,28 @@ def inject_declaration(
             target = idx
     if target is None:
         # Fallback: first line that names the identifier in a non-comment
-        # position. Keeps the arm usable when the diagnostic's path prefix
-        # shifts line numbers (coherence repairs rewrote the buffer).
+        # position and is not itself a declaration (inserting before the
+        # declaration would be nonsense). Keeps the arm usable when the
+        # diagnostic's path prefix shifts line numbers (coherence repairs
+        # rewrote the buffer).
         for i, line in enumerate(lines):
             s = line.strip()
             if s.startswith("//") or s.startswith("*"):
                 continue
-            if re.search(r"\b" + re.escape(identifier) + r"\b", line):
+            if (re.search(r"\b" + re.escape(identifier) + r"\b", line)
+                    and not pat.match(line)):
                 target = i
                 break
     if target is None:
         return None
+
+    # Present-in-scope guard: a declaration within the local window before
+    # the usage declines the injection. Declarations further up are in
+    # scopes the usage demonstrably cannot see (gcc said so).
+    lo = max(0, target - local_window)
+    for line in lines[lo:target]:
+        if pat.match(line) and line.rstrip().endswith(";"):
+            return None
 
     usage = lines[target]
     indent = usage[: len(usage) - len(usage.lstrip())]  # verbatim whitespace

@@ -144,10 +144,13 @@ def test_orchestrator_helper_end_to_end_and_decline_paths():
     out2, applied2 = _try_signature_injection(
         buffer, [_fail(_0126)], ["\tint unrelated;\n"])
     assert out2 is None and applied2 == []
-    # decline: identifier already declared in the buffer (direction 1)
+    # decline: identifier already declared NEAR the usage (the scope-local
+    # present-in-resolution guard; the reported line matches this buffer)
     declared = buffer.replace("consume(cache);", "ParserCache cache;\n\tconsume(cache);")
+    declared_fail = _fail(
+        "parser.cpp:4:9: error: \u2018cache\u2019 was not declared in this scope")
     out3, _ = _try_signature_injection(
-        declared, [_fail(_0126)], [_0126_CURRENT])
+        declared, [declared_fail], [_0126_CURRENT])
     assert out3 is None
     # decline: failures carry no signature-gap shape at all
     out4, _ = _try_signature_injection(
@@ -223,3 +226,37 @@ def test_declined_first_variant_falls_through_to_the_next():
     out2, applied2 = _try_signature_injection(
         buffer, [_fail(_0126)], ["\tParserCache cache;\n"], declined=declined)
     assert out2 is None and applied2 == []
+
+
+def test_declaration_guard_is_scope_local_not_file_global():
+    """S28-82: a declaration in an UNRELATED earlier function must not
+    decline the injection — gcc's not-declared error is scope-specific
+    (duckdb-0126's blocker: `auto &cache = GetCache();` at ~line 30
+    shadowed the guard while the usage at 375 sat in a different scope).
+    Only a declaration NEAR the usage (the same local scope, plausibly)
+    declines."""
+    far_decl = "\n".join(
+        ["auto &cache = GetCache();"] + ["int pad%d = 0;" % i for i in range(60)]
+    )
+    buffer = (
+        "void other() {\n"
+        + far_decl
+        + "\n}\n\n"
+        + "void step() {\n"
+        + "\tif (ready) {\n"
+        + "\t\tconsume(cache);\n"
+        + "\t}\n"
+        + "}\n"
+    )
+    out = inject_declaration(buffer, "cache", None, "ParserCache cache;")
+    assert out is not None, (
+        "a declaration 60+ lines away is in a different scope — the "
+        "injection must be allowed")
+    # a declaration immediately before the usage still declines
+    near = (
+        "void step() {\n"
+        "\tParserCache cache;\n"
+        "\tconsume(cache);\n"
+        "}\n"
+    )
+    assert inject_declaration(near, "cache", 3, "ParserCache cache;") is None
