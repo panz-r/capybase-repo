@@ -2802,6 +2802,18 @@ def _try_deterministic_pystring_repair(
             detected = int(m.group(1))
             break
     repaired = _try_close_unterminated_string(spliced, detected_line=detected)
+    if repaired is None and detected is not None:
+        # S28-80's python-authority rule (parity with the splice-level
+        # form): the scanner's line-parity can disagree with python's real
+        # tokenizer about where the string opens. When a detected line is
+        # present, close there and let py_compile judge the candidate.
+        from capybase.verification import _compile_python
+        _lines = spliced.split("\n")
+        if 1 <= detected <= len(_lines):
+            _lines.insert(detected - 1, '"""')
+            _candidate = "\n".join(_lines)
+            if _candidate != spliced and _compile_python(_candidate)[0]:
+                repaired = _candidate
     if repaired is None:
         return None, "balance_failed"
     if _py_string_imbalance(repaired) is not None:
