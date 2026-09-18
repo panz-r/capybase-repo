@@ -46,6 +46,7 @@ from capybase.policy_strictness import StrictnessPolicy
 from capybase.resolution_engine import ResolutionEngine
 from capybase.risk import RiskEngine
 from capybase.session import SessionPaths, new_session_id
+from capybase.signature_repair import has_signature_gap
 from capybase.verification import (
     ValidationConfig,
     VerificationEngine,
@@ -1640,6 +1641,35 @@ def _micro_symbol_decls(symbol: str, *texts: str, limit: int = 6) -> list[str]:
                 if len(decls) >= limit:
                     return decls
     return decls
+
+
+def _try_signature_injection(
+    buffer: str, hard_failures: list, side_texts: list[str],
+) -> str | None:
+    """S28-54: build the signature-injected buffer, or None when nothing
+    injectable.
+
+    Pure candidate generation — the caller re-validates through the whole
+    file gate. Guards live in capybase.signature_repair (present-in-
+    resolution -> no injection; absent-from-both-sides -> decline); here
+    we additionally skip identifiers with no findable side declaration.
+    """
+    from capybase.signature_repair import (
+        extract_signature_gaps, find_declaration_line, inject_declaration,
+    )
+    gaps = extract_signature_gaps([f.message for f in hard_failures])
+    out = buffer
+    injected = 0
+    for ident, line_no in gaps[:3]:
+        decl = find_declaration_line(side_texts, ident)
+        if decl is None:
+            continue
+        new = inject_declaration(out, ident, line_no, decl)
+        if new is None:
+            continue
+        out = new
+        injected += 1
+    return out if injected else None
 
 
 def _true_stage_sides(git_backend, path: str):
@@ -10368,6 +10398,27 @@ class Orchestrator:
             if self.config.validation.require_whole_file_validation and units:
                 wf_retries = 0
                 _osc = RepairOscillationTracker()
+                # S28-54: pristine whole-file sides for signature injection —
+                # full stage texts when readable (declarations can sit far
+                # outside a unit's fragment), else the union of the units'
+                # own side fragments. None only when both fail AND the units
+                # carry no side text (then the arm declines by construction).
+                try:
+                    _sig_sides = _true_stage_sides(self.git, path)
+                except Exception:
+                    _sig_sides = None
+                if _sig_sides and _sig_sides[0]:
+                    _sig_side_texts = [
+                        _sig_sides[0].get("current", "") or "",
+                        _sig_sides[0].get("replayed", "") or "",
+                    ]
+                else:
+                    _sig_side_texts = [
+                        t for t in (
+                            [u.current.text or "" for u in units]
+                            + [u.replayed.text or "" for u in units]
+                        ) if t
+                    ] or None
                 # Separate whole-file repair budget. 0 mirrors the per-unit
                 # budget (legacy behavior); a higher value grants more repair
                 # cycles for multi-hunk conflicts where the deterministic brace
@@ -10939,16 +10990,26 @@ class Orchestrator:
                         if _phase2_model_used:
                             break  # only 1 model re-resolve allowed in tiered mode
                     if wf_retries >= wf_budget:
-                        # The COUNT budget applies in BOTH modes. Tiered mode
-                        # previously bypassed it (only time/model breaks):
-                        # sqlite-0040's d40d105a flight ran 1,221 deterministic
-                        # beam cycles inside its 200s cap — two repairs
-                        # oscillating (line_replace at line 1 vs derived
-                        # prototype), each ~0.16s, spinning until the time
-                        # budget died. Design v2's tiered contract is ONE
-                        # deterministic beam pass + 1 model re-resolve; the
-                        # configured max_whole_file_repair_retries must hold.
-                        break
+                        # S28-54: a signature gap (undeclared identifier /
+                        # missing member in the build failures) is the licensed
+                        # shape for extra repair rounds — each round
+                        # demonstrably closes ~1 error (0113: 2->1 in one
+                        # round), so grant up to 3 when the failures name one.
+                        if has_signature_gap([
+                                f.message for f in file_validation.hard_failures]):
+                            if wf_retries >= max(wf_budget, 3):
+                                break
+                        else:
+                            # The COUNT budget applies in BOTH modes. Tiered mode
+                            # previously bypassed it (only time/model breaks):
+                            # sqlite-0040's d40d105a flight ran 1,221 deterministic
+                            # beam cycles inside its 200s cap — two repairs
+                            # oscillating (line_replace at line 1 vs derived
+                            # prototype), each ~0.16s, spinning until the time
+                            # budget died. Design v2's tiered contract is ONE
+                            # deterministic beam pass + 1 model re-resolve; the
+                            # configured max_whole_file_repair_retries must hold.
+                            break
                     _osc_sig = _osc.signature(file_validation.hard_failures)
                     if _osc.is_cycle(_osc_sig):
                         # A deterministic repair already ran from this exact
@@ -10969,6 +11030,52 @@ class Orchestrator:
                             path=path,
                         )
                         break
+                    # S28-54 sibling-signature injection: a deterministic
+                    # candidate generator, NOT a decider. Parse the
+                    # undeclared-identifier errors, find the declaration in
+                    # a side, inject before the usage, and let the SAME
+                    # whole-file gate decide. On a failed validation the
+                    # pre-injection state is restored and the normal repair
+                    # ladder continues unimpeded (no retry consumed).
+                    if _sig_side_texts is not None:
+                        _inj_buf = _try_signature_injection(
+                            buffer, file_validation.hard_failures,
+                            _sig_side_texts)
+                        if _inj_buf is not None:
+                            self._write_worktree_only(
+                                path, _inj_buf, accepted=accepted)
+                            _sig_spans = [
+                                (u.marker_span, c.resolved_text)
+                                for u, c in accepted if u.marker_span
+                            ]
+                            _sig_val = self.verification.verify_file(
+                                path, language, original, _sig_spans,
+                                repo_root=str(self.git.repo),
+                                whole_text=_inj_buf,
+                            )
+                            if _sig_val.passed:
+                                buffer = _inj_buf
+                                if not hasattr(
+                                        self, "_resolved_validated_paths"):
+                                    self._resolved_validated_paths = set()
+                                self._resolved_validated_paths.add(path)
+                                self.journal.emit(
+                                    "signature_injection_applied",
+                                    {"retry": wf_retries},
+                                    step_index=self.step, path=path,
+                                )
+                                file_validation = _sig_val
+                                break
+                            self._write_worktree_only(
+                                path, buffer, accepted=accepted)
+                            self.journal.emit(
+                                "signature_injection_declined",
+                                {"retry": wf_retries,
+                                 "hard_failures": [
+                                     f.message
+                                     for f in _sig_val.hard_failures[:3]]},
+                                step_index=self.step, path=path,
+                            )
                     # Attribute the failure to a unit and re-resolve it with the
                     # file-level failures as concrete repair feedback.
                     wf_retries += 1
