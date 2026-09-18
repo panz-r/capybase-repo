@@ -89,12 +89,36 @@ def find_declaration_line(side_texts: list[str], identifier: str) -> str | None:
     Sides are searched in the given order (the orchestrator passes them
     most-likely-first). Returns the line WITHOUT its trailing newline.
     """
+    lines = find_declaration_lines(side_texts, identifier)
+    return lines[0] if lines else None
+
+
+def find_declaration_lines(
+    side_texts: list[str], identifier: str
+) -> list[str]:
+    """ALL distinct declaration-shaped lines for ``identifier``.
+
+    Ordered SELF-CONTAINED-first (lines without a call — ``Type X;`` —
+    before lines with one — ``auto &X = f();``): the S28-80 decline
+    forensics showed the context-dependent variant and the self-contained
+    variant often coexist in the sides, and the self-contained one is the
+    only one that can compile at an arbitrary usage site. Scan order is
+    preserved within each class. Deduplicated.
+    """
     pat = _decl_pattern(identifier)
+    out: list[str] = []
+    seen: set[str] = set()
     for text in side_texts or []:
         for line in (text or "").splitlines():
-            if pat.match(line) and line.rstrip().endswith(";"):
-                return line.strip()  # indent re-applied from the usage line
-    return None
+            s = line.rstrip()
+            if s in seen or not s:
+                continue
+            if pat.match(s) and s.endswith(";"):
+                seen.add(s)
+                out.append(s.strip())
+    self_contained = [ln for ln in out if "(" not in ln]
+    with_call = [ln for ln in out if "(" in ln]
+    return self_contained + with_call
 
 
 def _reindent(decl_line: str, usage_line: str) -> str:

@@ -58,11 +58,10 @@ def test_declaration_shape_accepts_real_side_lines_and_rejects_usages():
     assert find_declaration_line([_0125_CURRENT], "parser_cache") == (
         "auto &parser_cache = DatabaseInstance::GetDatabase(context)"
         ".GetParserCache();")
-    # first declaration in search order wins: _0126_CURRENT opens with the
-    # shared `auto &cache = GetCache();` (present on BOTH sides), and only
-    # then `ParserCache cache;` — both are legal injection candidates.
+    # self-contained-first ordering (S28-82): `ParserCache cache;` (no
+    # call) precedes the context-dependent `auto &cache = GetCache();`
     assert find_declaration_line(
-        [_0126_CURRENT, _0126_REPLAYED], "cache") == "auto &cache = GetCache();"
+        [_0126_CURRENT, _0126_REPLAYED], "cache") == "ParserCache cache;"
     assert find_declaration_line(
         ["\tParserCache cache;\n\tcache.GetTokenizer().TokenizeInput(b);"],
         "cache") == "ParserCache cache;"
@@ -135,11 +134,12 @@ def test_orchestrator_helper_end_to_end_and_decline_paths():
         "\t}\n"
         "}\n"
     )
-    # happy: the 0126-shaped failure + a side carrying the declaration
+    # happy: the 0126-shaped failure + a side carrying the declaration —
+    # the self-contained variant is tried first (S28-82)
     out, applied = _try_signature_injection(
         buffer, [_fail(_0126)], [_0126_CURRENT, _0126_REPLAYED])
-    assert out is not None and "auto &cache = GetCache();" in out
-    assert applied == [("cache", "auto &cache = GetCache();")]
+    assert out is not None and "ParserCache cache;" in out
+    assert applied == [("cache", "ParserCache cache;")]
     # decline: identifier absent from both sides (direction 2)
     out2, applied2 = _try_signature_injection(
         buffer, [_fail(_0126)], ["\tint unrelated;\n"])
@@ -171,8 +171,55 @@ def test_gate_declined_pairs_are_memoized():
     out, applied = _try_signature_injection(
         buffer, [_fail(_0126)], [_0126_CURRENT])
     assert out is not None and applied
-    # the same call with the pair memoized declines without re-injecting
+    # the same call with BOTH variants memoized declines without
+    # re-injecting; declining the self-contained variant falls through to
+    # the context-dependent one (S28-82 ordering: self-contained first)
     out2, applied2 = _try_signature_injection(
         buffer, [_fail(_0126)], [_0126_CURRENT],
-        declined={("cache", "auto &cache = GetCache();")})
+        declined={("cache", "ParserCache cache;")})
+    assert out2 is not None and applied2 == [
+        ("cache", "auto &cache = GetCache();")]
+    out3, applied3 = _try_signature_injection(
+        buffer, [_fail(_0126)], [_0126_CURRENT],
+        declined={("cache", "auto &cache = GetCache();"),
+                  ("cache", "ParserCache cache;")})
+    assert out3 is None and applied3 == []
+
+
+def test_declaration_variants_self_contained_first():
+    """S28-82: find_declaration_lines returns ALL variants, self-contained
+    (no call) first — 0126's sides carry both `ParserCache cache;` and
+    `auto &cache = GetCache();`, and only the self-contained one can
+    compile at an arbitrary usage site."""
+    from capybase.signature_repair import find_declaration_lines
+    variants = find_declaration_lines(
+        [_0126_CURRENT, _0126_REPLAYED], "cache")
+    assert variants == [
+        "ParserCache cache;",
+        "auto &cache = GetCache();",
+    ]
+    # dedup: the shared declaration appears once even though both sides
+    # carry it
+    assert len([v for v in variants if "GetCache" in v]) == 1
+
+
+def test_declined_first_variant_falls_through_to_the_next():
+    """The gate declined the self-contained variant in an earlier loop
+    iteration — the next attempt must try the SECOND variant rather than
+    skipping the identifier entirely."""
+    buffer = (
+        "void step() {\n"
+        "\tif (ready) {\n"
+        "\t\tconsume(cache);\n"
+        "\t}\n"
+        "}\n"
+    )
+    declined = {("cache", "ParserCache cache;")}
+    out, applied = _try_signature_injection(
+        buffer, [_fail(_0126)], [_0126_CURRENT], declined=declined)
+    assert out is not None
+    # ...but this side has no second variant, so a declined single-variant
+    # identifier still declines:
+    out2, applied2 = _try_signature_injection(
+        buffer, [_fail(_0126)], ["\tParserCache cache;\n"], declined=declined)
     assert out2 is None and applied2 == []

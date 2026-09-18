@@ -1660,21 +1660,31 @@ def _try_signature_injection(
     ``applied_pairs`` when the gate declines.
     """
     from capybase.signature_repair import (
-        extract_signature_gaps, find_declaration_line, inject_declaration,
+        extract_signature_gaps, find_declaration_lines, inject_declaration,
     )
     gaps = extract_signature_gaps([f.message for f in hard_failures])
     out = buffer
     injected = 0
     applied: list[tuple[str, str]] = []
     for ident, line_no in gaps[:3]:
-        decl = find_declaration_line(side_texts, ident)
-        if decl is None or (declined and (ident, decl) in declined):
+        # S28-82: try every declaration variant, self-contained-first — the
+        # first-found variant is often context-dependent (a call the usage
+        # site can't serve) while a later one compiles (0126/0128's
+        # `ParserCache cache;` behind `auto &cache = GetCache();`).
+        decls = find_declaration_lines(side_texts, ident)
+        placed = None
+        for decl in decls:
+            if declined and (ident, decl) in declined:
+                continue
+            new = inject_declaration(out, ident, line_no, decl)
+            if new is None:
+                continue
+            placed = new
+            applied.append((ident, decl))
+            break
+        if placed is None:
             continue
-        new = inject_declaration(out, ident, line_no, decl)
-        if new is None:
-            continue
-        out = new
-        applied.append((ident, decl))
+        out = placed
         injected += 1
     return (out if injected else None), applied
 
