@@ -3178,6 +3178,13 @@ def splice_level_delimiter_repair(
         # file. Position-correct close at the SyntaxError's detected line
         # (the string swallows the rest of the file; the fragment alone
         # can be balanced — the splice is what broke).
+        #
+        # The scanner's naive line-parity can disagree with python's real
+        # tokenizer about WHERE the string opens (scikit-0052: python says
+        # 721, parity says 736 — a delimiter token inside the swallowed
+        # body flips the parity). When the detected line is present, it is
+        # the authority: close there and let py_compile judge the result;
+        # the scanner's opinion only drives the no-detected-line fallback.
         detected = None
         import re as _re_splice
         for m in messages:
@@ -3185,7 +3192,14 @@ def splice_level_delimiter_repair(
             if _m:
                 detected = int(_m.group(1))
                 break
-        if _py_string_imbalance(spliced) is not None:
+        if detected is not None:
+            sp_lines = spliced.split("\n")
+            if 1 <= detected <= len(sp_lines):
+                sp_lines.insert(detected - 1, '"""')
+                candidate = "\n".join(sp_lines)
+                if candidate != spliced and _compile_python(candidate)[0]:
+                    repaired = candidate
+        if repaired is None and _py_string_imbalance(spliced) is not None:
             repaired = _try_close_unterminated_string(
                 spliced, detected_line=detected)
             if (repaired is not None
