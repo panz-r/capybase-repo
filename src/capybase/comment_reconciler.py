@@ -1015,6 +1015,11 @@ def run_comment_cegis(
     last_feedback: list[CommentFailure] = []
     last_plan: CommentPlan | None = None
     attempts_made = 0
+    # S28-23 prong 1: set when a truncated plan's prefix was salvaged with
+    # keep-defaulted unaccounted lineages — the success path then reports
+    # `comment_reconciled_partial`, never `comment_reconciled`.
+    _salvaged_partial = False
+    _defaulted_keep: list[str] = []
     for attempt in range(budget + 1):
         attempts_made = attempt + 1
         prompt = build_comment_reconcile_prompt(
@@ -1103,6 +1108,42 @@ def run_comment_cegis(
                                "message": f.message}
                               for f in failures
                           ], indent=2), "ext": "json"})
+        if (failures
+                and all(f.kind == "UNACCOUNTED_COMMENT" for f in failures)):
+            # S28-23 prong 1: a truncated response's salvaged prefix is a
+            # valid partial plan. Default the unaccounted lineages to
+            # `keep` (the no-op disposition) instead of discarding the
+            # whole plan — pre-validated on the fail corpus: 35/36
+            # salvaged plans apply cleanly; apply_comment_plan's
+            # executable-token invariant is the guard that caught the 1.
+            _covered = {a.lineage_id for a in plan.actions}
+            _defaulted = sorted(
+                lid for lid in
+                ({e.lineage_id for e in frontier} - _covered) if lid)
+            _extended = CommentPlan(actions=list(plan.actions) + [
+                CommentAction(lineage_id=lid, operation="keep")
+                for lid in _defaulted])
+            try:
+                _result2 = apply_comment_plan(
+                    current_buffer, frontier, _extended, lang)
+                _remaining = (verify_comment_plan(
+                    _extended, frontier, _result2, lang)
+                    if verify_comment_plan else [])
+            except ApplyError:
+                _remaining = failures  # fall through to the reject path
+            if not _remaining:
+                plan, result = _extended, _result2
+                # PARTIAL, never a clean reconciliation: the success path
+                # emits `comment_reconciled_partial` (not
+                # `comment_reconciled`) so every census/statistic counting
+                # clean reconciliations excludes this path, and convergence
+                # statistics book it as a FAILURE (subcategory
+                # truncated-partial) per the 2026-09-17 user directive.
+                _salvaged_partial = True
+                _defaulted_keep = _defaulted
+                failures = []
+            else:
+                failures = _remaining
         if failures:
             feedback = failures
             last_feedback = failures
@@ -1129,10 +1170,21 @@ def run_comment_cegis(
         moved = sum(1 for a in plan.actions if a.operation == "move")
         merged = sum(1 for a in plan.actions if a.operation == "merge")
         deleted = sum(1 for a in plan.actions if a.operation == "delete")
-        events.append(("comment_reconciled", {
+        counts = {
             "kept": kept, "rewritten": rewritten, "moved": moved,
             "merged": merged, "deleted": deleted, "attempts": attempts_made,
-        }))
+        }
+        if _salvaged_partial:
+            # S28-23 prong 1: the applied plan is a truncated response's
+            # salvaged prefix + keep-defaulted remainder — book it as a
+            # PARTIAL (a convergence-statistics FAILURE), never a clean
+            # reconciliation (user directive, 2026-09-17).
+            events.append(("comment_reconciled_partial", {
+                **counts, "defaulted": _defaulted_keep,
+                "defaulted_count": len(_defaulted_keep),
+            }))
+        else:
+            events.append(("comment_reconciled", counts))
         return ReconcileOutcome(
             buffer=result, succeeded=True, events=events,
             attempts_made=attempts_made, final_plan=plan, trace=trace,
