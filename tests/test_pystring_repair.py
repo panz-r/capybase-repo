@@ -58,11 +58,13 @@ def test_imbalance_scan_finds_opener_and_flavor():
 
 
 def test_close_at_detected_line_and_at_eof():
-    # detected line 3 ("    return 1") -> closer inserted before it
+    # S28-90 calibration: python's "detected at line N" is the EOF line,
+    # so the closer is inserted AFTER it (0-based index N == before line
+    # N+1). detected line 3 in this 5-line buffer -> closer at index 3.
     fixed = _try_close_unterminated_string(BROKEN, detected_line=3)
     assert fixed is not None
     lines = fixed.splitlines()
-    assert lines[2] == _DQ
+    assert lines[3] == _DQ
     assert _py_string_imbalance(fixed) is None
     # detected line past EOF -> closer appended
     fixed2 = _try_close_unterminated_string(BROKEN, detected_line=99)

@@ -3174,17 +3174,24 @@ def splice_level_delimiter_repair(
             repaired = braced
             shape = "brace"
     if repaired is None and shape == "pystring":
-        # S28-79: unterminated python triple-quoted string on the SPLICED
-        # file. Position-correct close at the SyntaxError's detected line
-        # (the string swallows the rest of the file; the fragment alone
-        # can be balanced — the splice is what broke).
+        # S28-79/S28-90: unterminated python triple-quoted string on the
+        # SPLICED file — the fragment is often balanced and the splice is
+        # what broke (the conflict sat inside a docstring). Two candidates,
+        # each judged by py_compile on the whole spliced file:
         #
-        # The scanner's naive line-parity can disagree with python's real
-        # tokenizer about WHERE the string opens (scikit-0052: python says
-        # 721, parity says 736 — a delimiter token inside the swallowed
-        # body flips the parity). When the detected line is present, it is
-        # the authority: close there and let py_compile judge the result;
-        # the scanner's opinion only drives the no-detected-line fallback.
+        # 1. STATE BRIDGE (primary, preservation-safe by construction):
+        #    the scanner's unpaired delimiter T is the ORIGINAL tail's
+        #    closer misread as an opener (the fragment dropped/changed the
+        #    span's opener pairing). Re-insert the matching opener right
+        #    after the fragment region: the tail's docstring body returns
+        #    to string state and T closes it — the original pairing,
+        #    restored. Nothing is swallowed (the bridged region is exactly
+        #    the original docstring body).
+        # 2. CALIBRATED CLOSE: python's "detected at line N" is the EOF
+        #    line (S28-90); the closer goes AFTER it. Compile-judged, so a
+        #    code-swallowing candidate is rejected only by ... nothing —
+        #    this candidate is last-resort and the downstream oracle-sim
+        #    catches semantic loss.
         detected = None
         import re as _re_splice
         for m in messages:
@@ -3192,10 +3199,21 @@ def splice_level_delimiter_repair(
             if _m:
                 detected = int(_m.group(1))
                 break
-        if detected is not None:
+        imb = _py_string_imbalance(spliced)
+        if imb is not None:
+            _t_line, delim = imb
+            sp_lines = spliced.split("\n")
+            bridge_at = marker_span[0] + len(resolved_text.splitlines())
+            if bridge_at <= len(sp_lines):
+                sp_lines.insert(bridge_at, delim)
+                candidate = "\n".join(sp_lines) + (
+                    "\n" if spliced.endswith("\n") else "")
+                if candidate != spliced and _compile_python(candidate)[0]:
+                    repaired = candidate
+        if repaired is None and detected is not None:
             sp_lines = spliced.split("\n")
             if 1 <= detected <= len(sp_lines):
-                sp_lines.insert(detected - 1, '"""')
+                sp_lines.insert(detected, '"""')
                 candidate = "\n".join(sp_lines)
                 if candidate != spliced and _compile_python(candidate)[0]:
                     repaired = candidate
@@ -7738,29 +7756,20 @@ def _try_close_unterminated_string(
 ) -> str | None:
     """Deterministically terminate an unterminated triple-quoted string.
 
-    Inserts the missing closer so the string ends at ``detected_line``
-    (the SyntaxError's ``detected at line N`` — where the parser needed
-    the closer), or at end-of-file when no line number is available.
+    Python's "detected at line N" names the EOF line (the string's last
+    line), so the closer goes AFTER it: ``lines.insert(detected_line, ...)``
+    (0-based). With no usable detected line the closer is appended at EOF.
     One clean edit, mirroring ``_try_balance_braces``'s conservatism;
-    returns None when the scan finds no imbalance or the detected line
-    is out of range. The caller re-validates the result — a wrong close
-    fails validation and the ladder moves on.
+    returns None when the scan finds no imbalance. The caller re-validates
+    the result — a wrong close fails validation and the ladder moves on.
     """
     imbalance = _py_string_imbalance(text)
     if imbalance is None:
         return None
     _opener_line, delim = imbalance
     lines = text.split("\n")
-    if detected_line is not None and 1 <= detected_line <= len(lines):
-        if detected_line == _opener_line:
-            # The error is detected on the opener's own line: the string
-            # was meant to close there — append the closer inline.
-            lines[_opener_line - 1] = (
-                lines[_opener_line - 1].rstrip() + delim)
-        elif detected_line > _opener_line:
-            lines.insert(detected_line - 1, delim)
-        else:
-            return None  # before the opener — not a closable position
+    if detected_line is not None and 1 <= detected_line < len(lines):
+        lines.insert(detected_line, delim)  # after the detected (EOF) line
     else:
         lines.append(delim)
     repaired = "\n".join(lines)
