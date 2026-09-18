@@ -2822,3 +2822,31 @@ def test_reconstruct_sides_diff3_base_not_in_either_side():
     cur2, rep2 = _reconstruct_sides_from_markers(
         "<<<<<<< HEAD\ncur_fn()\n=======\nrep_fn()\n>>>>>>> feat\n")
     assert cur2 == "cur_fn()\n" and rep2 == "rep_fn()\n"
+
+
+def test_cascade_mechanism_error_contains_and_journals(repo):
+    """S28-86: a raising cascade mechanism must decline with a journaled
+    error — never propagate through the un-guarded Phase-1 loop and kill
+    the case as a SETUP_FAILED 'orch raised' row."""
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator
+    from capybase.resolution_engine import ResolutionEngine
+    from tests.test_interactive_fallback import _config as _fb_config  # noqa: F401
+
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.tests.required = False
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=ResolutionEngine(cfg.model),
+        out=lambda *_a, **_k: None,
+    )
+
+    def _boom(unit):
+        raise RuntimeError("simulated mechanism bug")
+
+    out = orch._cascade_mechanism("step_shape_reuse", _boom, None)
+    assert out is None, "the guarded call must decline, not raise"
+    events = [e for e in orch.journal.read_events()
+              if e.event_type == "cascade_mechanism_error"]
+    assert events and events[-1].payload["mechanism"] == "step_shape_reuse"
+    assert "RuntimeError" in events[-1].payload["error"]

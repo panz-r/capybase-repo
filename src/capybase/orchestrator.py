@@ -15122,6 +15122,35 @@ class Orchestrator:
                 continue
         return None
 
+    def _cascade_mechanism(self, name: str, fn, unit: "ConflictUnit"):
+        """S28-86: call a deterministic cascade mechanism with containment.
+
+        The cascade's doctrine is "failure falls through" — but only 13 of
+        the 20 _try_* mechanisms self-contain; an exception in the others
+        propagated through the un-guarded Phase-1 unit loop and killed the
+        whole CASE ("orch raised" -> a SETUP_FAILED row that leaves the
+        denominator), instead of declining this one mechanism. Containment
+        belongs at the seam, not in each mechanism (the sprint-24 pipeline
+        gets this right for its registry). A mechanism error journals
+        ``cascade_mechanism_error`` and counts as a decline.
+        """
+        try:
+            return fn(unit)
+        except Exception as exc:  # noqa: BLE001 — one mechanism's bug must
+            # never kill the case; the decline path is the honest outcome.
+            try:
+                self.journal.emit(
+                    "cascade_mechanism_error",
+                    {"mechanism": name,
+                     "error": f"{type(exc).__name__}: {exc}"[:200]},
+                    step_index=self.step,
+                    path=getattr(unit, "path", None),
+                    unit_id=getattr(unit, "unit_id", None),
+                )
+            except Exception:  # noqa: BLE001 — journaling is best-effort
+                pass
+            return None
+
     def _resolve_unit_core(
         self, unit: ConflictUnit, *, seed_failures: list | None = None,
         seed_candidate: "CandidateResolution | None" = None,
@@ -15242,7 +15271,8 @@ class Orchestrator:
             # identical-shape conflicts, this turns 78 model calls into 1 + 77
             # verify-only calls. Same safety model as exact_reuse: the reused
             # candidate runs the full verify gauntlet; a mismatch falls through.
-            early = self._try_step_shape_reuse(unit)
+            early = self._cascade_mechanism(
+                "step_shape_reuse", self._try_step_shape_reuse, unit)
             if early is not None:
                 return early
             # Edit-pattern reuse: if a sibling with the same structural shape
@@ -15251,10 +15281,12 @@ class Orchestrator:
             # identifiers (e.g. ``int a;`` → ``int a{};`` vs ``int b;`` →
             # ``int b{};``). Falls through on failure (ambiguous anchors or
             # verification failure).
-            early = self._try_step_pattern_reuse(unit)
+            early = self._cascade_mechanism(
+                "step_pattern_reuse", self._try_step_pattern_reuse, unit)
             if early is not None:
                 return early
-            early = self._try_exact_reuse(unit)
+            early = self._cascade_mechanism(
+                "exact_reuse", self._try_exact_reuse, unit)
             if early is not None:
                 return early  # accepted via verbatim reuse; LLM loop skipped
 
@@ -15265,7 +15297,8 @@ class Orchestrator:
         # on failure it falls through to the model, so this can only cut LLM load,
         # never produce a worse merge. Gated by [future] enable_structural_resolver.
         if failures is None and self.config.future.enable_structural_resolver:
-            early = self._try_structural_resolve(unit)
+            early = self._cascade_mechanism(
+                "structural_resolve", self._try_structural_resolve, unit)
             if early is not None:
                 return early  # accepted deterministically; LLM loop skipped entirely
 
@@ -15275,7 +15308,8 @@ class Orchestrator:
         # zenodo-0027 class (mid-expression deletion fragments) without an
         # LLM call; failure falls through, as everywhere in this cascade.
         if failures is None and self.config.future.enable_empty_side_rule:
-            early = self._try_empty_side_fragment(unit)
+            early = self._cascade_mechanism(
+                "empty_side_fragment", self._try_empty_side_fragment, unit)
             if early is not None:
                 return early  # accepted via the empty-side rule
 
@@ -15284,7 +15318,8 @@ class Orchestrator:
         # after empty-side; failure falls through, as everywhere here.
         if failures is None and getattr(
                 self.config.future, "enable_docs_union", True):
-            early = self._try_docs_union(unit)
+            early = self._cascade_mechanism(
+                "docs_union", self._try_docs_union, unit)
             if early is not None:
                 return early  # accepted via the docs-union rule
 
@@ -15295,7 +15330,8 @@ class Orchestrator:
         # falls through, as everywhere here.
         if failures is None and getattr(
                 self.config.future, "enable_list_union", True):
-            early = self._try_list_union(unit)
+            early = self._cascade_mechanism(
+                "list_union", self._try_list_union, unit)
             if early is not None:
                 return early  # accepted via the list-union rule
 
@@ -15303,7 +15339,8 @@ class Orchestrator:
         # Shape-gated candidate generator; validated, never bypasses.
         if failures is None and getattr(
                 self.config.future, "enable_def_site_race", False):
-            early = self._try_def_site_race(unit)
+            early = self._cascade_mechanism(
+                "def_site_race", self._try_def_site_race, unit)
             if early is not None:
                 return early  # accepted via the def-site-race policy
 
@@ -15331,7 +15368,8 @@ class Orchestrator:
                     step_index=self.step, path=unit.path, unit_id=unit.unit_id,
                 )
             else:
-                early = self._try_combination_search(unit)
+                early = self._cascade_mechanism(
+                "combination_search", self._try_combination_search, unit)
                 if early is not None:
                     return early  # accepted via combination search; LLM loop skipped
 
@@ -15343,7 +15381,8 @@ class Orchestrator:
         # FRESH resolve, same as the other pre-LLM layers.
         if failures is None:
             self._last_side_probe_failures = None  # reset before the probe
-            early = self._try_test_gated_side(unit)
+            early = self._cascade_mechanism(
+                "test_gated_side", self._try_test_gated_side, unit)
             if early is not None:
                 return early  # accepted via test-gated side pick; LLM loop skipped
             # CEGIS loop hardening: if the picker DECLINED (neither side passed
@@ -15361,7 +15400,8 @@ class Orchestrator:
         # decision and capybase splices the chosen side verbatim. AFTER the other
         # pre-LLM layers decline and BEFORE the LLM loop, on a FRESH resolve only.
         if failures is None and self.config.future.enable_block_capture:
-            early = self._try_block_capture(unit)
+            early = self._cascade_mechanism(
+                "block_capture", self._try_block_capture, unit)
             if early is not None:
                 return early  # accepted via block-capture; LLM loop skipped
 
@@ -15372,7 +15412,8 @@ class Orchestrator:
         # source composition compiles, it's a valid merge — no generation
         # artifacts (dropped braces, missing semicolons). Zero LLM calls.
         if failures is None and getattr(self.config.future, "enable_source_portfolio", True):
-            early = self._try_source_candidate_portfolio(unit)
+            early = self._cascade_mechanism(
+                "source_candidate_portfolio", self._try_source_candidate_portfolio, unit)
             if early is not None:
                 return early
 
