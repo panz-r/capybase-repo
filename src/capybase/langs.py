@@ -159,6 +159,7 @@ _PROVENANCE_SAFETY: dict[str, SafetyClass] = {
     "combination_search": SafetyClass.HEURISTIC,
     "deterministic_symbol_injection": SafetyClass.HEURISTIC,
     "deterministic_brace_repair": SafetyClass.HEURISTIC,
+    "deterministic_pystring_repair": SafetyClass.HEURISTIC,
     "deterministic_preprocessor_repair": SafetyClass.HEURISTIC,
     "deterministic_storage_class_relocation": SafetyClass.HEURISTIC,
     "compiler_fixit": SafetyClass.HEURISTIC,

@@ -2741,6 +2741,75 @@ def _try_deterministic_brace_repair(
     return [(wf_unit, wf_cand)], "repaired"
 
 
+def _try_deterministic_pystring_repair(
+    failures: list,
+    original: str,
+    accepted: list[tuple[ConflictUnit, CandidateResolution]],
+    fault_idx: int,
+) -> tuple[list[tuple[ConflictUnit, CandidateResolution]] | None, str]:
+    """Deterministically terminate an unterminated python triple-quoted
+    string before invoking the LLM (S28-79's python repair-ladder lever).
+
+    The census's dominant python signature (~60 validation hits) is
+    ``unterminated (triple-quoted) string literal``: the model merges
+    docstring blocks and drops a closer, the string swallows the rest of
+    the file, and every CEGIS retry reproduces the same imbalance. Like
+    the brace repair, the model can't see the whole-file state, so the
+    fix is direct: close the string at the SyntaxError's detected line
+    (or EOF) and let the pipeline's validators judge the result.
+
+    Same contract as ``_try_deterministic_brace_repair``: returns
+    ``(replacement_accepted, "repaired")`` or ``(None, diag_reason)``.
+    """
+    from capybase.verification import (
+        _py_string_imbalance, _try_close_unterminated_string,
+    )
+
+    is_pystring_failure = any(
+        "unterminated" in (getattr(f, "message", "") or "")
+        and "string literal" in (getattr(f, "message", "") or "")
+        for f in failures
+    )
+    if not is_pystring_failure:
+        return None, "not_string_failure"
+    if fault_idx < 0 or fault_idx >= len(accepted):
+        return None, "fault_idx_out_of_range"
+    unit, _old_cand = accepted[fault_idx]
+    if (unit.language or "").strip().lower() != "python":
+        return None, "not_python"
+    try:
+        spliced = _resolved_buffer(original, accepted)
+    except Exception:  # noqa: BLE001 - splice may fail on bad spans
+        return None, "splice_exception"
+    if _py_string_imbalance(spliced) is None:
+        return None, "no_imbalance"
+    detected = None
+    import re as _re
+    for f in failures:
+        m = _re.search(r"detected at line (\d+)",
+                       getattr(f, "message", "") or "")
+        if m:
+            detected = int(m.group(1))
+            break
+    repaired = _try_close_unterminated_string(spliced, detected_line=detected)
+    if repaired is None:
+        return None, "balance_failed"
+    if _py_string_imbalance(repaired) is not None:
+        return None, "revalidation_failed"
+    wf_unit = unit.model_copy(update={"marker_span": None, "unit_kind": "whole_file"})
+    wf_cand = CandidateResolution(
+        candidate_id=(getattr(_old_cand, "candidate_id", unit.unit_id) or unit.unit_id) + ":pystringfix",
+        unit_id=unit.unit_id,
+        model_name=getattr(_old_cand, "model_name", "deterministic") or "deterministic",
+        resolved_text=repaired,
+        prompt_version="deterministic_pystring_repair",
+        provenance="deterministic_pystring_repair",
+        self_reported_confidence=0.0,
+        explanation="deterministic triple-quote termination repair",
+    )
+    return [(wf_unit, wf_cand)], "repaired"
+
+
 def _try_deterministic_preprocessor_repair(
     failures: list,
     original: str,
@@ -13475,6 +13544,43 @@ class Orchestrator:
                 self.journal.emit(
                     "repair_rotation",
                     {"skipped": "brace",
+                     "reason": "already failed for this failure signature"},
+                    step_index=self.step, path=path,
+                )
+            # S28-79: the python string-balance arm — the same doctrine as
+            # the brace arm for the census's dominant python signature
+            # (unterminated triple-quoted string; the model can't see the
+            # whole-file state, the fix is one closer).
+            if f"pystring:{_sig}" not in _tried:
+                det, _pystr_diag = _try_deterministic_pystring_repair(
+                    failures, original, accepted, max(0, fault_idx)
+                )
+                if det is not None:
+                    unit_new, cand_new = det[0]
+                    self.journal.emit(
+                        "candidate_validated",
+                        {
+                            "candidate_id": cand_new.candidate_id,
+                            "passed": True,
+                            "whole_file_repair_for": unit_new.unit_id,
+                            "deterministic_pystring_repair": True,
+                        },
+                        step_index=self.step,
+                        path=path,
+                        unit_id=unit_new.unit_id,
+                    )
+                    return det
+                elif _pystr_diag not in ("not_string_failure", "no_imbalance"):
+                    _tried.add(f"pystring:{_sig}")
+                    self.journal.emit(
+                        "pystring_repair_skipped",
+                        {"reason": _pystr_diag},
+                        step_index=self.step, path=path,
+                    )
+            else:
+                self.journal.emit(
+                    "repair_rotation",
+                    {"skipped": "pystring",
                      "reason": "already failed for this failure signature"},
                     step_index=self.step, path=path,
                 )

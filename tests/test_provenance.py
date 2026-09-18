@@ -47,6 +47,7 @@ def test_provenance_values_match_spec():
         "deterministic_def_site_race",
         "deterministic_deletion_respect_prune",
         "deterministic_brace_repair",
+        "deterministic_pystring_repair",
         "deterministic_gcc_fixit",
         "deterministic_cc_repair",
         "deterministic_dup_eradication",

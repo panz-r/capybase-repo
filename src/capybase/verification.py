@@ -7652,3 +7652,85 @@ def find_misplaced_declaration(
             return i, s
         depth += line.count("{") - line.count("}")
     return None
+
+
+# ---------------------------------------------------------------------------
+# Python string-literal balance (S28-79's python repair-ladder lever)
+# ---------------------------------------------------------------------------
+
+_PY_TRIPLE_DELIMS = ('"""', "'''")
+
+
+def _py_string_imbalance(
+    text: str,
+) -> tuple[int, str] | None:
+    """Locate an unterminated python triple-quoted string, or None.
+
+    A line scanner that tracks triple-quote delimiter state for both
+    flavors (double-quote-triple and single-quote-triple, i.e. the
+    elements of ``_PY_TRIPLE_DELIMS``; the first-occurring flavor on a
+    line opens). Returns
+    ``(opener_line_1based, delimiter)`` when the scan ends still inside a
+    string — the string-literal analogue of ``_brace_imbalance_line``.
+    Single-quoted strings are single-line by construction when they
+    balance and are not tracked.
+    """
+    state = None  # None or the open delimiter
+    opener_line = 0
+    for i, line in enumerate(text.splitlines(), start=1):
+        if state is None:
+            idx0, delim = -1, None
+            for d in _PY_TRIPLE_DELIMS:
+                j = line.find(d)
+                if j != -1 and (idx0 == -1 or j < idx0):
+                    idx0, delim = j, d
+            if delim is None:
+                continue
+            # parity of the first-occurring flavor on its line decides
+            if line.count(delim) % 2 == 1:
+                state, opener_line = delim, i
+        else:
+            if state in line:
+                state = None
+    if state is None:
+        return None
+    return opener_line, state
+
+
+def _try_close_unterminated_string(
+    text: str, detected_line: int | None = None,
+) -> str | None:
+    """Deterministically terminate an unterminated triple-quoted string.
+
+    Inserts the missing closer so the string ends at ``detected_line``
+    (the SyntaxError's ``detected at line N`` — where the parser needed
+    the closer), or at end-of-file when no line number is available.
+    One clean edit, mirroring ``_try_balance_braces``'s conservatism;
+    returns None when the scan finds no imbalance or the detected line
+    is out of range. The caller re-validates the result — a wrong close
+    fails validation and the ladder moves on.
+    """
+    imbalance = _py_string_imbalance(text)
+    if imbalance is None:
+        return None
+    _opener_line, delim = imbalance
+    lines = text.split("\n")
+    if detected_line is not None and 1 <= detected_line <= len(lines):
+        if detected_line == _opener_line:
+            # The error is detected on the opener's own line: the string
+            # was meant to close there — append the closer inline.
+            lines[_opener_line - 1] = (
+                lines[_opener_line - 1].rstrip() + delim)
+        elif detected_line > _opener_line:
+            lines.insert(detected_line - 1, delim)
+        else:
+            return None  # before the opener — not a closable position
+    else:
+        lines.append(delim)
+    repaired = "\n".join(lines)
+    if text.endswith("\n"):
+        repaired += "\n"
+    # Safety re-check: the scan must come back balanced.
+    if _py_string_imbalance(repaired) is not None:
+        return None
+    return repaired
