@@ -464,6 +464,33 @@ def classify_resolution_bucket(outcomes) -> tuple[str, dict]:
     return ("llm_cegis" if cegis_units else "llm_one_shot"), mix
 
 
+class _CallCountingClient:
+    """Wraps the LLM client and counts every model call — the README llm
+    column's whole-process measure (CaseResult.model_involved). The three
+    surfaces cover every call site: candidate generation and decision
+    prompts (complete/raw_complete), batch draws (complete_many).
+    Everything else delegates to the wrapped client."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.calls = 0
+
+    def complete(self, *args, **kwargs):
+        self.calls += 1
+        return self._inner.complete(*args, **kwargs)
+
+    def complete_many(self, *args, **kwargs):
+        self.calls += 1
+        return self._inner.complete_many(*args, **kwargs)
+
+    def raw_complete(self, *args, **kwargs):
+        self.calls += 1
+        return self._inner.raw_complete(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 @dataclass
 class CaseResult:
     id: str
@@ -500,6 +527,14 @@ class CaseResult:
     # raw per-unit accepted-provenance counter for the histogram's finer
     # rows (hybrids like plain_llm+import_union included).
     resolution_bucket: str = ""
+    # The README llm column's source of truth (2026-09-18): True when ANY
+    # model call happened during THIS run's whole resolution process —
+    # candidates, repairs, adjudication ballots, comment reconciliation.
+    # The complement (False) is provably solvable without model access.
+    # Distinct from resolution_bucket (landed-LLM-text), which undercounts
+    # 147 vs 958 on the s28 corpus. None = the row predates the flag
+    # (the recount tool then falls back to the flight journals).
+    model_involved: bool | None = None
     provenance_mix: dict = field(default_factory=dict)
     # Variance-aware evaluation (--repeat-nonpass): all verdicts observed
     # across the repeat runs for this case, in order (first run first).
@@ -2423,16 +2458,28 @@ def main():
                     _crate = _clone_path
             _holder: list = []
 
+            # The llm column's source of truth: count every model call
+            # this CASE's whole resolution makes (candidates, repairs,
+            # ballots, comment reconciliation all funnel through the
+            # client's three call surfaces). Per-run counter — each
+            # repeat gets a fresh wrapper, so the kept row's flag
+            # reflects its own run.
+            _counting = _CallCountingClient(client)
+
             def _worker():
                 try:
-                    _holder.append(run_case(case, client, flights_dir=flights_dir,
-                                            td=_td, crate_source=_crate))
+                    _res = run_case(case, _counting, flights_dir=flights_dir,
+                                    td=_td, crate_source=_crate)
+                    _res.model_involved = _counting.calls > 0
+                    _holder.append(_res)
                 except Exception as exc:
-                    _holder.append(CaseResult(
+                    _res = CaseResult(
                         id=case.id, language=case.language, dataset=case.dataset,
                         escalated=True,
                         conflict_region_count=case.marker_original.count("<<<<<<<"),
-                        reason=f"harness error: {type(exc).__name__}: {str(exc)[:100]}"))
+                        reason=f"harness error: {type(exc).__name__}: {str(exc)[:100]}")
+                    _res.model_involved = _counting.calls > 0
+                    _holder.append(_res)
 
             _th = threading.Thread(target=_worker, daemon=True)
             _th.start()
