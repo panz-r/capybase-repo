@@ -397,20 +397,21 @@ mechanism regressions).
 | rust | 262 | 210 | 4 | 40 | 141 | 80.2% | 94.6% | 96.4% |
 | **total** | **1481** | **1323** | **28** | **40** | **960** | **89.3%** | **91.8%** | **93.8%** |
 
-Twelve rows score ORACLE_DIVERGENT only because the post-hoc
+Sixteen rows score ORACLE_DIVERGENT only because the post-hoc
 brace-balance fallback overrode a recorded in-session compiler-syntax
-PASS (php 0007/0018/0039/0049, prusaslicer 0056/0058/0094/0110/0115/
-0139/0140/0149; every one carries a passing session validation and
-m ≥ 0.959). The reclassified view counts them as PASS; both views are
-reported, neither replaces the other:
+PASS (php 0007/0018/0039/0049/0092/0100/0109/0111, prusaslicer 0056/
+0058/0094/0110/0115/0139/0140/0149; every one carries a passing session
+validation and m ≥ 0.959 — most at exactly 1.0). The reclassified view
+counts them as PASS; both views are reported, neither replaces the
+other:
 
 | lang | cases | PASS | WORKING | era-dead | PASS % | adj % | P+W adj % |
 |------|-------|------|---------|----------|--------|-----------|------------|
 | python | 314 | 297 | 6 | 0 | 94.6% | 94.6% | 96.5% |
-| c | 452 | 431 | 5 | 0 | 95.4% | 95.4% | 96.5% |
+| c | 452 | 435 | 5 | 0 | 96.2% | 96.2% | 97.3% |
 | cpp | 453 | 397 | 13 | 0 | 87.6% | 87.6% | 90.5% |
 | rust | 262 | 210 | 4 | 40 | 80.2% | 94.6% | 96.4% |
-| **total** | **1481** | **1335** | **28** | **40** | **90.1%** | **92.6%** | **94.6%** |
+| **total** | **1481** | **1339** | **28** | **40** | **90.4%** | **92.9%** | **94.9%** |
 
 All 40 era-dead rows are rust — 39 in polars and tikv, one in
 sea-orm — each verified by the preflight's
