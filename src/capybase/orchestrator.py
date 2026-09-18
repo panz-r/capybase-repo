@@ -11948,7 +11948,12 @@ class Orchestrator:
         conv_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
 
         def _propose(prompt: str) -> str:
-            resp = self.resolution_engine.raw_complete(prompt, json_mode=True)
+            # S28-23 prong 3: big pre-fill starves an inherited output cap
+            # (raw_complete's docstring: decision callers pass an explicit
+            # floor or finish_reason=length truncates mid-plan).
+            resp = self.resolution_engine.raw_complete(
+                prompt, json_mode=True,
+                max_tokens=max(2048, self.resolution_engine.config.max_tokens))
             # raw_complete returns an LLMResponse object; the comment pass
             # expects a str (the raw model output text).
             return resp.text if hasattr(resp, "text") else str(resp)

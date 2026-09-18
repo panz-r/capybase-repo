@@ -687,6 +687,10 @@ def build_comment_reconcile_prompt(
         'Include a one-line "reasoning" field per non-"keep" action stating '
         "WHY you chose that disposition (this is parsed and ignored by the "
         "splicer — it forces you to think about each edit before emitting it).",
+        'For "keep"/"preserve_verbatim" actions, emit ONLY lineage_id and '
+        'operation — no text, no reasoning, no reason_code, no derived_from '
+        "(boilerplate on no-op actions starves the output budget and "
+        "truncates the plan).",
         'For "rewrite"/"move"/"merge", include "reason_code" (one of: '
         "ATTACHED_CODE_REMOVED, IDENTIFIER_RENAMED, STALE_NARRATION, "
         "MERGE_CONFLICT_RESOLVED, BEHAVIOR_CHANGED, INVARIANT_PRESERVED, "

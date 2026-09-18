@@ -708,3 +708,82 @@ def test_parse_comment_plan_tolerates_empty_confidence():
            '"text": "x", "confidence": "", "reason_code": ""}]}')
     plan = parse_comment_plan(raw)
     assert plan is not None and plan.actions[0].confidence == 0.0
+
+
+# ---------------------------------------------------------------------------
+# S28-23 prongs 2+3: the reconciliation plan must not truncate itself
+# ---------------------------------------------------------------------------
+
+
+def test_build_prompt_demands_no_boilerplate_on_keep_actions():
+    """S28-23 prong 2: per-action reasoning/reason_code/derived_from
+    boilerplate on ~24 keep-class actions starved the completion budget
+    (the verified 997-byte cut after 3 of 24 actions). The prompt must
+    explicitly exempt keep/preserve_verbatim actions from the heavy
+    fields."""
+    from capybase.comment_reconciler import (
+        build_comment_ledger, build_comment_reconcile_prompt,
+        select_comment_frontier,
+    )
+    base = "def f():\n    # old\n    return 1\n"
+    cur = "def f():\n    # current\n    return 1\n"
+    rep = "def f():\n    # replayed\n    return 1\n"
+    resolved = (
+        "def f():\n<<<<<<< HEAD\n    # current\n=======\n"
+        "    # replayed\n>>>>>>> branch\n    return 1\n")
+    ledger = build_comment_ledger(base, cur, rep, resolved, "python")
+    frontier = select_comment_frontier(ledger)
+    prompt = build_comment_reconcile_prompt(frontier, resolved, base, cur, rep, "python")
+    assert "keep" in prompt and "preserve_verbatim" in prompt
+    assert "ONLY lineage_id and" in prompt
+    assert "no reasoning, no reason_code, no derived_from" in prompt
+    assert "truncates the plan" in prompt
+
+
+def test_comment_pass_raw_complete_carries_max_tokens_floor(repo):
+    """S28-23 prong 3: the reconciliation call passed no max_tokens and
+    inherited the profile cap — the 21-24KB prompt starved the
+    completion on the 8192 slot (finish_reason=length mid-plan). The
+    raw_complete call must carry an explicit floor."""
+    from capybase.adapters.llm_openai import LLMResponse
+    from capybase.config import Config
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+    from capybase.orchestrator import Orchestrator
+    from capybase.resolution_engine import ResolutionEngine
+
+    recorded = {}
+
+    class _RecordingEngine(ResolutionEngine):
+        def raw_complete(self, prompt, **kw):
+            recorded.update(kw)
+            recorded["prompt_len"] = len(prompt)
+            return LLMResponse(text='{"actions": []}')
+
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.tests.required = False
+    orch = Orchestrator(
+        cfg, repo=str(repo),
+        resolution_engine=_RecordingEngine(cfg.model),
+        out=lambda *_a, **_k: None,
+    )
+    unit = ConflictUnit(
+        session_id="s", step_index=0, path="f.py", language="python",
+        unit_id="f.py:0", marker_span=(1, 5),
+        base=ConflictSide(label="BASE", text="def f():\n    # old\n    return 1\n"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE",
+                             text="def f():\n    # current\n    return 1\n"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE",
+                              text="def f():\n    # replayed\n    return 1\n"),
+        original_worktree_text=(
+            "def f():\n<<<<<<< HEAD\n    # current\n=======\n"
+            "    # replayed\n>>>>>>> branch\n    return 1\n"),
+    )
+    orch._run_comment_pass(
+        "f.py", unit.original_worktree_text, [],
+        unit.original_worktree_text, [unit], "python",
+    )
+    assert "max_tokens" in recorded, (
+        "the reconciliation raw_complete call must pass an explicit "
+        "max_tokens floor (S28-23 prong 3)")
+    assert recorded["max_tokens"] >= 2048
