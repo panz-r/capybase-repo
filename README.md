@@ -360,42 +360,45 @@ wired but off by default.
 
 All numbers were produced with **Google Gemma 4 E4B**, served by llama-server
 on local hardware. Non-PASS cases rerun up to 3 times; the verdict is the
-majority. **llm** = cases whose resolution involved the model (the
-`resolution_bucket` is llm_one_shot or llm_cegis — the LLM
-participated, not that it solved the case alone).
+majority. **llm** = cases whose resolution involved the model at any point of
+the process — candidate generation, repair, adjudication ballots, or
+comment reconciliation. The complement ran with zero model calls.
 
 #### Corpus
 
-The **660-case corpus of non-git-resolvable conflicts** (cases where
-git's own three-way merge leaves markers — anything git resolves
-cleanly is not a resolution problem) runs as a sharded harvest, one
-language at a time, fixes landing between rounds.
+The corpus of **non-git-resolvable conflicts** (cases where git's own
+three-way merge leaves markers — anything git resolves cleanly is not
+a resolution problem) runs as sharded rounds, one language at a
+time, fixes landing between rounds. The original 660-case corpus was
+extended in sprint 27 with **826 new cases from larger repositories**
+(1,502 total); the current results below are the full corpus's first
+run.
 
-#### Current round (s28)
+#### Current Results (post-s27)
 
-All cases on the uniform commit `5a44ee9` — the sprint-28 leg-1
-round: the first full harvest under the newly calibrated **desktop
-profile** (2026-09-14), with the sprint-27 deterministic strengthening
-(deletion-respect arms, wholesale floor, midband and subsumption
-adjudications, union certificates, comment reconciliation). Δ is
-versus the prior full round (`71ac03a`, s27). 676 cases ran; the same
-16 git-resolvable skips leave the 660-row denominator. The 10 axum
-rows that failed on the corrupted cargo registry mid-run
-(infrastructure, not resolver capability) were re-run on the repaired
-cache: 10/10 PASS. Zero SETUP_FAILED post-repair; wall ~14h. Flip
-audit vs s27: 4 up (deterministic-arm wins — sqlite-0016, sqlite-0092,
-redis-0026, zenodo-0030), 3 down (repeat-3 profile variance under the
-new calibration — zenodo-0019/0079/0100); zero mechanism regressions.
-Era-dead stays 1 (sea-orm-0016, genuine). LLM participation fell
-106 → 68 cases; median per-case latency +17%.
+1,501 of 1,502 cases ran (zenodo-0044: empty-oracle defect). 17
+git-resolvable skips and 3 infrastructure rows (duckdb-0057,
+php-0089, php-0122 — harness MemoryErrors) leave the **1,481-row
+denominator**.
 
-| lang | cases | PASS | WORKING | era-dead | llm | PASS % | adj % | P+W adj % | Δ P+W |
-|------|-------|------|---------|----------|-----|--------|-----------|-----------|-------|
-| python | 108 | 99 | 5 | 0 | 12 | 91.7% | 91.7% | 96.3% | −0.9pp |
-| c | 204 | 200 | 2 | 0 | 25 | 98.0% | 98.0% | 99.0% | +1.5pp |
-| rust | 194 | 189 | 2 | 1 | 6 | 97.4% | 97.9% | 99.0% | +0.0pp |
-| cpp | 154 | 150 | 1 | 0 | 25 | 97.4% | 97.4% | 98.1% | +0.0pp |
-| **total** | **660** | **638** | **10** | **1** | **68** | **96.7%** | **96.8%** | **98.3%** | **+0.3pp** |
+The original corpus (660 counted) passes at 96.7% / 98.3% P+W —
+trajectory s26 90.0% → s27 96.5% → this run 96.7% (flip audit vs
+s27: 4 deterministic-arm wins up, 3 profile-variance down, zero
+mechanism regressions).
+
+| lang | cases | PASS | WORKING | era-dead | llm | PASS % | adj % | P+W adj % |
+|------|-------|------|---------|----------|-----|--------|-----------|------------|
+| python | 314 | 297 | 6 | 0 | 265 | 94.6% | 94.6% | 96.5% |
+| c | 452 | 425 | 5 | 0 | 284 | 94.0% | 94.0% | 95.1% |
+| cpp | 453 | 389 | 13 | 0 | 268 | 85.9% | 85.9% | 88.7% |
+| rust | 262 | 210 | 4 | 40 | 141 | 80.2% | 94.6% | 96.4% |
+| **total** | **1481** | **1321** | **28** | **40** | **958** | **89.2%** | **91.7%** | **93.6%** |
+
+All 40 era-dead rows are rust — 39 in polars and tikv, one in
+sea-orm — each verified by the preflight's
+sides-plus-oracle-fail-identically probe. cpp's lower rate is
+duckdb's interlocked parser weaves under GCC-15 template-body
+diagnostics plus prusaslicer's macro-braced GUI files.
 
 ##### Mechanism breakdown
 
@@ -407,115 +410,76 @@ Counting rules:
 - A case counts under each mechanism in its accepted candidates'
   lineage.
 - Escalated cases have no accepted candidates and are excluded.
-- Rows sum to more than the 658 accepted cases: a case with several
-  participating mechanisms counts once per mechanism.
+- Rows sum to more than the 1,386 accepted cases (1,481 counted minus
+  95 escalated): a case with several participating mechanisms counts
+  once per mechanism.
 
 | mechanism (participated in accepted) | cases | % of corpus |
 |---|---|---|
-| deterministic_structural | 341 | 51.7% |
-| deterministic_source_current_only | 164 | 24.8% |
-| plain_llm | 67 | 10.2% |
-| combination_search | 59 | 8.9% |
-| deterministic_source_current_only_stage | 54 | 8.2% |
-| deterministic_source_replayed_only_stage | 24 | 3.6% |
-| deterministic_empty_side | 9 | 1.4% |
-| intent_coverage | 8 | 1.2% |
-| deterministic_wholesale_floor_replayed | 7 | 1.1% |
-| deterministic_wholesale_floor_current | 7 | 1.1% |
-| keyed_item_union | 5 | 0.8% |
-| deterministic_deletion_respect_prune | 3 | 0.5% |
-| deterministic_source_replayed_only | 3 | 0.5% |
-| block_capture | 1 | 0.2% |
-| deterministic_symbol_injection | 1 | 0.2% |
-| deterministic_docs_union | 1 | 0.2% |
-| deletion_union | 1 | 0.2% |
+| deterministic_structural | 660 | 44.6% |
+| deterministic_source_current_only | 422 | 28.5% |
+| plain_llm | 138 | 9.3% |
+| deterministic_source_current_only_stage | 138 | 9.3% |
+| combination_search | 109 | 7.4% |
+| deterministic_source_replayed_only_stage | 38 | 2.6% |
+| intent_coverage | 28 | 1.9% |
+| deterministic_wholesale_floor_current | 23 | 1.6% |
+| deterministic_empty_side | 14 | 0.9% |
+| deterministic_wholesale_floor_replayed | 9 | 0.6% |
+| deterministic_source_replayed_only | 6 | 0.4% |
+| keyed_item_union | 5 | 0.3% |
+| deterministic_deletion_respect_prune | 4 | 0.3% |
+| block_capture | 4 | 0.3% |
+| deterministic_side_consistency_repair | 4 | 0.3% |
+| deterministic_symbol_injection | 2 | 0.1% |
+| deletion_union | 2 | 0.1% |
+| deterministic_docs_union | 1 | 0.1% |
 
-`meta.json` also contains `mechanism_histogram`: each case counted
-once, under the mechanism with the most accepted units.
-
-#### Prior round (s27)
+#### vs Prior round (s27 vs s26)
 
 All cases on the uniform commit `71ac03a` — the sprint-27 round: the
 diff3 marker-leak fix family (validation no longer false-fails on
 `--diff3`-materialized worktrees), marker-scanner consolidation, the
 deletion-respect prune arm and the empty-side fragment rule (two new
-deterministic mechanisms), and the duplication-lift refactors; the full
-list is in `docs/results/s27/meta.json`. Δ is versus the prior full
-round (`d8cc231`, s26). 676 cases ran; 16 git-resolvable skips leave
-the 660-row denominator. Zero SETUP_FAILED; wall ~13h. Flip audit vs
-s26: 53 up, 6 down — of the down, two are repeat-3 variance
-(nlohmann-0038, zenodo-0030), two are known-and-better
-(flask-0006's safe refusal, redis-0026's sandbox variance), one a band
-shift to WORKING (protobuf-0063); the one mechanism regression
-(sqlite-0016, an sbcr whole-file interleave) has its diagnosis thread
-open in the sprint ledger. The era floor collapsed again: 9 → 1
+deterministic mechanisms), and the duplication-lift refactors. Δ is
+versus the prior full round (`d8cc231`, s26). 676 cases ran; 16
+git-resolvable skips leave the 660-row denominator. Zero
+SETUP_FAILED; wall ~13h.
+
+Flip audit vs s26: 53 up, 6 down — two repeat-3 variance
+(nlohmann-0038, zenodo-0030); flask-0006 refused safely (m=1.0);
+redis-0026 sandbox variance; one band shift to WORKING
+(protobuf-0063); one mechanism regression (sqlite-0016, s26 0.9995 →
+s27 0.005, an sbcr whole-file interleave) with its diagnosis thread
+open in the sprint ledger. The era floor collapsed 9 → 1
 (protobuf-0055, a supposed intrinsic, now passes).
 
 | lang | cases | PASS | WORKING | era-dead | llm | PASS % | adj % | P+W adj % | Δ P+W |
 |------|-------|------|---------|----------|-----|--------|-----------|-----------|-------|
-| python | 108 | 101 | 4 | 0 | 14 | 93.5% | 93.5% | 97.2% | +3.7pp |
-| c | 204 | 197 | 2 | 0 | 47 | 96.6% | 96.6% | 97.5% | +10.7pp |
-| rust | 194 | 189 | 2 | 1 | 13 | 97.4% | 97.9% | 99.0% | +4.3pp |
-| cpp | 154 | 150 | 1 | 0 | 32 | 97.4% | 97.4% | 98.1% | +1.4pp |
-| **total** | **660** | **637** | **9** | **1** | **106** | **96.5%** | **96.7%** | **98.0%** | **+5.5pp** |
-
-##### Mechanism breakdown
-
-Which mechanisms participate in accepted conflict resolutions, and how
-often each one does.
-
-Counting rules:
-
-- A case counts under each mechanism in its accepted candidates'
-  lineage.
-- Escalated cases have no accepted candidates and are excluded.
-- Rows sum to more than the 654 accepted cases: a case with several
-  participating mechanisms counts once per mechanism.
-
-| mechanism (participated in accepted) | cases | % of corpus |
-|---|---|---|
-| deterministic_structural | 350 | 53.0% |
-| deterministic_source_current_only | 179 | 27.1% |
-| plain_llm | 102 | 15.5% |
-| combination_search | 71 | 10.8% |
-| true_side_portfolio | 56 | 8.5% |
-| phase1_fast_path | 20 | 3.0% |
-| intent_coverage | 14 | 2.1% |
-| deterministic_empty_side | 9 | 1.4% |
-| keyed_item_union | 6 | 0.9% |
-| deterministic_source_replayed_only | 4 | 0.6% |
-| block_capture | 4 | 0.6% |
-| deletion_union | 3 | 0.5% |
-| deterministic_source_cur_rep | 1 | 0.2% |
-
-`meta.json` also contains `mechanism_histogram`: each case counted
-once, under the mechanism with the most accepted units.
-
-#### Prior round (s26)
-
-The sprint-26 era-recovery round (per-dataset toolchain-era configs
-for the C corpora, Rust dependency vendoring with era tag pins, and a
-set of splice/repair fixes; `docs/results/s26/meta.json`): 594/660
-PASS (90.0%), P+W adj 92.5%, era floor 167 → 9. Flip audit vs s22r2:
-156 up, 5 down — zero mechanism regressions. The calibration A/Bs
-(B9 resolve directive, B10 self-consistency n=3) were evidence-neutral
-and stay off by default.
+| python | 108 | 101 | 4 | 0 | 100 | 93.5% | 93.5% | 97.2% | +3.7pp |
+| c | 204 | 197 | 2 | 0 | 133 | 96.6% | 96.6% | 97.5% | +10.7pp |
+| rust | 194 | 189 | 2 | 1 | 113 | 97.4% | 97.9% | 99.0% | +4.3pp |
+| cpp | 154 | 150 | 1 | 0 | 80 | 97.4% | 97.4% | 98.1% | +1.4pp |
+| **total** | **660** | **637** | **9** | **1** | **426** | **96.5%** | **96.7%** | **98.0%** | **+5.5pp** |
 
 #### Verdicts and metrics
 
 **PASS** = marker-free, passes the compile/structural gate, and matches
 the human resolution at token similarity ≥ 0.90.
-**adj %** = PASS / (cases − era-dead):
-era-dead cases are un-passable by construction (both sides and the
-human oracle fail the current toolchain identically — environmental,
-not resolver failures).
-**P+W adj %** adds WORKING verdicts — compiles, marker-free, both sides
-preserved, diverged from the human resolution below the PASS bar — the
-honest graded-success rate. Every number
-recomputes from the per-case extracts committed under `docs/results/`
-(current round: `s28/`, incl. its `meta.json` with the pinned
-commit, the per-language recount, and the mechanism histogram; the
-prior rounds `s27/`, `s26/` and `s22r2/` remain for comparison).
+**WORKING** = marker-free, compiles, and preserves both sides' intent,
+but diverges from the human resolution below the PASS bar.
+**NEAR_MATCH** = valid resolution at token similarity 0.80–0.90.
+**ORACLE_DIVERGENT** = valid resolution below 0.80, or a marker or
+compile failure without escalation.
+**ESCALATE** = the resolver stopped safely and asks for a human:
+refusal, budget exhaustion, or a gate it could not repair.
+**era-dead** = both sides and the human oracle fail the current
+toolchain identically — un-passable by construction, an environmental
+rather than resolver failure (verdict ESCALATE_TOOLCHAIN).
+**PASS %** = PASS / cases.
+**adj %** = PASS / (cases − era-dead).
+**P+W adj %** = (PASS + WORKING) / (cases − era-dead) — the graded-
+success rate.
 
 ## Test suites
 
@@ -530,8 +494,8 @@ in live-eval.
 | **Data** | self-contained fixtures; nothing external fetched | real downloaded repos, processed and extracted (fetch script below) | the same real repos |
 | **Model calls** | never | never (deterministic) | yes — through the provider config + calibration profile |
 | **Entry point** | `pytest tests/ -n 6` | `./corpus/run.sh [python\|rust\|all]` | `scripts/live_eval_realworld.py --provider NAME` |
-| **Wall time** | ~38 s (4,204 tests, 6 workers) | minutes (own runner — never pytest) | hours |
-| **Purpose** | the per-change regression gate | validates the verifier + the corpus oracle against real-world conflict shapes | the measured product: harvests, README numbers |
+| **Wall time** | ~38 s (4,432 tests, 6 workers) | minutes (own runner — never pytest) | hours |
+| **Purpose** | the per-change regression gate | validates the verifier + the corpus oracle against real-world conflict shapes | the measured product: full runs, README numbers |
 
 After clone and build (`.venv` created per Setup below):
 
@@ -553,11 +517,15 @@ After clone and build (`.venv` created per Setup below):
 
 ### Corpus
 
-661 non-git-resolvable rebase conflicts mined from upstream histories
-(677 candidates; 16 git resolves cleanly on replay and are excluded) —
-each case carries both sides, the merge base, and the actual human
-resolution as the oracle: Python (flask, zenodo, requests; 109),
-C (redis, sqlite, json-c; 204), Rust (tokio, axum, sea-orm, clap,
-serde; 194), C/C++ (protobuf, clickhouse, nlohmann-json, fmt; 154). Earlier per-language
-censuses (sprints 17–20) and their methodology notes live in
-`docs/eval-results-tracker.md` and the sprint results docs.
+1,502 non-git-resolvable rebase conflicts mined from upstream
+histories — each case carries both sides, the merge base, and the
+actual human resolution as the oracle: Python (cython 150,
+scikit-learn 56, zenodo 100, flask 10, requests 1; 317), C (php 150,
+sqlite 133, libuv 101, redis 55, json-c 17; 456), C/C++
+(prusaslicer 150, duckdb 150, protobuf 73, clickhouse 50,
+nlohmann-json 38, fmt 6; 467), Rust (tokio 118, tikv 41, axum 38,
+sea-orm 29, polars 27, clap 5, serde 4; 262). 17 cases resolve
+cleanly on replay and are excluded at run time; one empty-oracle
+case is skipped. Earlier per-language censuses (sprints 17–20) and
+their methodology notes live in `docs/eval-results-tracker.md` and
+the sprint results docs.
