@@ -24,11 +24,95 @@ _FIELDS = (
     "id", "language", "dataset", "verdict", "terminal_reason",
     "matches_oracle", "escalated", "elapsed", "repeat_verdicts", "reason",
     "toolchain_dead", "resolution_bucket", "provenance_mix",
+    "model_involved",
 )
 
-#: Buckets that mean "the LLM was involved" (EXTEND-70's llm column: broad
-#: breakdown — the LLM participated, not that it solved the case alone).
+#: Buckets that mean "the LLM's text is the final resolution". NOT the
+#: README's llm column — the column is whole-process involvement (see
+#: _llm_involved); kept for backward reference in extracts only.
 _LLM_BUCKETS = ("llm_one_shot", "llm_cegis")
+
+#: Journal events that mean "a model call happened during this case's
+#: resolution" — the whole-process llm predicate (validated 2026-09-18
+#: against the full s28 corpus: rows-flag and journal scan both yield
+#: 958/1,481). Covers candidate generation, comment reconciliation,
+#: block-capture decisions, every LLM adjudication ballot (the generic
+#: adjudication-verdict dict catches midband/whole-side/phase-1), and
+#: the tier-2 ballot.
+_LLM_JOURNAL_EVENTS = frozenset({
+    "candidate_generated",
+    "comment_plan_generated",
+    "comment_model_call_failed",
+    "f1_tier2_adjudication_declined",
+})
+
+
+def _flights_index(flights_root: Path | None) -> dict[str, list[str]]:
+    """One walk of the flights tree: case_id -> journal paths (newest
+    first, non-crashed preferred). Shared by the mechanism and llm
+    fallbacks so neither pays a per-case recursive glob."""
+    if flights_root is None:
+        return {}
+    import os
+    idx: dict[str, list[str]] = {}
+    for dirpath, dirnames, filenames in os.walk(flights_root):
+        if "journal.jsonl" not in filenames:
+            continue
+        # .../<case_id>/<session>/journal.jsonl — the case dir is the
+        # parent of the journal's session dir.
+        parts = Path(dirpath).parts
+        if len(parts) < 2:
+            continue
+        case_id = parts[-2]
+        try:
+            mtime = os.path.getmtime(Path(dirpath) / "journal.jsonl")
+        except OSError:
+            mtime = 0.0
+        idx.setdefault(case_id, []).append(
+            (mtime, "-crashed" in parts[-1], str(Path(dirpath) / "journal.jsonl")))
+    for case_id in idx:
+        # newest first, non-crashed preferred (same policy as
+        # _journal_mechanism's pool ordering)
+        idx[case_id] = [
+            p for _, _, p in
+            sorted(idx[case_id], key=lambda t: (t[1], -t[0]))]
+    return idx
+
+
+def _llm_involved(rec: dict, flights_idx: dict[str, list[str]]) -> bool | None:
+    """The README llm column: did ANY model call happen during the case's
+    whole resolution process? The complement (no call) is provably
+    solvable without model access.
+
+    Source of truth, in order: the row's ``model_involved`` flag (set by
+    the harness at run time — exact); else the preserved flight journals
+    (the predicate above); else None = unknown (older results files run
+    without --flights). Never falls back to resolution_bucket — that
+    counts only landed-LLM-text cases and is the undercount this
+    function exists to fix (147 vs 958 on the s28 corpus).
+    """
+    if rec.get("model_involved") is not None:
+        return bool(rec["model_involved"])
+    for jpath in flights_idx.get(rec["id"], []):
+        try:
+            with open(jpath, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    t = ev.get("event_type", "")
+                    if t in _LLM_JOURNAL_EVENTS:
+                        return True
+                    p = ev.get("payload") or {}
+                    if t == "block_capture_decision" and p.get("reason"):
+                        return True
+                    adj = p.get("adjudication")
+                    if isinstance(adj, dict) and adj.get("verdict"):
+                        return True
+        except OSError:
+            continue
+    return False if flights_idx else None
 
 
 def _journal_mechanism(flights_root: Path | None, case_id: str) -> str | None:
@@ -153,6 +237,11 @@ def main() -> None:
              "the harvest ran pre-fix code for a known case set: the "
              "fix-validation rerun's verdicts are the honest numbers. The "
              "replaced row's repeat_verdicts carry a marker of the swap.")
+    ap.add_argument(
+        "--prior", default=None, metavar="JSON",
+        help="The prior round's results JSON. Emits delta_pw_adj per "
+             "language + total: difference of UNROUNDED P+W adj values, "
+             "rounded once (the README Δ convention).")
     args = ap.parse_args()
 
     records = json.loads(Path(args.results).read_text())
@@ -222,9 +311,14 @@ def main() -> None:
                 era += 1
     denom_adj = total - era
 
-    # Per-language table (README rows) incl. the llm column (EXTEND-70:
-    # cases whose resolution_bucket is llm_one_shot/llm_cegis — the LLM
-    # was involved).
+    # Per-language table (README rows). llm = whole-process model
+    # involvement (row flag, else the journal predicate) — the README's
+    # definition; era-excluded denominators for adj/pw_adj, rounded once
+    # from unrounded values (hand-rounding produced a wrong total row in
+    # the 2026-09-18 README pass — these numbers are copy-paste, never
+    # recomputed by hand).
+    flights_idx = _flights_index(flights_root)
+    llm_unknown = 0
     by_language = {}
     for lang, rows in sorted(by_lang.items()):
         lt = lp = lw = le = lllm = 0
@@ -239,12 +333,97 @@ def main() -> None:
                 lw += 1
             if row.get("toolchain_dead"):
                 le += 1
-            if row.get("resolution_bucket") in _LLM_BUCKETS:
+            involved = _llm_involved(row, flights_idx)
+            if involved is None:
+                llm_unknown += 1
+            elif involved:
                 lllm += 1
+        denom = lt - le
         by_language[lang] = {
             "cases": lt, "pass": lp, "working": lw, "era_dead": le,
             "llm": lllm,
+            "pass_pct": round(100 * lp / lt, 1) if lt else 0,
+            "adj_pct": round(100 * lp / denom, 1) if denom else 0,
+            "pw_adj_pct": round(100 * (lp + lw) / denom, 1) if denom else 0,
         }
+    if llm_unknown:
+        print(f"WARNING: llm unknown for {llm_unknown} rows (no "
+              f"model_involved flag and no --flights) — reported as "
+              f"not-involved. Rerun with --flights or a newer results "
+              f"file for the true column.")
+
+    # accepted = counted − escalated (the mechanism counting-rules line;
+    # hand-derived as 1,386 during the 2026-09-18 README pass).
+    accepted = sum(
+        1 for lang_rows in by_lang.values() for row in lang_rows
+        if not _is_skip(row)
+        and row["verdict"] not in ("ESCALATE", "ESCALATE_TOOLCHAIN"))
+
+    # Δ P+W adj vs the prior round (--prior): difference of unrounded
+    # values, rounded once — the README Δ convention (documented so the
+    # displayed-difference vs raw-difference ambiguity that required a
+    # 2026-09-18 audit cannot recur).
+    delta: dict[str, float] | None = None
+    if args.prior:
+        prior_recs = json.loads(Path(args.prior).read_text())
+        prior_by_lang: dict[str, list] = {}
+        for rec in prior_recs:
+            prior_by_lang.setdefault(rec.get("language") or "?", []).append(rec)
+        delta = {}
+        for lang in set(by_language) | {
+                r.get("language") or "?" for r in prior_recs}:
+            def _pw_adj(recs):
+                t = p = w = e = 0
+                for rec in recs:
+                    if _is_skip(rec):
+                        continue
+                    t += 1
+                    v = rec.get("verdict")
+                    if v == "PASS":
+                        p += 1
+                    elif v == "WORKING":
+                        w += 1
+                    if rec.get("toolchain_dead"):
+                        e += 1
+                return (100.0 * (p + w) / (t - e)) if t - e else 0.0
+            cur = _pw_adj(by_lang.get(lang, []))
+            pri = _pw_adj(prior_by_lang.get(lang, []))
+            delta[lang] = round(cur - pri, 1)
+        delta["total"] = round(
+            (100.0 * (passes + working) / denom_adj if denom_adj else 0.0)
+            - _pw_adj(prior_recs), 1)
+
+    # readme_table: the README's per-language table in its exact column
+    # order — copy-paste, never hand-built. Δ column only when --prior.
+    _DISPLAY_LANGS = ("python", "c", "cpp", "rust", "?")
+    ordered = [l for l in _DISPLAY_LANGS if l in by_language] + \
+              [l for l in sorted(by_language) if l not in _DISPLAY_LANGS]
+    header = ("| lang | cases | PASS | WORKING | era-dead | llm | "
+              "PASS % | adj % | P+W adj % |")
+    sep = "|------|-------|------|---------|----------|-----|" \
+          "--------|-----------|-----------|"
+    if delta is not None:
+        header += " Δ P+W |"
+        sep += "-------|"
+    lines = [header, sep]
+    for lang in ordered:
+        v = by_language[lang]
+        row = (f"| {lang} | {v['cases']} | {v['pass']} | {v['working']} "
+               f"| {v['era_dead']} | {v['llm']} | {v['pass_pct']}% "
+               f"| {v['adj_pct']}% | {v['pw_adj_pct']}% |")
+        if delta is not None:
+            row += f" {delta[lang]:+.1f}pp |"
+        lines.append(row)
+    total_row = (f"| **total** | **{total}** | **{passes}** "
+                 f"| **{working}** | **{era}** "
+                 f"| **{sum(v['llm'] for v in by_language.values())}** "
+                 f"| **{round(100 * passes / total, 1) if total else 0}%** "
+                 f"| **{round(100 * passes / denom_adj, 1) if denom_adj else 0}%** "
+                 f"| **{round(100 * (passes + working) / denom_adj, 1) if denom_adj else 0}%** |")
+    if delta is not None:
+        total_row += f" **{delta['total']:+.1f}pp** |"
+    lines.append(total_row)
+    readme_table = "\n".join(lines)
 
     # Mechanism histogram (EXTEND-70: mechanism | cases | PASS | WORKING |
     # P+W %), from each row's PERSISTED mechanism (s27-73 — recomputable
@@ -307,6 +486,7 @@ def main() -> None:
             "pass": passes,
             "working": working,
             "era_dead": era,
+            "accepted": accepted,
             "pass_pct": round(100 * passes / total, 1) if total else 0,
             "adj_pct": round(100 * passes / denom_adj, 1) if denom_adj else 0,
             "pw_adj_pct": round(
@@ -314,10 +494,15 @@ def main() -> None:
             "by_language": by_language,
             "mechanism_histogram": histogram,
             "mechanism_participation": participation,
+            "readme_table": readme_table,
         },
         # caller completes: mechanism_commit, state, command_template,
         # ran, verification, outcome_summary
     }
+    if delta is not None:
+        meta["recount"]["delta_pw_adj_pct"] = delta
+        meta["recount"]["delta_convention"] = (
+            "difference of unrounded P+W adj values, rounded once")
     # s27-73 (rerun hygiene): merge with any existing meta — the caller
     # completes mechanism_commit/state/outcome_summary, and a recount
     # must not silently erase them.
@@ -329,8 +514,20 @@ def main() -> None:
                 meta.setdefault(k, v)
         except json.JSONDecodeError:
             pass
+    # Completeness warning BEFORE the README points readers here: s27's
+    # meta was never completed and a published "full list is in
+    # docs/results/s27/meta.json" pointer was false (found 2026-09-18).
+    missing = [f for f in ("description", "mechanism_commit", "state",
+                           "command_template", "ran", "verification",
+                           "outcome_summary") if not meta.get(f)]
+    if missing:
+        print(f"meta.json INCOMPLETE — missing: {', '.join(missing)} "
+              f"(complete before the README references this file)")
     meta_path.write_text(json.dumps(meta, indent=2) + "\n")
-    print(json.dumps(meta["recount"], indent=1))
+    print(json.dumps({k: v for k, v in meta["recount"].items()
+                      if k != "readme_table"}, indent=1))
+    print("\nREADME table (copy-paste):")
+    print(readme_table)
 
 
 if __name__ == "__main__":
