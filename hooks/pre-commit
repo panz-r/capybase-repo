@@ -19,6 +19,12 @@
 # ~/.config/capybase/providers/ (see src/capybase/provider_config.py) or the
 # user-level capybase.toml — never inside the repository.
 #
+# README terminology guard (2026-09-18): staged additions to README.md
+# must keep the accepted vocabulary — no 'harvest', no 'monster', no
+# internal process-doc names (PLAN-LEDGER etc.), no sprint worklog codes
+# (SNN-NN). Exceptions mark the line:
+#     the-word  # readme-guard: allow
+#
 # Install once per clone:  git config core.hooksPath hooks
 #
 set -uo pipefail
@@ -72,13 +78,45 @@ while IFS= read -r line; do
         echo "pre-commit: host name (nova*) staged in $file" >&2  # endpoint-guard: allow
         violations=1
     fi
+
+    # README terminology guard — README.md additions only. The README's
+    # accepted vocabulary (2026-09-18): 'full run' not 'harvest'; 'the
+    # larger corpus' not tier/monster names; internal process docs and
+    # sprint-worklog codes never appear. Legitimate pre-existing uses
+    # elsewhere ("acceptance tier", the Test-suites "Three tiers") are
+    # untouched — this block only fires for README.md.
+    if [ "$file" = "README.md" ]; then
+        case "$content" in
+            *readme-guard:*allow*) ;;
+            *)
+                if printf '%s\n' "$content" | grep -qiE '\bharvest(s|ed|ing)?\b'; then
+                    echo "pre-commit: 'harvest' staged in README.md (use 'full run'/'round') — $file" >&2
+                    violations=1
+                fi
+                if printf '%s\n' "$content" | grep -qiE '\bmonster\b'; then
+                    echo "pre-commit: 'monster' staged in README.md (use 'the larger corpus') — $file" >&2
+                    violations=1
+                fi
+                if printf '%s\n' "$content" | grep -qE 'PLAN-LEDGER|RESUME\.md|README-SECTION-REWRITE-PROCESS'; then
+                    echo "pre-commit: internal process-doc name staged in README.md — $file" >&2
+                    violations=1
+                fi
+                if printf '%s\n' "$content" | grep -qE '\bS[0-9]+-[0-9]+\b'; then
+                    echo "pre-commit: sprint worklog code (SNN-NN) staged in README.md — $file" >&2
+                    violations=1
+                fi
+                ;;
+        esac
+    fi
 done < <(git diff --cached --no-color -U0)
 
 if [ "$violations" -ne 0 ]; then
     echo >&2
-    echo "Refusing commit: environment-specific endpoints must not enter the repo." >&2
-    echo "Put hosts in ~/.config/capybase/providers/<name>.json (provider configs)" >&2
-    echo "or the user-level capybase.toml — see src/capybase/provider_config.py." >&2
+    echo "Refusing commit: environment-specific endpoints must not enter the repo," >&2
+    echo "and the README keeps its accepted vocabulary." >&2
+    echo "Endpoints: put hosts in ~/.config/capybase/providers/<name>.json (provider" >&2
+    echo "configs) or the user-level capybase.toml — see src/capybase/provider_config.py." >&2
+    echo "README terms: mark an intentional exception '# readme-guard: allow' (greppable)." >&2
     exit 1
 fi
 exit 0
