@@ -46,7 +46,6 @@ from capybase.policy_strictness import StrictnessPolicy
 from capybase.resolution_engine import ResolutionEngine
 from capybase.risk import RiskEngine
 from capybase.session import SessionPaths, new_session_id
-from capybase.signature_repair import has_signature_gap
 from capybase.verification import (
     ValidationConfig,
     VerificationEngine,
@@ -1645,14 +1644,20 @@ def _micro_symbol_decls(symbol: str, *texts: str, limit: int = 6) -> list[str]:
 
 def _try_signature_injection(
     buffer: str, hard_failures: list, side_texts: list[str],
-) -> str | None:
+    declined: "set[tuple[str, str]] | None" = None,
+) -> "tuple[str | None, list[tuple[str, str]]]":
     """S28-54: build the signature-injected buffer, or None when nothing
     injectable.
 
     Pure candidate generation — the caller re-validates through the whole
     file gate. Guards live in capybase.signature_repair (present-in-
     resolution -> no injection; absent-from-both-sides -> decline); here
-    we additionally skip identifiers with no findable side declaration.
+    we additionally skip identifiers with no findable side declaration
+    and ``(identifier, declaration)`` pairs already GATE-DECLINED in this
+    case (S28-74: a declined pair re-fires identically on every loop
+    iteration and each retry burns a full build probe). Returns
+    ``(buffer_or_None, applied_pairs)`` — the caller memoizes
+    ``applied_pairs`` when the gate declines.
     """
     from capybase.signature_repair import (
         extract_signature_gaps, find_declaration_line, inject_declaration,
@@ -1660,16 +1665,18 @@ def _try_signature_injection(
     gaps = extract_signature_gaps([f.message for f in hard_failures])
     out = buffer
     injected = 0
+    applied: list[tuple[str, str]] = []
     for ident, line_no in gaps[:3]:
         decl = find_declaration_line(side_texts, ident)
-        if decl is None:
+        if decl is None or (declined and (ident, decl) in declined):
             continue
         new = inject_declaration(out, ident, line_no, decl)
         if new is None:
             continue
         out = new
+        applied.append((ident, decl))
         injected += 1
-    return out if injected else None
+    return (out if injected else None), applied
 
 
 def _true_stage_sides(git_backend, path: str):
@@ -10990,26 +10997,24 @@ class Orchestrator:
                         if _phase2_model_used:
                             break  # only 1 model re-resolve allowed in tiered mode
                     if wf_retries >= wf_budget:
-                        # S28-54: a signature gap (undeclared identifier /
-                        # missing member in the build failures) is the licensed
-                        # shape for extra repair rounds — each round
-                        # demonstrably closes ~1 error (0113: 2->1 in one
-                        # round), so grant up to 3 when the failures name one.
-                        if has_signature_gap([
-                                f.message for f in file_validation.hard_failures]):
-                            if wf_retries >= max(wf_budget, 3):
-                                break
-                        else:
-                            # The COUNT budget applies in BOTH modes. Tiered mode
-                            # previously bypassed it (only time/model breaks):
-                            # sqlite-0040's d40d105a flight ran 1,221 deterministic
-                            # beam cycles inside its 200s cap — two repairs
-                            # oscillating (line_replace at line 1 vs derived
-                            # prototype), each ~0.16s, spinning until the time
-                            # budget died. Design v2's tiered contract is ONE
-                            # deterministic beam pass + 1 model re-resolve; the
-                            # configured max_whole_file_repair_retries must hold.
-                            break
+                        # The COUNT budget applies in BOTH modes. Tiered mode
+                        # previously bypassed it (only time/model breaks):
+                        # sqlite-0040's d40d105a flight ran 1,221 deterministic
+                        # beam cycles inside its 200s cap — two repairs
+                        # oscillating (line_replace at line 1 vs derived
+                        # prototype), each ~0.16s, spinning until the time
+                        # budget died. Design v2's tiered contract is ONE
+                        # deterministic beam pass + 1 model re-resolve; the
+                        # configured max_whole_file_repair_retries must hold.
+                        # S28-74 (fix-pass live evidence): a signature-gap
+                        # budget raise (floor 3) was tried and REVERTED — the
+                        # band's repair rounds whack-a-mole NEW undeclared
+                        # identifiers instead of converging (0127: tokenizer
+                        # -> state -> parser_cache -> tokenizer), 4-8x wall
+                        # time for zero conversions, and 0125 hit the 1200s
+                        # case timeout. The raise's premise (each round
+                        # closes ~1 error) does not hold for this shape.
+                        break
                     _osc_sig = _osc.signature(file_validation.hard_failures)
                     if _osc.is_cycle(_osc_sig):
                         # A deterministic repair already ran from this exact
@@ -11038,9 +11043,12 @@ class Orchestrator:
                     # pre-injection state is restored and the normal repair
                     # ladder continues unimpeded (no retry consumed).
                     if _sig_side_texts is not None:
-                        _inj_buf = _try_signature_injection(
+                        _inj_buf, _inj_applied = _try_signature_injection(
                             buffer, file_validation.hard_failures,
-                            _sig_side_texts)
+                            _sig_side_texts,
+                            declined=getattr(self, "_sig_declined_gate", {})
+                            .get(path),
+                        )
                         if _inj_buf is not None:
                             self._write_worktree_only(
                                 path, _inj_buf, accepted=accepted)
@@ -11066,6 +11074,13 @@ class Orchestrator:
                                 )
                                 file_validation = _sig_val
                                 break
+                            # S28-74: memoize the gate-declined pairs — each
+                            # unmemoized retry costs a full build probe and
+                            # re-derives the identical decline.
+                            if not hasattr(self, "_sig_declined_gate"):
+                                self._sig_declined_gate = {}
+                            self._sig_declined_gate.setdefault(
+                                path, set()).update(_inj_applied)
                             self._write_worktree_only(
                                 path, buffer, accepted=accepted)
                             self.journal.emit(

@@ -136,17 +136,43 @@ def test_orchestrator_helper_end_to_end_and_decline_paths():
         "}\n"
     )
     # happy: the 0126-shaped failure + a side carrying the declaration
-    out = _try_signature_injection(
+    out, applied = _try_signature_injection(
         buffer, [_fail(_0126)], [_0126_CURRENT, _0126_REPLAYED])
     assert out is not None and "auto &cache = GetCache();" in out
+    assert applied == [("cache", "auto &cache = GetCache();")]
     # decline: identifier absent from both sides (direction 2)
-    assert _try_signature_injection(
-        buffer, [_fail(_0126)], ["\tint unrelated;\n"]) is None
+    out2, applied2 = _try_signature_injection(
+        buffer, [_fail(_0126)], ["\tint unrelated;\n"])
+    assert out2 is None and applied2 == []
     # decline: identifier already declared in the buffer (direction 1)
     declared = buffer.replace("consume(cache);", "ParserCache cache;\n\tconsume(cache);")
-    assert _try_signature_injection(
-        declared, [_fail(_0126)], [_0126_CURRENT]) is None
+    out3, _ = _try_signature_injection(
+        declared, [_fail(_0126)], [_0126_CURRENT])
+    assert out3 is None
     # decline: failures carry no signature-gap shape at all
-    assert _try_signature_injection(
+    out4, _ = _try_signature_injection(
         buffer, [_fail("error: expected ',' or '...' before '}' token")],
-        [_0126_CURRENT]) is None
+        [_0126_CURRENT])
+    assert out4 is None
+
+
+def test_gate_declined_pairs_are_memoized():
+    """S28-74: a (identifier, declaration) pair the whole-file gate already
+    declined must not re-fire on later loop iterations — each unmemoized
+    retry re-derives the identical decline and burns a full build probe
+    (observed on duckdb-0125/0126/0127)."""
+    buffer = (
+        "void step() {\n"
+        "\tif (ready) {\n"
+        "\t\tconsume(cache);\n"
+        "\t}\n"
+        "}\n"
+    )
+    out, applied = _try_signature_injection(
+        buffer, [_fail(_0126)], [_0126_CURRENT])
+    assert out is not None and applied
+    # the same call with the pair memoized declines without re-injecting
+    out2, applied2 = _try_signature_injection(
+        buffer, [_fail(_0126)], [_0126_CURRENT],
+        declined={("cache", "auto &cache = GetCache();")})
+    assert out2 is None and applied2 == []
