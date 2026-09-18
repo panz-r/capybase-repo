@@ -242,3 +242,33 @@ def test_targeted_build_timeout_does_not_degrade(monkeypatch):
     eng.verify_file("a.c", "c", code, [], repo_root="/tmp", whole_text=code)
     # a targeted .o timeout is not evidence the full tree can't finish
     assert eng.build_state.full_build_available is True
+
+
+def test_timeout_syntax_only_pass_records_degraded_probe(monkeypatch):
+    """T2 (S28-36c telemetry): a build timeout whose syntax-only fallback
+    PASSES used to leave only the timeout probe — the shared exit then
+    read as a compile pass. The degraded probe event distinguishes
+    parse-passes from compile-passes in the journal."""
+    import capybase.verification as V
+
+    eng = VerificationEngine.default(ValidationConfig())
+    eng.config.cc_build_command = "make -j4"
+    events: list[tuple[str, dict]] = []
+    eng.build_state = BuildStateTracker(
+        event_sink=lambda e, p: events.append((e, p)))
+
+    def fake_run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+    monkeypatch.setattr(V, "_compile_ccs",
+                        lambda whole, **kw: (True, "ok"))
+    monkeypatch.setattr(V, "_run_shell_tree", fake_run)
+
+    code = "int main(void) { return 0; }\n"
+    eng.verify_file("a.c", "c", code, [], repo_root="/tmp", whole_text=code)
+    probes = [p for e, p in events if e == "build_probe"]
+    degraded = [p for p in probes if p["outcome"] == "pass_syntax_only"]
+    assert degraded, (
+        "a timeout rescued by the syntax-only fallback must record the "
+        "degraded probe event")
+    assert "parsed, not compiled" in (degraded[0].get("note") or "")

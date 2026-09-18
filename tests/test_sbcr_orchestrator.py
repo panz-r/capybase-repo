@@ -252,3 +252,28 @@ def test_balanced_conflict_uses_sbcr_when_routing_off(repo: Path):
     accepted = [e for e in orch.journal.read_events()
                 if e.event_type == "candidate_accepted"]
     assert accepted and accepted[-1].payload["via"] == "sbcr"
+
+
+def test_combination_resolved_carries_hard_failures_and_text_sha(repo: Path):
+    """T1 (S28-21/S28-46 telemetry): the accept-path combination_resolved
+    event dropped validation.hard_failures and any way to identify the
+    evaluated text — the S28-46 counterfactual census needed the declined
+    candidate and got neither. Both now ride the event: hard_failures
+    (up to 3 messages) and declined_text_sha8 (content-addressed handle)."""
+    _make_both_add_imports(repo)
+    engine = ResolutionEngine(_config(repo).model, client=CallCountingClient())
+    orch = Orchestrator(_config(repo), repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    assert not result.escalated, result.reason
+    events = [e for e in orch.journal.read_events()
+              if e.event_type == "combination_resolved"]
+    assert events, "expected the SBCR path to emit combination_resolved"
+    payload = events[0].payload
+    assert "hard_failures" in payload, (
+        "hard_failures must ride the event even on a pass (empty list)")
+    assert isinstance(payload["hard_failures"], list)
+    assert payload.get("declined_text_sha8"), (
+        "declined_text_sha8 (8 hex chars) must identify the evaluated text")
+    assert len(payload["declined_text_sha8"]) == 8
+    int(payload["declined_text_sha8"], 16)  # hex-decodable

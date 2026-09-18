@@ -6245,6 +6245,12 @@ class VerificationEngine:
                                 # timeout that rejects a correct merge.
                                 syntax_ok, _fb_msg = _syntax_only_fallback(
                                     "build timed out")
+                                if _bs is not None and syntax_ok:
+                                    _bs.record_probe(
+                                        build_cmd,
+                                        _bs_time.monotonic() - _bs_t0,
+                                        "pass_syntax_only", path=path,
+                                        note="timeout; parsed, not compiled")
                                 msg = (
                                     f"build timed out ({_build_timeout:g}s): "
                                     f"{build_cmd}; fell back to gcc "

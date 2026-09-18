@@ -2479,7 +2479,7 @@ def main():
                         id=case.id, language=case.language, dataset=case.dataset,
                         escalated=True,
                         conflict_region_count=case.marker_original.count("<<<<<<<"),
-                        reason=f"harness error: {type(exc).__name__}: {str(exc)[:100]}")
+                        reason=f"harness error: {type(exc).__name__}: {str(exc)[:250]}")
                     _res.model_involved = _counting.calls > 0
                     _holder.append(_res)
 

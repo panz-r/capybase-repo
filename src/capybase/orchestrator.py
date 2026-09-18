@@ -7330,8 +7330,12 @@ class Orchestrator:
                 "fitness": round(result.fitness, 4),
                 "balance": round(bal, 4),
                 "passed": validation.passed,
+                "hard_failures": [
+                    f.message for f in validation.hard_failures[:3]],
                 "mode": result.mode,
                 "candidate_lines": len((result.text or "").splitlines()),
+                "declined_text_sha8": __import__("hashlib").sha256(
+                    (result.text or "").encode()).hexdigest()[:8],
             },
             step_index=self.step,
             path=unit.path,
