@@ -14615,7 +14615,21 @@ class Orchestrator:
         candidates, verified directly. First that passes wins; both failing
         returns None so the caller continues the normal retry policy.
         """
-        for side in ("current", "replayed"):
+        # S28-38: order the sides by churn so the fallback picks the
+        # churn winner when both pass verification (fixed order picked
+        # the loser in zenodo-0100 — oracle sat in the other stage).
+        try:
+            from capybase.merge_intent import side_churn
+            _base_txt = (getattr(unit.base, "text", "") or "") if getattr(
+                unit, "base", None) else ""
+            _churns = {
+                s: side_churn(_base_txt, getattr(getattr(unit, s), "text", "") or "")
+                for s in ("current", "replayed")
+            }
+            _sides = sorted(_churns, key=_churns.get, reverse=True)
+        except Exception:  # noqa: BLE001 — churn ordering is best-effort
+            _sides = ("current", "replayed")
+        for side in _sides:
             side_obj = getattr(unit, side, None)
             text = (getattr(side_obj, "text", "") or "") if side_obj else ""
             if not text.strip():
