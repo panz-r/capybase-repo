@@ -10031,6 +10031,13 @@ class Orchestrator:
         # Per-step seeded-file set (convergence seeds): only paths seeded in
         # THIS step skip Phase 2.
         self._step_seeded_files = set()
+        # S28-85: the signature-injection decline memo is per-STEP, not
+        # per-rebase — a declined (identifier, declaration) pair is a fact
+        # about ONE step's buffer and sides; the same path conflicting at a
+        # later step has an entirely new buffer, and a stale memo would
+        # silently suppress the arm there.
+        if hasattr(self, "_sig_declined_gate"):
+            self._sig_declined_gate = {}
         if not result.units_by_path:
             # No conflicts at this stop: nothing to resolve (rare).
             self.out("no conflict units at this stop; continuing.")

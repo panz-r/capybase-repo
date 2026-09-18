@@ -260,3 +260,33 @@ def test_declaration_guard_is_scope_local_not_file_global():
         "}\n"
     )
     assert inject_declaration(near, "cache", 3, "ParserCache cache;") is None
+
+
+def test_decline_memo_resets_per_step(repo, monkeypatch):
+    """S28-85: the decline memo must not survive across rebase steps — a
+    declined pair is a fact about one step's buffer/sides; the same path
+    at a later step has a new buffer and the arm must engage again.
+    Drives _resolve_step's step-start reset via the empty-gather early
+    return."""
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator, StepResult
+    from capybase.resolution_engine import ResolutionEngine
+
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.tests.required = False
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=ResolutionEngine(cfg.model),
+        out=lambda *_a, **_k: None,
+    )
+    # a prior step left a decline memo behind
+    orch._sig_declined_gate = {"f.cpp": {("cache", "ParserCache cache;")}}
+    monkeypatch.setattr(
+        orch, "_gather_step",
+        lambda: StepResult(step_index=0, escalated=False,
+                           units_by_path={}))
+    result = orch._resolve_step()
+    assert getattr(orch, "_sig_declined_gate", {}) == {}, (
+        "the decline memo must reset at each step start — a stale memo "
+        "would suppress the injection arm for the same path at later "
+        "steps")
