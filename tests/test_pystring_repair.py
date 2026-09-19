@@ -139,3 +139,46 @@ def test_splice_level_pystring_form():
     region, form = out
     assert form == "pystring"
     assert region.strip(), "the extracted region must be non-empty"
+
+
+def test_splice_level_pp_form():
+    """S28-106: the preprocessor form — the fragment drops the #endif that
+    lived at the original block's end; the position-correct repair inserts
+    the deficit at the region end (the whole-text balancer's sibling
+    heuristic targets the wrong opener and declines this shape — libuv-0089)."""
+    from capybase.verification import splice_level_delimiter_repair
+
+    original = (
+        "#include <x.h>\n"
+        "#ifdef _WIN32\n"
+        "int win_only(void);\n"
+        "#endif\n"
+        "int common(void);\n"
+    )
+    # the conflict region = lines 2-4 (the #ifdef block); the FRAGMENT drops
+    # the #endif (the model's merge kept the opener, lost the closer)
+    marker_span = (1, 3)  # 0-based inclusive
+    fragment = "#ifdef _WIN32\nint win_only(void);\n"
+    messages = ["splice coherence: unbalanced preprocessor directives "
+                "at line 5 (missing #endif or extra #endif)"]
+    out = splice_level_delimiter_repair(
+        original, marker_span, fragment, messages, "c")
+    assert out is not None, "the pp form must fire on the missing-#endif shape"
+    region, form = out
+    assert form == "pp"
+    assert region.count("#endif") - region.count("#ifdef") >= 0
+    # the extracted region re-splices to a balanced file
+    from capybase.adapters.parsers import splice_resolution
+    from capybase.verification import _preprocessor_imbalance_line
+    final = splice_resolution(original, marker_span, region)
+    assert _preprocessor_imbalance_line(final) is None
+    # direction 2: the extra-#endif shape stays with the existing balancer
+    # (deletion path) — the pp form declines rather than double-handling
+    out2 = splice_level_delimiter_repair(
+        original, marker_span, fragment + "#endif\n#endif\n",
+        ["splice coherence: unbalanced preprocessor directives "
+         "at line 5 (missing #endif or extra #endif)"], "c")
+    # (either repaired via the depth<0 path's absence → None, or balanced;
+    # assert no crash + no wrong insertion)
+    assert out2 is None or _preprocessor_imbalance_line(
+        splice_resolution(original, marker_span, out2[0])) is None

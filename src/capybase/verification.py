@@ -3123,6 +3123,9 @@ def delimiter_failure_shape(messages: list[str]) -> str | None:
     for m in messages:
         if "unterminated" in m and "string literal" in m:
             return "pystring"
+    for m in messages:
+        if "unbalanced preprocessor" in m:
+            return "pp"
     return None
 
 
@@ -3173,6 +3176,31 @@ def splice_level_delimiter_repair(
         if braced is not None and braced != spliced:
             repaired = braced
             shape = "brace"
+    if repaired is None and shape == "pp":
+        # S28-106: unclosed #if/#ifdef at the region — the fragment dropped
+        # the closer that lived at the original block's end. The whole-text
+        # balancer's sibling-boundary heuristic can target the WRONG opener
+        # (libuv-0089: it inserted before the last #ifdef, leaving depth 1,
+        # and declined); the position-correct edit is the REGION END. Only
+        # the deficit>0 shape (missing #endif); deletions stay with the
+        # existing balancer's directive-only path.
+        from capybase.verification import _mask_strings_and_comments
+        _masked = _mask_strings_and_comments(spliced, "c")
+        _def = 0
+        for _ln in _masked.split("\n"):
+            if _PP_OPEN_RE.match(_ln):
+                _def += 1
+            elif _PP_CLOSE_RE.match(_ln):
+                _def -= 1
+        if _def > 0:
+            _sp = spliced.split("\n")
+            _at = marker_span[0] + len(resolved_text.splitlines())
+            if _at <= len(_sp):
+                _cand = _sp[:_at] + ["#endif"] * _def + _sp[_at:]
+                _cand_txt = "\n".join(_cand) + ("\n" if spliced.endswith("\n") else "")
+                if _cand_txt != spliced and _preprocessor_imbalance_line(
+                        _cand_txt) is None:
+                    repaired = _cand_txt
     if repaired is None and shape == "pystring":
         # S28-79/S28-90: unterminated python triple-quoted string on the
         # SPLICED file — the fragment is often balanced and the splice is
