@@ -15391,6 +15391,17 @@ class Orchestrator:
         # counterexample). Any resolution still runs the full validation pipeline;
         # on failure it falls through to the model, so this can only cut LLM load,
         # never produce a worse merge. Gated by [future] enable_structural_resolver.
+        if failures is None and getattr(self.config.future,
+                                        "enable_generated_file_side", True):
+            # S28-104: build-generated files (arginfo-class codegen output)
+            # resolve by churn-winner side-take — BEFORE structural: the
+            # file-class signal outranks any structural interpretation of
+            # machine-generated content (the live run showed structural
+            # accepting these units and dying at the whole-file gate).
+            early = self._cascade_mechanism(
+                "generated_file_side", self._try_generated_file_side, unit)
+            if early is not None:
+                return early
         if failures is None and self.config.future.enable_structural_resolver:
             early = self._cascade_mechanism(
                 "structural_resolve", self._try_structural_resolve, unit)
@@ -15506,15 +15517,6 @@ class Orchestrator:
         # merge resolutions contain only lines from the input sides. When a
         # source composition compiles, it's a valid merge — no generation
         # artifacts (dropped braces, missing semicolons). Zero LLM calls.
-        if failures is None and getattr(self.config.future,
-                                        "enable_generated_file_side", True):
-            # S28-103: build-generated files (arginfo-class codegen output)
-            # resolve by churn-winner side-take — BEFORE the portfolio, the
-            # class signal is stronger than composition heuristics.
-            early = self._cascade_mechanism(
-                "generated_file_side", self._try_generated_file_side, unit)
-            if early is not None:
-                return early
         if failures is None and getattr(self.config.future, "enable_source_portfolio", True):
             early = self._cascade_mechanism(
                 "source_candidate_portfolio", self._try_source_candidate_portfolio, unit)
