@@ -7212,6 +7212,75 @@ class Orchestrator:
         )
         return outcome
 
+    def _try_generated_file_take(
+        self, path: str, language: str | None,
+        original: str, units: list,
+    ) -> "list[tuple[ConflictUnit, CandidateResolution]] | None":
+        """S28-111: FILE-level side-take for build-generated conflict files.
+
+        The design correction over S28-103's per-unit arm: the entity
+        splitter cuts generated headers into sub-unit slices that break the
+        block signature, so the detection must run on the WHOLE file — and
+        when it fires, the resolution is the whole churn-winner side file
+        (the generation that matches the human's source), not a per-unit
+        splice. Phase 2 re-validates the file like any other whole-file
+        resolution.
+
+        Returns the same shape as the true-side fast path: a single
+        whole-file (unit, candidate) list, or None when the file carries no
+        complete codegen block signature or the stage sides are absent.
+        """
+        import re as _re_gen
+
+        block_start = _re_gen.compile(r"^\s*ZEND_BEGIN_ARG_INFO")
+        block_end = _re_gen.compile(r"^\s*ZEND_END_ARG_INFO")
+
+        def _has_complete_block(text: str) -> bool:
+            inside = False
+            for ln in (text or "").splitlines():
+                if not inside and block_start.match(ln):
+                    inside = True
+                elif inside and block_end.match(ln):
+                    return True
+            return False
+
+        _sides = _true_stage_sides(self.git, path)
+        if not _sides or not _sides[0]:
+            return None
+        cur = _sides[0].get("current", "") or ""
+        rep = _sides[0].get("replayed", "") or ""
+        base = _sides[1] or ""
+        # The stage side files are the authoritative whole-file content —
+        # the signature must be checked there (and on the worktree), not
+        # on unit slices.
+        if not any(_has_complete_block(x) for x in
+                   (original, cur, rep)):
+            return None
+        from capybase.merge_intent import side_churn
+        winner, wtext = (
+            ("current", cur) if side_churn(base, cur) >= side_churn(base, rep)
+            else ("replayed", rep))
+        unit = units[0]
+        wf_unit = unit.model_copy(update={
+            "marker_span": None, "unit_kind": "whole_file"})
+        cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:generated_file_side",
+            unit_id=unit.unit_id,
+            model_name="generated_file_side",
+            prompt_version="generated-file-side.v1",
+            resolved_text=wtext,
+            provenance="deterministic_generated_file_side",
+            explanation=(
+                f"build-generated file (arginfo blocks): churn-winner "
+                f"{winner} side file taken verbatim"),
+        )
+        self.journal.emit(
+            "generated_file_take",
+            {"path": path, "side": winner, "units": len(units)},
+            step_index=self.step, path=path,
+        )
+        return [(wf_unit, cand)], "generated_file_take"
+
     def _try_generated_file_side(self, unit: ConflictUnit) -> UnitOutcome | None:
         """Deterministic side-take for BUILD-GENERATED conflict files (S28-103).
 
@@ -10329,6 +10398,30 @@ class Orchestrator:
             # time). On a hit, record the whole-file resolution and skip to
             # the next file; Phase 2 re-validates it like any other.
             if units and units[0].marker_span is not None:
+                # S28-111 (design correction): build-generated files
+                # (arginfo-class codegen output) resolve as a FILE-level
+                # churn-winner side-take BEFORE splitting — per-unit
+                # detectors decline here (sub-unit slices break the block
+                # signature) and the LLM ladder splices incoherent
+                # generations (the php-0116 live lesson: byte-identical
+                # side, escalated row). Same contract as the true-side
+                # fast path; Phase 2 re-validates.
+                try:
+                    _gf = self._try_generated_file_take(
+                        path, units[0].language,
+                        units[0].original_worktree_text, units,
+                    )
+                except Exception:
+                    _gf = None
+                if _gf is not None:
+                    accepted = _gf[0]
+                    original = accepted[0][0].original_worktree_text
+                    buffer = _resolved_buffer(original, accepted)
+                    resolved_files[path] = buffer
+                    accepted_by_path[path] = accepted
+                    originals[path] = original
+                    self._write_worktree_only(path, buffer, accepted=accepted)
+                    continue
                 try:
                     _fp = self._try_true_side_portfolio(
                         path, units[0].language,

@@ -105,3 +105,85 @@ def test_replayed_churn_winner_is_taken(repo: Path):
     outcome = orch._try_generated_file_side(unit)
     assert outcome is not None
     assert outcome.accepted.resolved_text == rep
+
+
+def _file_level_repo(tmp_path: Path):
+    """A repo with a conflicted arginfo-carrying header, stages populated
+    (current/replayed) so _true_stage_sides resolves."""
+    import subprocess
+    repo = tmp_path / "gen"
+    repo.mkdir()
+    def git(*a):
+        return subprocess.run(["git", "-C", str(repo)] + list(a),
+                              capture_output=True, text=True)
+    block = ("ZEND_BEGIN_ARG_INFO_EX(arginfo_x, 0, 0, 1)\n"
+             "ZEND_ARG_INFO(0, a)\n"
+             "ZEND_END_ARG_INFO()\n")
+    git("init", "-q", "-b", "main")
+    (repo / "gen.h").write_text("/* base */\n" + block)
+    git("add", "-A"); git("commit", "-q", "-m", "base")
+    git("checkout", "-q", "-b", "current")
+    (repo / "gen.h").write_text("/* newer regen */\n" + block
+                                + "ZEND_ARG_INFO(0, extra)\n")
+    git("add", "-A"); git("commit", "-q", "-m", "current")
+    git("checkout", "-q", "main"); git("checkout", "-q", "-b", "replayed")
+    (repo / "gen.h").write_text("/* older regen */\n" + block)
+    git("add", "-A"); git("commit", "-q", "-m", "replayed")
+    git("checkout", "-q", "replayed")
+    git("merge", "--no-ff", "-m", "merge", "current")
+    return repo
+
+
+def test_file_level_arm_takes_churn_winner_side_file(tmp_path: Path):
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator
+    from capybase.resolution_engine import ResolutionEngine
+    repo = _file_level_repo(tmp_path)
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.tests.required = False
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=ResolutionEngine(cfg.model),
+        out=lambda *_a, **_k: None,
+    )
+    orch._step_seeded_files = set()
+    # stub the gather to a marker-bearing unit list for the generated file
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+    unit = ConflictUnit(
+        session_id="s", step_index=0, path="gen.h", language="c",
+        unit_id="gen.h:0", base=ConflictSide(label="BASE", text="x"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="y"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="z"),
+        original_worktree_text="y\nz\n", marker_span=(0, 1),
+    )
+    class _R:
+        escalated = False
+        units_by_path = {"gen.h": [unit]}
+        skipped = []
+        outcomes = []
+        step_index = 0
+
+    import unittest.mock as mock
+    # the file-level arm reads the pristine stage sides; stub them (the
+    # test repo's merge is committed, so ls-files -u would be empty)
+    _blk = ("ZEND_BEGIN_ARG_INFO_EX(arginfo_x, 0, 0, 1)\n"
+            "ZEND_ARG_INFO(0, a)\n"
+            "ZEND_END_ARG_INFO()\n")
+    sides = ({"current": "/* newer regen */\n" + _blk + "ZEND_ARG_INFO(0, extra)\n",
+              "replayed": "/* older regen */\n" + _blk},
+             "/* base */\n" + _blk)
+    mock.patch.object(
+        __import__("capybase.orchestrator", fromlist=["_true_stage_sides"]),
+        "_true_stage_sides", return_value=sides).start()
+    monkey_res = _R()
+    monkeypatch = orch.__dict__
+    import unittest.mock as mock
+    with mock.patch.object(orch, "_gather_step", return_value=monkey_res):
+        orch._resolve_step()
+    accepted = [e for e in orch.journal.read_events()
+                if e.event_type == "generated_file_take"]
+    assert accepted, "the file-level arm must journal its take"
+    assert accepted[-1].payload["side"] == "current"
+    text = (repo / "gen.h").read_text()
+    assert "newer regen" in text, "the churn-winner side file must be taken"
+    assert "<<<<<<<" not in text
