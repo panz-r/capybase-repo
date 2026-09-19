@@ -184,3 +184,26 @@ def inject_declaration(
     indent = usage[: len(usage) - len(usage.lstrip())]  # verbatim whitespace
     lines.insert(target, indent + decl_line.lstrip())
     return "\n".join(lines) + ("\n" if buffer.endswith("\n") else "")
+
+
+def undeclared_progress(history: list[int]) -> bool:
+    """S28-116: is the repair sequence STRICTLY reducing undeclared
+    identifiers?
+
+    The transitive local-reconstruction lever's stop condition (the
+    S28-74 lesson made checkable): extra repair rounds are granted only
+    while each round's net undeclared-identifier count is strictly
+    lower than the previous round's. A sequence that stalls or
+    whack-a-moles (introduces new undeclared names while closing old
+    ones) ends the allowance immediately — that shape demonstrably
+    diverges (S28-74's live evidence: 4-8x wall time, zero
+    conversions).
+
+    ``history`` is the per-round count sequence, oldest first. Requires
+    at least two points and the LAST point must be an improvement over
+    the FIRST — a flat or growing tail refuses.
+    """
+    if len(history) < 2:
+        return False
+    return history[-1] < history[0] and all(
+        b < a for a, b in zip(history, history[1:]))

@@ -1669,6 +1669,7 @@ def _try_signature_injection(
     """
     from capybase.signature_repair import (
         extract_signature_gaps, find_declaration_lines, inject_declaration,
+        undeclared_progress,
     )
     gaps = extract_signature_gaps([f.message for f in hard_failures])
     out = buffer
@@ -11282,7 +11283,47 @@ class Orchestrator:
                             break  # time budget exhausted
                         if _phase2_model_used:
                             break  # only 1 model re-resolve allowed in tiered mode
-                    if wf_retries >= wf_budget:
+                    # S28-116: the transitive local-reconstruction
+                    # allowance (S28-115's lever). Beyond wf_budget, grant
+                    # up to 4 more rounds ONLY while the net
+                    # undeclared-identifier count is STRICTLY decreasing
+                    # round over round — the S28-74 whack-a-mole shape
+                    # (new undeclared names appearing while old ones
+                    # close) ends the allowance immediately. Scoped to the
+                    # signature-gap shape: other failure shapes keep the
+                    # exact budget contract.
+                    _und_ct = sum(
+                        1 for f in file_validation.hard_failures
+                        if "was not declared" in f.message
+                        or "has no member" in f.message
+                    )
+                    if not hasattr(self, "_wf_und_history"):
+                        self._wf_und_history: list[int] = []
+                    self._wf_und_history.append(_und_ct)
+                    from capybase.signature_repair import (
+                        undeclared_progress as _und_prog,
+                    )
+                    _hist = self._wf_und_history
+                    _allowance_live = (
+                        len(_hist) >= 2 and _und_prog(_hist[-4:]))
+                    if wf_retries < wf_budget:
+                        pass  # normal budget rounds
+                    elif _allowance_live and wf_retries < wf_budget + 4:
+                        self.journal.emit(
+                            "whole_file_repair_progressing",
+                            {"round": wf_retries, "undeclared": _und_ct,
+                             "history": _hist[-6:]},
+                            step_index=self.step, path=path,
+                        )
+                    else:
+                        if (len(_hist) >= 3 and not _und_prog(_hist[-3:])
+                                and any(_h > 0 for _h in _hist[-3:])):
+                            self.journal.emit(
+                                "whole_file_repair_no_progress",
+                                {"metric": "undeclared_identifiers",
+                                 "history": _hist[-6:]},
+                                step_index=self.step, path=path,
+                            )
                         # The COUNT budget applies in BOTH modes. Tiered mode
                         # previously bypassed it (only time/model breaks):
                         # sqlite-0040's d40d105a flight ran 1,221 deterministic

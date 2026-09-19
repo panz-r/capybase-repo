@@ -187,3 +187,16 @@ def test_file_level_arm_takes_churn_winner_side_file(tmp_path: Path):
     text = (repo / "gen.h").read_text()
     assert "newer regen" in text, "the churn-winner side file must be taken"
     assert "<<<<<<<" not in text
+
+
+def test_undeclared_progress_predicate():
+    """S28-116: the transitive lever's stop condition — extra rounds are
+    granted only while the net undeclared-identifier count strictly
+    decreases; a flat or whack-a-mole tail refuses."""
+    from capybase.signature_repair import undeclared_progress
+    assert undeclared_progress([3, 2, 1]) is True   # strictly improving
+    assert undeclared_progress([4, 2, 1]) is True
+    assert undeclared_progress([2, 2]) is False     # stall
+    assert undeclared_progress([2, 3]) is False     # whack-a-mole
+    assert undeclared_progress([1]) is False        # too short to judge
+    assert undeclared_progress([]) is False
