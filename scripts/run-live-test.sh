@@ -151,6 +151,8 @@ K_ESC="$(toml_str "$CB_API_KEY")"
 P_ESC="$(toml_str "$CB_PROFILE_PATH")"
 
 cat > "$CFG_FILE" <<EOF
+schema_version = 2
+
 [model]
 base_url = "$U_ESC"
 api_key = "$K_ESC"
@@ -171,12 +173,14 @@ model_profile_path = "$P_ESC"
 max_retries_per_unit = $CB_MAX_RETRIES
 context_lines = $CB_CONTEXT_LINES
 
-[structural]
-enabled = $CB_STRUCTURAL_ENABLED
-languages = ["python", "rust"]
+[features]
+structural_context = $CB_STRUCTURAL_ENABLED
 
-[future]
+[model]
 enable_self_consistency = $CB_ENABLE_SELF_CONSISTENCY
+
+[structural]
+languages = ["python", "rust"]
 
 [tests]
 pre_continue = "true"

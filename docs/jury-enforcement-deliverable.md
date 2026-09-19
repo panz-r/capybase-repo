@@ -82,7 +82,7 @@ Run it yourself:
 ### Modified components
 | Component | File | Change |
 |---|---|---|
-| **Config / modes** | `src/capybase/config.py` | `jury_mode: Literal["off","shadow","enforce"]`, `enable_jury_code_reopen`, `jury_comment_cegis_budget`, `jury_eligible_datasets`, version stamps; `effective_jury_mode()` (back-compat: `enable_shadow_jury=true` → shadow). |
+| **Config / modes** | `src/capybase/config.py` | `jury_mode: Literal["off","shadow","enforce"]`, `enable_jury_code_reopen`, `jury_comment_cegis_budget`, `jury_eligible_languages`, version stamps; `effective_jury_mode()` (back-compat: `enable_shadow_jury=true` → shadow). |
 | **Orchestrator** | `src/capybase/orchestrator.py` | `_run_jury` generalizes `_run_shadow_jury` to all modes; `_apply_jury_enforcement` converts the 4 typed routes to side effects; `_jury_driven_comment_reloop` (bounded counterexample re-loop); `_write_jury_review_bundle`; `jury_enforce_decision` artifact + event. Jury runs AFTER deterministic gates + comment reconciliation + fingerprint check. |
 | **Flight recorder** | `src/capybase/journal.py` (via orchestrator) | Full `decision_record` persisted as `jury_enforce_decision` artifact (reconstructable without the model); `jury_shadow_completed` carries `mode`. |
 | **Live harness** | `scripts/live_eval_realworld.py` | `CAPYBASE_JURY_MODE={off,shadow,enforce}`; `CAPYBASE_SHADOW_JURY=1` back-compat → shadow; `CAPYBASE_JURY_CODE_REOPEN`. |
@@ -223,7 +223,7 @@ knobs in `[future]`; the full spec in `[jury]`. Highlights:
 jury_mode = "off"                    # off (default) | shadow | enforce
 enable_jury_code_reopen = false      # autonomous code_reopen SEPARATELY gated
 jury_comment_cegis_budget = 2        # bounded jury-driven comment re-loop
-jury_eligible_datasets = []          # Python canary populates this
+jury_eligible_languages = ["python"]  # (was the ghost key jury_eligible_datasets)
 jury_config_version = "jury-cfg-v1"  # bump to invalidate replay cache
 jury_prompt_version = "jury-prompt-v1"
 
@@ -262,7 +262,7 @@ alert_only_conditions = ["increased latency", "moderate increase in human-review
 ```
 
 To enable the canary: set `[future] jury_mode = "enforce"` and populate
-`jury_eligible_datasets`. **Kill switch:** set `jury_mode = "shadow"` (one
+`jury_eligible_languages`. **Kill switch:** set `jury_mode = "shadow"` (one
 action, no code change, no merge effect).
 
 ---

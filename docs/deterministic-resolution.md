@@ -27,8 +27,8 @@ ordering is cheapest-first (least computation, highest confidence):
 |---|-------|--------|------------|------|
 | 0 | Step-shape / edit-pattern reuse | orchestrator (memory caches) | `deterministic_structural` | always on; replays a sibling unit's accepted resolution when the conflict shape matches |
 | 1 | Exact-history reuse | `exact_reuse.py` | `exact_history_reuse` | always on |
-| 2 | Structural resolver | `structural_resolver.py` | `deterministic_structural` | `enable_structural_resolver` (default on) |
-| 3 | Combination search (SBCR) | `sbcr.py` | `combination_search` | `enable_combination_search` (default on) |
+| 2 | Structural resolver | `structural_resolver.py` | `deterministic_structural` | `features.structural_resolution` (default on) |
+| 3 | Combination search (SBCR) | `sbcr.py` | `combination_search` | `features.combination_search` (default on) |
 | 4 | Test-gated side picker | orchestrator | `test_gated_side` | `tests.required` + a specific test command |
 | 5 | Block capture | resolution_engine | `block_capture` | `enable_block_capture` (default on); modify/delete only |
 | 6 | Source-derived candidate portfolio | orchestrator | `deterministic_source_*` (current-only, replayed-only, both orders, shared+distinct) | `enable_source_portfolio` (default on) |

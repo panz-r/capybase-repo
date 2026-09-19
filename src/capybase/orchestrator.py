@@ -19966,6 +19966,7 @@ def _toml_dump_config(config: Config) -> str:
             lines.append(f"{k} = {_toml_value(v)}")
         lines.append("")
 
+    emit_section("features", config.features.model_dump())
     emit_section("model", config.model.model_dump())
     emit_section("policy", config.policy.model_dump())
     emit_section("tests", config.tests.model_dump())
