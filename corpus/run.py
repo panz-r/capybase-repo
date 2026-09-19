@@ -26,10 +26,12 @@ from corpus.realworld_loader import load_realworld_cases  # noqa: E402
 
 def _run_check(fn, case, *args) -> tuple[str, str]:
     """-> ("pass"|"skip"|"fail", message)."""
-    from corpus.checks import SKIP
+    from corpus.checks import _Skip
     try:
         r = fn(case, *args)
-        return ("skip", "") if r is SKIP else ("pass", "")
+        if isinstance(r, _Skip):
+            return ("skip", r.reason)
+        return ("pass", "")
     except AssertionError as exc:
         return "fail", str(exc)[:200]
     except Exception:  # noqa: BLE001 — corpus checks report, never crash the loop
@@ -49,7 +51,7 @@ def _run_build_pool(items, max_workers: int = 2):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from corpus.checks import SKIP
+    from corpus.checks import _Skip
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(fn, case, Path("/tmp")): name
@@ -58,8 +60,10 @@ def _run_build_pool(items, max_workers: int = 2):
             name = futures[fut]
             try:
                 r = fut.result()
-                results.append((name, ("skip", "") if r is SKIP
-                                else ("pass", "")))
+                if isinstance(r, _Skip):
+                    results.append((name, ("skip", r.reason)))
+                else:
+                    results.append((name, ("pass", "")))
             except AssertionError as exc:
                 results.append((name, ("fail", str(exc)[:200])))
             except Exception:  # noqa: BLE001
@@ -92,12 +96,17 @@ def main() -> int:
     # scenario_checks_for yields.
     build_names = {"build_verdict", "cargo_verdict", "tip_build", "tip_cargo"}
     build_items: list[tuple[str, object, object]] = []
+    # S28-94: skips carry reasons — the census prints at the end so false
+    # skips (the axum toolchain class) are auditable instead of invisible.
+    from collections import Counter as _Counter
+    skip_reasons: "_Counter[str]" = _Counter()
 
     def record(status_msg: tuple[str, str], name: str):
         nonlocal ran, skipped
         status, msg = status_msg
         if status == "skip":
             skipped += 1
+            skip_reasons[msg or "unspecified"] += 1
             return
         ran += 1
         if status == "fail":
@@ -154,6 +163,10 @@ def main() -> int:
 
     print(f"\ncorpus: {ran} checks ran, {skipped} skipped, "
           f"{len(failures)} failures")
+    if skip_reasons:
+        print("skip census (reason -> count):")
+        for reason, n in skip_reasons.most_common():
+            print(f"  {n:5d}  {reason}")
     for name, msg in failures[:20]:
         print(f"  FAIL {name}: {msg}")
     if len(failures) > 20:
