@@ -5330,7 +5330,6 @@ class Orchestrator:
         )
         self.policy = Policy(
             self.git,
-            supported_conflict_types=set(config.policy.supported_conflict_types),
             supported_file_kinds=set(config.policy.supported_file_kinds),
         )
         self.tests = TestRunner(self.git, timeout_seconds=config.tests.timeout_seconds)

@@ -30,7 +30,14 @@ def test_journal_artifacts(tmp_path):
 def test_config_load_defaults():
     cfg = Config()
     assert cfg.model.model == "vibethink"
-    assert cfg.policy.supported_conflict_types == ["UU", "AA", "AU", "UA"]
+    # supported_conflict_types is NOT a config key: the mode set is fixed in
+    # capybase.policy.SUPPORTED_CONFLICT_MODES (the key was removed after the
+    # s27-68/71 stale-pin regression, where a shipped toml silently disabled
+    # add/add and modify/delete for config-file loads).
+    assert not hasattr(cfg.policy, "supported_conflict_types")
+    from capybase.policy import SUPPORTED_CONFLICT_MODES
+
+    assert SUPPORTED_CONFLICT_MODES == frozenset({"UU", "AA", "AU", "UA"})
     assert cfg.tests.pre_continue == "pytest"
     assert cfg.journal.enabled is True
 
@@ -45,6 +52,19 @@ def test_config_load_from_file(tmp_path):
     assert cfg.model.samples == 3
     assert cfg.policy.max_retries_per_unit == 5
     assert cfg.source_path == str(toml)
+
+
+def test_config_tolerates_pre_removal_supported_conflict_types(tmp_path):
+    """Configs written before the key's removal must still load: the stale
+    key is silently dropped (not honored, not an error) — an error here
+    would break every existing checkout's capybase.toml on upgrade."""
+    toml = tmp_path / "capybase.toml"
+    toml.write_text(
+        '[policy]\nsupported_conflict_types = ["UU"]\nmax_retries_per_unit = 7\n'
+    )
+    cfg = Config.load(toml)
+    assert cfg.policy.max_retries_per_unit == 7
+    assert not hasattr(cfg.policy, "supported_conflict_types")
 
 
 def test_journal_events_are_json_serializable(tmp_path):
@@ -129,15 +149,20 @@ def test_session_paths_has_comment_artifacts(tmp_path):
     assert p.comment_artifacts.exists()
 
 
-def test_shipped_toml_matches_default_supported_modes():
-    """s27-73: B1's defect was the SHIPPED capybase.toml pinning an older
-    supported set — bare Config() (the existing default pin) never loads
-    it, so the regression passed the whole suite. Read the file itself."""
+def test_shipped_toml_has_no_supported_conflict_types_key():
+    """s27-73 flipped by the key's removal: the defect class was the SHIPPED
+    capybase.toml pinning a stale narrower supported set, silently disabling
+    modes for config-file loads (eval harnesses bypass the file, CLI runs do
+    not — s27-68/71). The key no longer exists in the format at all; this
+    test locks its absence so neither the template nor a doc example can
+    resurrect it."""
     import tomllib
     from pathlib import Path
     toml = Path(__file__).resolve().parent.parent / "capybase.toml"
     data = tomllib.loads(toml.read_text())
-    modes = set(data["policy"]["supported_conflict_types"])
-    assert {"UU", "AA", "AU", "UA"} <= modes, (
-        "shipped capybase.toml drops a supported mode — CLI config loads "
-        "would silently skip those conflicts (the s27-68/71 regression)")
+    assert "supported_conflict_types" not in data.get("policy", {}), (
+        "supported_conflict_types returned to capybase.toml — the mode set is "
+        "fixed in capybase.policy.SUPPORTED_CONFLICT_MODES; a config pin here "
+        "silently disables modes for config-file loads (s27-68/71)")
+    # And the shipped template keeps the fixed set documented at its new home.
+    assert "SUPPORTED_CONFLICT_MODES" in toml.read_text() or "policy.py" in toml.read_text()

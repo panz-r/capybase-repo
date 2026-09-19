@@ -152,7 +152,6 @@ def test_add_add_conflict_supported_by_default_policy(repo):
     cfg = Config()
     policy = Policy(
         backend,
-        supported_conflict_types=set(cfg.policy.supported_conflict_types),
         supported_file_kinds=set(cfg.policy.supported_file_kinds),
     )
     decision = policy.classify(unmerged)

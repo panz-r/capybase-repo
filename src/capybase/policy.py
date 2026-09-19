@@ -12,6 +12,20 @@ from dataclasses import dataclass, field
 from capybase.conflict_extractor import SkippedPath, looks_like_text
 from capybase.git_backend import GitBackend, UnmergedPath
 
+# The git unmerged modes capybase attempts — a fixed property of the
+# resolver, NOT a config knob. All four ride: UU is the marker path; AA
+# (add/add) rides the marker path with an empty base (s27-48's doctrine;
+# the extractor degrades the missing stage-1 read) — omitting it
+# re-creates the s27-67b regression where _synthesize_mode relabeled
+# {2,3}-without-base from "UU" to "AA" and a mode gate dropped every
+# genuine add/add the extractor was built to resolve (clap-0011 escalated
+# at step 1 in 36s on .gitignore+README.md). AU/UA are the whole-file
+# modify/delete shapes. The config key was removed for exactly the
+# s27-68/71 reason: a stale narrower pin in a loaded capybase.toml
+# silently disabled capabilities for CLI runs while eval harnesses
+# (which bypass the file) kept passing.
+SUPPORTED_CONFLICT_MODES = frozenset({"UU", "AA", "AU", "UA"})
+
 
 @dataclass
 class PolicyDecision:
@@ -24,17 +38,15 @@ class Policy:
         self,
         git: GitBackend,
         *,
-        supported_conflict_types: set[str],
         supported_file_kinds: set[str],
     ) -> None:
         self.git = git
-        self.supported_conflict_types = supported_conflict_types
         self.supported_file_kinds = supported_file_kinds
 
     def classify(self, unmerged: list[UnmergedPath]) -> PolicyDecision:
         decision = PolicyDecision()
         for entry in unmerged:
-            if entry.mode not in self.supported_conflict_types:
+            if entry.mode not in SUPPORTED_CONFLICT_MODES:
                 decision.skipped.append(
                     SkippedPath(entry.path, f"unsupported conflict mode {entry.mode}")
                 )

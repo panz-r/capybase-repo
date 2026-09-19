@@ -270,13 +270,12 @@ def test_extractor_builds_whole_file_unit_for_ua(repo: Path):
 
 
 def test_policy_supports_au_ua_modes():
-    """The default supported-conflict-types must include AU/UA so modify/delete
-    paths are no longer skipped as 'unsupported conflict mode'."""
-    from capybase.config import Config
+    """The fixed supported-mode set must include AU/UA so modify/delete
+    paths are not skipped as 'unsupported conflict mode'."""
+    from capybase.policy import SUPPORTED_CONFLICT_MODES
 
-    cfg = Config()
-    assert "AU" in cfg.policy.supported_conflict_types
-    assert "UA" in cfg.policy.supported_conflict_types
+    assert "AU" in SUPPORTED_CONFLICT_MODES
+    assert "UA" in SUPPORTED_CONFLICT_MODES
 
 
 def _sc_unit(cur: str, rep: str) -> "ConflictUnit":

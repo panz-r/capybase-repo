@@ -100,13 +100,11 @@ completion_reserve = 1024
 # All mechanisms default off (samples = 1) until calibration turns one on.
 
 [policy]
-# Which conflict types (git unmerged modes) capybase will attempt.
-# AA (add/add) rides the marker path with an empty base; AU/UA are the
-# whole-file modify/delete shapes. Must stay in sync with the
-# PolicyConfig default (s27-68/71: a stale ["UU"] pin here silently
-# disabled every add/add and modify/delete resolution for config-file
-# loads — the eval harnesses bypass this file, CLI runs do not).
-supported_conflict_types = ["UU", "AA", "AU", "UA"]
+# Conflict modes (UU/AA/AU/UA) are deliberately NOT a config key: the set is
+# fixed in code (capybase/policy.py SUPPORTED_CONFLICT_MODES) after a stale
+# narrower pin here silently disabled add/add and modify/delete for
+# config-file loads (s27-68/71). Only file kinds, retries, and gate switches
+# are tunable below.
 # Which file kinds are eligible for auto-resolution.
 supported_file_kinds = ["text"]
 max_retries_per_unit = 2

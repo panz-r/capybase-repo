@@ -185,15 +185,11 @@ class ModelConfig(BaseModel):
 
 
 class PolicyConfig(BaseModel):
-    # AA (add/add) rides the marker path with an empty base (s27-48's
-    # doctrine; the extractor degrades the missing stage-1 read). Omitting
-    # it re-creates the s27-67b regression: _synthesize_mode relabeled
-    # {2,3}-without-base from "UU" to "AA", so the policy gate dropped
-    # every genuine add/add the extractor was built to resolve (clap-0011
-    # escalated at step 1 in 36s on .gitignore+README.md).
-    supported_conflict_types: list[str] = Field(
-        default_factory=lambda: ["UU", "AA", "AU", "UA"]
-    )
+    # NOTE: conflict modes (UU/AA/AU/UA) are NOT configurable — the set is
+    # fixed in capybase.policy.SUPPORTED_CONFLICT_MODES. A config pin here
+    # once silently disabled add/add and modify/delete for config-file loads
+    # (the s27-68/71 stale-["UU"] regression), which is why the key was
+    # removed from the format.
     supported_file_kinds: list[str] = Field(default_factory=lambda: ["text"])
     max_retries_per_unit: int = 2
     # CEGIS convergence threshold: if the model produces a candidate whose
