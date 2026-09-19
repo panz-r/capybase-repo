@@ -39,6 +39,20 @@ def test_license_files_declared_and_present():
         assert (_REPO / name).is_file(), f"declared license file {name} missing"
 
 
+def test_no_license_classifiers_alongside_spdx_expression():
+    """The SPDX expression is the classifier's PEP-639 replacement, and the
+    two cannot coexist: setuptools >=77 fails metadata generation with
+    "License classifiers have been superseded by license expressions".
+    Signaling lives in the emitted License-Expression/License-File headers
+    (asserted against real artifacts in test_packaging_build.py)."""
+    proj = _pyproject()["project"]
+    bad = [c for c in proj.get("classifiers", [])
+           if c.startswith("License ::")]
+    assert not bad, (
+        f"remove PEP-639-superseded license classifiers {bad}: they hard-fail "
+        "the build next to the SPDX license expression")
+
+
 def test_dev_extra_supports_documented_test_command():
     """README documents `pytest tests/ -n 6` — the dev extra must install
     pytest-xdist (a fresh contributor following the docs gets the documented

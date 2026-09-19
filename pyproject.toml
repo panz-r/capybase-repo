@@ -8,6 +8,11 @@ version = "0.1.0"
 description = "A rebase-conflict resolution agent with research-grade seams."
 readme = "README.md"
 requires-python = ">=3.11"
+# The SPDX expression is the single license source of truth (PEP 639): it
+# lands in METADATA as `License-Expression: Apache-2.0` with `License-File`
+# entries — what PyPI and license scanners read. Do NOT add `License ::`
+# classifiers alongside it: setuptools >=77 hard-fails metadata generation
+# for that combination (tests/test_packaging_metadata.py guards this).
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "panz-r" }]
@@ -35,6 +40,9 @@ dev = [
     "hypothesis",
     "ruff",
     "pyright",
+    # tests/test_packaging_build.py builds the wheel+sdist and verifies
+    # their contents.
+    "build>=1.2",
     # The embedding backends ride in dev so the suite exercises the real
     # vector paths (the same content as the embeddings extra).
     "numpy>=1.26",
