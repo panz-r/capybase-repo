@@ -469,6 +469,4 @@ class LspConfig:
     rust_analyzer_path: str = "rust-analyzer"
     cargo_path: str = "cargo"
     enable_lsp_diagnostics: bool = False
-    # Reject only NEW diagnostics (not present in the pre-conflict baseline).
-    lsp_baseline_strict: bool = True
     enable_shadow_tests: bool = False

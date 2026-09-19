@@ -3,14 +3,18 @@
 # This file is a TEMPLATE / reference. The canonical place for it is the shared
 # config dir, so a user repo need NOT carry any capybase config:
 #
-#   ~/.config/capybase/capybase.toml      (or $XDG_CONFIG_HOME/capybase/)
-#   ~/.config/capybase/model_profile.json (written by `capybase calibrate`)
-#   ~/.config/capybase/calibration.json   (written by scripts/fit_calibration.py)
+#   ~/.config/capybase/capybase.toml       (or $XDG_CONFIG_HOME/capybase/)
+#   ~/.config/capybase/model_profile.json  (OUTPUT of `capybase calibrate`)
+#   ~/.config/capybase/calibration.json    (written by scripts/fit_calibration.py)
+#   ~/.config/capybase/providers/<name>.json (the canonical model-endpoint +
+#       profile source for live runs; see `capybase provider list`)
 #
 # capybase reads config + calibration from that dir by default; override with
 # `capybase --config <dir> ...`. A repo-local ./capybase.toml still takes
-# precedence (per-repo overrides), but the calibration/profile always default to
-# the config dir. Packaging metadata lives in pyproject.toml; this is runtime.
+# precedence (per-repo overrides). Paths under .rebase-agent/ in the defaults
+# below are PER-REPO RUNTIME ARTIFACTS (sessions, the RAG experience store) —
+# they are intentionally repo-local, unlike the shared config dir.
+# Packaging metadata lives in pyproject.toml; this is runtime.
 
 [model]
 # OpenAI-compatible local endpoint (e.g. llama-server). NO endpoint is baked
@@ -19,7 +23,6 @@
 # capybase.local.toml, or a provider config (~/.config/capybase/providers/
 # <name>.json — the canonical mechanism the live-eval scripts use; see
 # `capybase provider list` and src/capybase/provider_config.py).
-provider = "openai_compatible"
 # base_url = "http://your-llama-server:port/v1"
 # api_key = "sk-local"
 # The model id the server reports in /v1/models. capybase sends this
@@ -40,9 +43,8 @@ samples = 1
 # large enclosing nodes where a small model struggles. 0 = disabled (complex
 # units use `samples`); only consulted on fresh resolves, not CEGIS retries.
 samples_complex = 0
-# Self-consistency: ON by default (paired with samples=3) so best-of-N +
-# majority-vote engages. Below this agreement fraction the merge is flagged
-# low-confidence. Set enable_self_consistency=false to disable voting.
+# Agreement fraction below which a best-of-N merge is flagged low-confidence
+# (only consulted when enable_self_consistency is on — it is OFF by default).
 consensus_min_agreement = 0.4
 # Two-pass prompting: extract intents first, then generate code conditioned on
 # them. Only activates when samples > 1.
@@ -89,15 +91,15 @@ completion_reserve = 1024
 
 # --- Model calibration -----------------------------------------------------
 # Run `capybase calibrate` once per model. It probes the endpoint and writes a
-# tuned profile to [calibration] model_profile_path (default
-# .rebase-agent/memory/model_profile.json) overriding the knobs above — AND the
-# resolution mechanisms below (two_pass, plan_search, prompt_variants,
-# diverse_sampling, enable_self_consistency, samples) — when the model name
-# matches. The mechanism choices are picked empirically by resolving a small
-# corpus of known-correct merges under each strategy on vs off. `capybase
-# calibrate` redoes it (slow: runs the corpus many times); `--dry-run` is a
-# fast capabilities-only check. Delete the file to revert to the values here.
-# All mechanisms default off (samples = 1) until calibration turns one on.
+# tuned JSON profile (default output: .rebase-agent/memory/model_profile.json,
+# or pass --profile) overriding the knobs above — AND the generation-mechanism
+# choices (two_pass, plan_search, prompt_variants, diverse_sampling,
+# enable_self_consistency, samples) — when the model name matches. Profiles
+# are applied through PROVIDER CONFIGS at run time (never loaded from any
+# ambient path); `capybase calibrate` redoes the measurement (slow: runs the
+# corpus many times); `--dry-run` is a fast capabilities-only check. Delete
+# the profile to revert to the values here. All mechanisms default off
+# (samples = 1) until calibration turns one on.
 
 [policy]
 # Conflict modes (UU/AA/AU/UA) are deliberately NOT a config key: the set is
@@ -124,7 +126,6 @@ critic_confidence_escalate_threshold = 0.8
 # escalates once exceeded instead of looping — bounds total latency. 0 =
 # disabled (retry-count budgets alone govern). Sits ABOVE the per-retry budgets.
 max_wall_time_per_unit_seconds = 0.0
-allow_delete_conflicted_file = false
 stage_only_validated_paths = true
 # Number of context lines on each side of a conflict marker block.
 context_lines = 15
@@ -171,7 +172,6 @@ enable_lsp_diagnostics = false
 pyright_path = "pyright"
 rust_analyzer_path = "rust-analyzer"
 cargo_path = "cargo"
-lsp_baseline_strict = true
 # Shadow tests (Phase B): run tests/test_<module>.py for a modified module
 # before declaring success (warning severity, best-effort).
 enable_shadow_tests = false
@@ -295,13 +295,10 @@ min_examples_for_retrieval = 3
 [calibration]
 enabled = false
 model_path = ".rebase-agent/memory/calibration.json"
-# Model capability profile written by `capybase calibrate`.
-# When its model name matches [model] model, its tuned knobs override the [model]
-# settings at runtime ("Profile wins"). Absent/mismatched/corrupt = no-op.
-# The default path (".rebase-agent/memory/model_profile.json") is a sentinel:
-# at load time it is relocated to the shared config dir (~/.config/capybase/) so
-# the profile is available across all repos — the model does not vary by
-# directory. Set an absolute or different relative path here to override.
+# OUTPUT path of `capybase calibrate` (what the CLI writes when no --profile
+# path is given). This is NOT an ambient load path: profiles are applied only
+# through provider configs at run time ("Profile wins" when the provider's
+# profile model name matches [model] model; absent/mismatched = no-op).
 model_profile_path = ".rebase-agent/memory/model_profile.json"
 escalate_threshold = 0.7
 # Consensus entropy above this → escalate (high-entropy splits mean no candidate
@@ -312,9 +309,6 @@ entropy_escalate_threshold = 0.8
 # (survey §4.2). All opt-in; defaults keep behavior unchanged.
 [routing]
 enabled = false
-complex_if_sibling_count_gt = 0   # >0 sibling hunks → "complex" (full pipeline)
-max_simple_node_lines = 40        # enclosing AST node larger → complex
-max_simple_side_chars = 1200      # combined side text longer → complex
 # SBCR wins on balanced conflicts, loses to the LLM on imbalanced ones (§4.2).
 # balance = min/max of the two sides' non-blank line counts (1.0=equal). Below
 # this threshold an SBCR result is NOT short-circuited — the LLM runs instead.
@@ -326,8 +320,6 @@ min_balance_for_sbcr_accept = 0.15
 [future]
 enable_self_consistency = false   # opt-in: raise [model] samples + set true for majority voting
 enable_rag = false                # set true + [memory] enabled = true for RAG few-shot
-enable_verifier_model = true      # now wired + default-on in [validation] (opt-out)
-enable_mutation_testing = false
 # Deterministic structural pre-resolution (survey §6.4 layer 1): BEFORE the LLM,
 # attempt a model-free resolution (identical sides / one-sided change / disjoint
 # line edits). Safe-by-construction + validated — a guess that fails validation
@@ -360,7 +352,9 @@ enable_import_union = true
 # off (default) | shadow | enforce. In 'enforce' the jury acts on the four
 # typed routes AFTER all deterministic gates + comment reconciliation + the
 # executable-fingerprint check. The jury may NEVER override a deterministic
-# failure. See the [jury] section below for the full canary envelope.
+# failure. The full canary envelope (scope, required gates, failure routes,
+# loop budgets, invariants, kill switch, stop conditions) is documented in
+# docs/jury-canary-envelope.md.
 #   KILL SWITCH: set jury_mode = "shadow" to return a live canary to no-merge-
 #   effect observation (one action, no code change).
 jury_mode = "off"
@@ -372,98 +366,12 @@ enable_jury_code_reopen = false
 # jury comment_counterexample, the comment pass re-runs from the SAME frozen
 # code + ledger with the counterexample as a seed failure. 0 disables (→ human).
 jury_comment_cegis_budget = 2
-# Eligibility allowlist (the Python canary envelope — the datasets represented
-# in the shadow corpus). Empty = inert; the canary populates this list.
-jury_eligible_datasets = []
+# Eligibility allowlist (the Python canary envelope — the languages represented
+# in the shadow corpus). Empty = inert.
+jury_eligible_languages = ["python"]
 # Replay + version-mismatch stamps (bump to invalidate the replay cache).
 jury_config_version = "jury-cfg-v1"
 jury_prompt_version = "jury-prompt-v1"
-
-
-# ---------------------------------------------------------------------------
-# [jury] — the Python enforcement canary configuration.
-#
-# This section is the machine-readable canary spec. It documents the exact
-# enabled scope, required gates, failure routes, loop budgets, comment
-# invariants, the code-reopen feature state, flight-recorder settings, the
-# kill switch, and the automatic stop conditions. Nothing safety-relevant is
-# implicit. Values here are read as documentation + defaults by tooling; the
-# authoritative runtime knobs are the [future] jury_* fields above.
-# ---------------------------------------------------------------------------
-[jury]
-# Mode + scope. The canary is PYTHON-ONLY, restricted to the eligibility
-# classes represented in the shadow corpus (the datasets below). Other
-# languages / datasets stay in shadow/off regardless of jury_mode.
-canary_mode = "enforce"            # the mode the canary runs in when enabled
-canary_language = "python"
-canary_datasets = [
-    "flask-history",
-    "requests-history",
-    "zenodo-hdiff",
-]
-# Repository allowlist controls. Empty allowlist = apply to every repo in the
-# canary's execution environment; populated = opt-in per repo.
-repository_allowlist = []
-# Required deterministic gates the jury runs ONLY after (the jury may never
-# override any of these). These are always-on; listed for explicitness.
-required_gates = [
-    "py_compile",
-    "ast_preserved",
-    "splice_scope",
-    "whole_file_syntax",
-    "executable_token_equality",
-]
-# Jury requirements (the conditions for a valid enforcement decision).
-jury_requirements = [
-    "both_jurors_produced_verdicts",
-    "evidence_references_resolve",
-    "evidence_packet_complete_and_consistent",
-    "executable_fingerprint_matches_frozen",
-    "context_truncation_accounted_for",
-    "session_candidate_ledger_hashes_bound",
-]
-# The four first-class routes + their failure behavior.
-failure_routes = [
-    "accept",                       # only when no blocking finding + all evidence
-    "comment_counterexample",       # → bounded comment CEGIS re-loop
-    "human_review",                 # → stop + preserve review bundle (safe terminal)
-    "code_reopen",                  # → gated (see code_reopen_feature_state)
-]
-# Loop budgets.
-loop_budgets = { comment_cegis = 2, jury_comment_cegis = 2, code_to_comment_repair = 1 }
-# Comment invariants (never relaxed by the jury).
-comment_invariants = [
-    "executable_token_stream_unchanged_after_comment_pass",
-    "unverifiable_inherited_claims_preserved_not_rewritten_or_deleted",
-    "machine_legal_generated_doctest_comments_preserved_verbatim",
-    "jury_never_directly_edits_source_code",
-]
-# Code-reopen feature state. Autonomous code_reopen stays DISABLED for the
-# Python canary (no positive-path evidence in the shadow corpus).
-code_reopen_feature_state = "disabled"
-# When a reopen quorum IS met but the gate is disabled, route to human_review
-# (never accept, never silent suppression).
-disabled_reopen_route = "human_review"
-# Flight-recorder settings — every enforced decision is reconstructable without
-# re-running the model (jury_verdict + jury_enforce_decision artifacts).
-flight_recorder = { enabled = true, persist_decision_records = true, persist_verdicts = true }
-# Kill switch: one action returns the system to shadow (no merge effect).
-kill_switch = { action = "set jury_mode = shadow", merge_effect = "none" }
-# Automatic STOP conditions. Enforce STOPS on any of these (safety); non-safety
-# drift (latency, moderate human-review-rate rise) alerts instead of shutting
-# down. These are encoded for monitoring/operations, not enforced in-process.
-stop_conditions = [
-    "any false or unsupported code reopen",
-    "any accepted candidate with an executable-fingerprint mismatch",
-    "any acceptance caused by missing, malformed, stale, or incomplete evidence",
-    "any confirmed incorrect comment change that the recorded jury evidence should have blocked",
-    "missing decision artifacts for an enforced route",
-    "divergence from golden replay without an approved configuration change",
-]
-alert_only_conditions = [
-    "increased latency",
-    "moderate increase in human-review rate",
-]
 
 
 # ---------------------------------------------------------------------------

@@ -1189,7 +1189,6 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # has ~3-4 non-blank lines: base/current/replayed).
     if _conflict_lines > 120:
         cfg.validation.enable_verifier_model = False
-        cfg.validation.enable_verifier_assertion = False
         cfg.validation.enable_verifier_reflection = False
         cfg.validation.enable_verifier_guardrail = False
     # Recovery retry budget: when the model self-reports needs_human, give it

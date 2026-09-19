@@ -25,7 +25,7 @@
 # Logs:
 #   logs/live-test-<timestamp>/run.log         full capybase stdout+stderr
 #   logs/live-test-<timestamp>/summary.txt     journal flow + candidate states
-#   logs/live-test-<timestamp>/config.toml     the effective config used
+#   logs/live-test-<timestamp>/cfgdir/capybase.toml  the effective config
 #
 set -euo pipefail
 
@@ -125,7 +125,11 @@ LOGDIR="$REPO_ROOT/logs/live-test-$TS"
 mkdir -p "$LOGDIR"
 RUN_LOG="$LOGDIR/run.log"
 SUMMARY="$LOGDIR/summary.txt"
-CFG_FILE="$LOGDIR/config.toml"
+# --config takes a DIRECTORY containing capybase.toml (Config.load refuses a
+# file path — s27-extend-41). The heredoc below writes capybase.toml inside it.
+CFG_DIR="$LOGDIR/cfgdir"
+mkdir -p "$CFG_DIR"
+CFG_FILE="$CFG_DIR/capybase.toml"
 
 echo "==> live test: fixture=$FIXTURE mode=$MODE"
 echo "==> model: $CB_MODEL @ $CB_BASE_URL"
@@ -224,9 +228,9 @@ echo "==> setting up fixture '$FIXTURE' (rebase replayed onto current)..."
 # --------------------------------------------------------------------------
 # Run capybase. All output to both the terminal and run.log.
 # --------------------------------------------------------------------------
-echo "==> running: capybase --config <logdir>/config.toml --repo fixtures $MODE"
+echo "==> running: capybase --config <logdir>/cfgdir --repo fixtures $MODE"
 set +e
-"$CAPYBASE" --config "$CFG_FILE" --repo "$FIXTURES" "$MODE" 2>&1 | tee "$RUN_LOG"
+"$CAPYBASE" --config "$CFG_DIR" --repo "$FIXTURES" "$MODE" 2>&1 | tee "$RUN_LOG"
 RC=${PIPESTATUS[0]}
 set -e
 echo "==> capybase exit code: $RC" | tee -a "$RUN_LOG"

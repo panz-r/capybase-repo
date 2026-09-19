@@ -177,7 +177,6 @@ class ValidationConfig:
     # Clippy lint check (mirrors config.ValidationConfig; the live flags).
     enable_clippy: bool = False
     clippy_severity: str = "warning"
-    lsp_baseline_strict: bool = True
     enable_shadow_tests: bool = False
     # Verifier-model critic (mirrors config.ValidationConfig; the live flags).
     # OPT-OUT: default ON in production; the hermetic test suite opts out via
@@ -186,7 +185,6 @@ class ValidationConfig:
     enable_verifier_model: bool = True
     verifier_severity: str = "warning"
     # Critic guardrail phases (mirror config.ValidationConfig).
-    enable_verifier_assertion: bool = True
     enable_verifier_reflection: bool = True
     enable_verifier_guardrail: bool = True
     verifier_reflection_coverage_floor: float = 0.9

@@ -423,7 +423,6 @@ def _verifier_engine(client, *, severity="warning"):
     # → squash). The guardrail has its own dedicated test module.
     cfg = ValidationConfig(
         enable_verifier_model=True, verifier_severity=severity,
-        enable_verifier_assertion=False,
         enable_verifier_reflection=False,
         enable_verifier_guardrail=False,
     )

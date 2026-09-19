@@ -35,8 +35,10 @@ from capybase import __version__
 from capybase.config import Config, ModelConfig
 from capybase.orchestrator import Orchestrator
 
-# Default profile path sentinel. At load time this is relocated to the shared
-# config dir (~/.config/capybase/) so the profile is available across all repos.
+# Where `capybase calibrate` writes the profile when no explicit --profile
+# path is given. This is an OUTPUT path only — profiles are never loaded from
+# here; provider configs (<config_dir>/providers/<name>.json) are the
+# canonical profile source.
 DEFAULT_PROFILE_PATH = ".rebase-agent/memory/model_profile.json"
 
 

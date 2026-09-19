@@ -518,7 +518,7 @@ in live-eval.
 | **Data** | self-contained fixtures; nothing external fetched | real downloaded repos, processed and extracted (fetch script below) | the same real repos |
 | **Model calls** | never | never (deterministic) | yes — through the provider config + calibration profile |
 | **Entry point** | `pytest tests/ -n 6` | `./corpus/run.sh [python\|rust\|all]` | `scripts/live_eval_realworld.py --provider NAME` |
-| **Wall time** | ~41 s (4,539 tests, 6 workers) | minutes (own runner — never pytest) | hours |
+| **Wall time** | ~42 s (4,561 tests, 6 workers) | minutes (own runner — never pytest) | hours |
 | **Purpose** | the per-change regression gate | validates the verifier + the corpus oracle against real-world conflict shapes | the measured product: full runs, README numbers |
 
 After clone and build (`.venv` created per Setup below):

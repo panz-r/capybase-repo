@@ -16,16 +16,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-# The default artifacts filename each calibration artifact uses in the config
-# dir. Used to rewrite the repo-relative defaults (``.rebase-agent/memory/...``)
-# to config-dir-absolute paths at load time (see ``Config.load``).
-_PROFILE_FILENAME = "model_profile.json"
+# The calibration-artifact default filename in the config dir, and the
+# legacy repo-relative default that Config.load rewrites to it (the ONLY
+# path relocation left: the ambient model profile is gone — provider
+# configs are the canonical profile source).
 _CALIBRATION_FILENAME = "calibration.json"
-# The repo-relative defaults from CalibrationConfig; ``Config.load`` rewrites
-# these (and only these) to live in the config dir so the user repo need not
-# duplicate calibration artifacts. An explicit value in the toml is always
-# respected.
-_REPO_DEFAULT_PROFILE_PATH = ".rebase-agent/memory/model_profile.json"
 _REPO_DEFAULT_CALIBRATION_PATH = ".rebase-agent/memory/calibration.json"
 
 
@@ -57,7 +52,6 @@ def default_data_dir() -> Path:
 
 
 class ModelConfig(BaseModel):
-    provider: Literal["openai_compatible"] = "openai_compatible"
     base_url: str = "http://127.0.0.1:8080/v1"
     api_key: str = "sk-local"
     model: str = "vibethink"
@@ -269,7 +263,6 @@ class PolicyConfig(BaseModel):
     # split. 0 = disabled (use the existing iteration-count-based loop).
     # Design: tiered verification for oversized C files (design v2).
     max_whole_file_repair_seconds: float = 0.0
-    allow_delete_conflicted_file: bool = False
     stage_only_validated_paths: bool = True
     context_lines: int = 15
     # Acceptance strictness (#10): how boldly capybase auto-accepts a merge.
@@ -391,7 +384,6 @@ class ValidationConfig(BaseModel):
     pyright_path: str = "pyright"
     rust_analyzer_path: str = "rust-analyzer"
     cargo_path: str = "cargo"
-    lsp_baseline_strict: bool = True
     # Rust compile floor parity with Python's py_compile). Rust files
     # are compiled with ``rustc --emit=metadata`` in Phase B — the exact analog
     # of ``py_compile``: a dependency-free syntax/parse check that rejects a
@@ -483,10 +475,6 @@ class ValidationConfig(BaseModel):
     # retry/escalate but don't hard-reject a syntactically-valid merge) or
     # "error" (strict — treat a dropped-intent verdict as a hard failure).
     verifier_severity: str = "warning"
-    # Critic guardrail — Phase 1: inject the deterministic preservation math into
-    # the critic's initial prompt as a SYSTEM ASSERTION, so it doesn't hallucinate
-    # drops the AST disproves. Default-on (strictly improves the prompt).
-    enable_verifier_assertion: bool = True
     # Critic guardrail — Phase 2: when the critic still flags a drop, a second
     # "show-your-work" call demanding it quote the exact missing/mangled snippet.
     # The evidence is verified programmatically (substring match); null or
@@ -1183,11 +1171,6 @@ class CalibrationConfig(BaseModel):
     # (0.8) because even a 2-of-3 majority produces non-trivial entropy; we
     # only want to escalate when samples are *maximally* split.
     entropy_escalate_threshold: float = 0.8
-    # Conformal escalation strictness (1-alpha). When a conformal model is
-    # fitted, candidates with a p-value below this are escalated. This is an
-    # empirical guardrail tuned on capybase's own accepted/escalated outcomes
-    # (a correctness proxy), NOT a proven coverage guarantee — see
-    # ConformalRiskModel's caveat. Lower = escalate more.
 
 
 class RoutingConfig(BaseModel):
@@ -1202,12 +1185,6 @@ class RoutingConfig(BaseModel):
     """
 
     enabled: bool = False
-    # A file with more than one conflict hunk → complex.
-    complex_if_sibling_count_gt: int = 0
-    # Enclosing AST node larger than this (lines) → complex.
-    max_simple_node_lines: int = 40
-    # Combined base+current+replayed side text longer than this (chars) → complex.
-    max_simple_side_chars: int = 1200
     # Minimum conflict balance for SBCR to ACCEPT outright. Balance
     # = min/max of the two sides' non-blank line counts (1.0 = equal, →0 =
     # heavily imbalanced). SBCR wins on balanced conflicts and loses to the LLM
@@ -1248,12 +1225,14 @@ class Config(BaseModel):
            ``~/.config/capybase``; override with the CLI ``--config DIR``).
         4. Built-in defaults.
 
-        After loading, the calibration artifacts' paths
-        (``model_profile.json``, ``calibration.json``) are rewritten to live in
-        ``config_dir`` — these are machine/user-specific, shared across repos,
-        so the user repo need not duplicate them. An explicit absolute path set
-        in the toml is always respected (a deliberate override). The RAG
-        experience store stays repo-relative (repo-specific merge patterns).
+        ``calibration.model_path`` pointing at the legacy repo-relative
+        default is rewritten to live in ``config_dir`` (machine/user-specific,
+        shared across repos). An explicit absolute path set in the toml is
+        always respected (a deliberate override). The RAG experience store
+        stays repo-relative (repo-specific merge patterns). Model profiles
+        are NOT loaded from any ambient path — provider configs are the
+        canonical profile source (``calibration.model_profile_path`` is only
+        the output path ``capybase calibrate`` writes).
         """
         cdir = Path(config_dir).expanduser() if config_dir else default_config_dir()
         # STRICT (s27-extend-41): --config naming an existing FILE must not
