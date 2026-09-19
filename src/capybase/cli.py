@@ -1039,8 +1039,17 @@ def _run_config_explain(args, config: "Config", out=None) -> int:
     index = _config_key_index()
     keys = list(args.keys)
     if args.all:
-        # group by section in model order, then field order
-        keys = sorted(index)
+        # The v2 section split is the canonical presentation: skip the
+        # bare future.* aliases (every mechanism key would otherwise show
+        # three times — future.X + mechanisms.X + experimental.X).
+        from capybase.config import (
+            FUTURE_EXPERIMENTAL_FIELDS, FUTURE_MECHANISMS_FIELDS,
+        )
+        partitioned = FUTURE_MECHANISMS_FIELDS | FUTURE_EXPERIMENTAL_FIELDS
+        keys = sorted(
+            k for k in index
+            if not (k.startswith("future.")
+                    and k[len("future."):] in partitioned))
     elif not keys:
         print("capybase: error: provide dotted key paths or --all",
               file=sys.stderr)
