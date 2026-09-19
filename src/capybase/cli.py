@@ -385,6 +385,30 @@ def build_parser() -> argparse.ArgumentParser:
         "list", help="list provider configs found in the shared config dir"
     )
 
+    cfg_p = sub.add_parser(
+        "config",
+        help="inspect the effective configuration",
+    )
+    cfg_sub = cfg_p.add_subparsers(dest="config_cmd", metavar="CMD")
+    explain = cfg_sub.add_parser(
+        "explain",
+        help="show the effective value, source layer, and default for "
+             "config keys — `config explain --all` or `config explain "
+             "features.rag model.max_tokens`",
+    )
+    explain.add_argument(
+        "keys", nargs="*",
+        help="dotted key paths (section.key); mechanisms/experimental "
+             "aliases work for the [future]-model keys",
+    )
+    explain.add_argument(
+        "--all", action="store_true",
+        help="explain every key, grouped by section, plus loader diagnostics",
+    )
+    explain.add_argument(
+        "--format", choices=("plain", "json"), default="plain",
+        help="output format (default: plain)")
+
     emb_p = sub.add_parser(
         "calibrate-embeddings",
         help="calibrate the embedding-retrieval similarity floor for this model",
@@ -966,6 +990,116 @@ def _run_status(
     return 0
 
 
+
+def _config_key_index() -> dict[str, tuple[str, str]]:
+    """Every explainable dotted key path -> (section attr, field name).
+
+    Includes the mechanisms./experimental. aliases for the [future]-model
+    fields (the schema-v2 toml section split).
+    """
+    from capybase.config import (
+        Config, FUTURE_EXPERIMENTAL_FIELDS, FUTURE_MECHANISMS_FIELDS,
+    )
+    index: dict[str, tuple[str, str]] = {}
+    root = Config()
+    for name in Config.model_fields:
+        if name == "source_path":  # set by load(), not a toml key
+            continue
+        section = getattr(root, name)
+        for field in type(section).model_fields:
+            index[f"{name}.{field}"] = (name, field)
+    for f in FUTURE_MECHANISMS_FIELDS:
+        index[f"mechanisms.{f}"] = ("future", f)
+    for f in FUTURE_EXPERIMENTAL_FIELDS:
+        index[f"experimental.{f}"] = ("future", f)
+    return index
+
+
+def _field_default(config: "Config", section: str, field: str):
+    """The built-in default for section.field (from the pydantic model)."""
+    info = type(getattr(config, section)).model_fields[field]
+    if info.default is not __import__("pydantic").fields.PydanticUndefined:
+        return info.default
+    if info.default_factory is not None:
+        return info.default_factory()
+    return None
+
+
+def _run_config_explain(args, config: "Config", out=None) -> int:
+    """`capybase config explain`: effective value + source layer + default.
+
+    Read-only; never touches the provider/calibration gate. Sources come
+    from the loader's provenance map (files, migration) plus post-load
+    stamps (calibration profile, provider config, CLI flags).
+    """
+    import difflib
+    import json as _json
+
+    out = out or sys.stdout
+    index = _config_key_index()
+    keys = list(args.keys)
+    if args.all:
+        # group by section in model order, then field order
+        keys = sorted(index)
+    elif not keys:
+        print("capybase: error: provide dotted key paths or --all",
+              file=sys.stderr)
+        return 2
+
+    for key in keys:
+        if key not in index:
+            matches = difflib.get_close_matches(
+                key, sorted(index), n=3, cutoff=0.4)
+            hint = (f" — did you mean: {', '.join(matches)}?"
+                    if matches else "")
+            print(f"capybase: error: unknown config key {key!r}{hint}",
+                  file=sys.stderr)
+            return 2
+
+    records = []
+    for key in keys:
+        section, field = index[key]
+        value = getattr(getattr(config, section), field)
+        default = _field_default(config, section, field)
+        source = config.value_sources.get(key, "default (built-in)")
+        notes = [d for d in config.load_diagnostics
+                 if f"{section}.{field}" in d]
+        records.append({
+            "key": key,
+            "value": value,
+            "source": source,
+            "default": default,
+            "notes": notes,
+        })
+
+    if args.format == "json":
+        print(_json.dumps(records, indent=2, default=str), file=out)
+        return 0
+
+    if args.all:
+        print(f"schema version: {config.loaded_schema_version}", file=out)
+        print(f"config source:  {config.source_path or 'defaults only'}",
+              file=out)
+        print(file=out)
+    for rec in records:
+        print(rec["key"], file=out)
+        print(f"  effective: {rec['value']!r}", file=out)
+        print(f"  source:    {rec['source']}", file=out)
+        print(f"  default:   {rec['default']!r}", file=out)
+        for note in rec["notes"]:
+            print(f"  note:      {note}", file=out)
+    if args.all:
+        diags = config.load_diagnostics
+        print(file=out)
+        if diags:
+            print("loader diagnostics:", file=out)
+            for line in diags:
+                print(f"  - {line}", file=out)
+        else:
+            print("loader diagnostics: none", file=out)
+    return 0
+
+
 def _run_provider(args) -> int:
     """`capybase provider list|show` — inspect provider configs.
 
@@ -1140,8 +1274,11 @@ def main(argv: list[str] | None = None) -> int:
     # [future] jury_mode from capybase.toml for this invocation only.
     if getattr(args, "no_jury", False):
         config.future.jury_mode = "off"
+        config.record_source("future.jury_mode", "--no-jury flag")
     elif getattr(args, "jury_mode", None):
         config.future.jury_mode = args.jury_mode
+        config.record_source(
+            "future.jury_mode", f"--jury-mode {args.jury_mode} flag")
 
     # The global --profile overrides the profile location for BOTH reading
     # (provider resolution / explicit path) and writing (calibrate writes it
@@ -1213,6 +1350,8 @@ def main(argv: list[str] | None = None) -> int:
             raise
     if args.command == "provider":
         return _run_provider(args)
+    if args.command == "config":
+        return _run_config_explain(args, config)
     # promote/publish: pure git operations over retained candidate state —
     # no resolution, no LLM, so the calibration gate does not apply (they
     # run offline; the policy consent lives in the state file + --approve).

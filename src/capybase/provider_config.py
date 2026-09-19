@@ -334,14 +334,30 @@ def apply_to_config(
     cfg.model.base_url = p.base_url
     cfg.model.model = p.model
     cfg.model.api_key = p.api_key
+    # Provenance for `capybase config explain`: the provider's own provenance
+    # map already distinguishes file / env / cli wins.
+    _prov_src = lambda key: (
+        f"provider '{p.name}' ({p.provenance.get(key, '?')})")
+    cfg.record_source("model.base_url", _prov_src("base_url"))
+    cfg.record_source("model.model", _prov_src("model"))
+    cfg.record_source("model.api_key", _prov_src("api_key"))
     if p.embeddings_base_url or p.embeddings_model:
         cfg.memory.embeddings_base_url = p.embeddings_base_url
         if p.embeddings_model:
             cfg.memory.embeddings_model = p.embeddings_model
+        cfg.record_source("memory.embeddings_base_url", _prov_src("base_url"))
+        cfg.record_source("memory.embeddings_model", _prov_src("model"))
     # apply_profile returns a NEW ModelConfig (model_copy); assign it back.
     cfg.model, overridden = apply_profile(
         cfg.model, resolved.profile, force=force_profile
     )
+    _profile_src = (
+        f"calibration profile ({getattr(resolved.profile, 'model', '?')} "
+        f"@ {getattr(resolved, 'profile_path', '?')})")
+    for _knob in overridden:
+        if _knob.startswith("safety.") or _knob.startswith("prompt."):
+            continue  # recorded at their policy apply sites below
+        cfg.record_source(f"model.{_knob}", _profile_src)
     # The provider-named profile is the COMPLETE calibration: its prompt
     # section becomes the process-wide active PromptProfile (the eval/live
     # prompt layout follows the calibration; no repo-local ambient path).
@@ -367,6 +383,7 @@ def apply_to_config(
         if cfg.features.rag:
             if cfg.memory.retriever == "lexical":
                 cfg.memory.retriever = "embedding"
+                cfg.record_source("memory.retriever", _profile_src)
     _emb_sim = getattr(_prof, "embedding_min_similarity", None)
     if _emb_sim is not None:
         cfg.memory.embedding_min_similarity = float(_emb_sim)
@@ -385,6 +402,11 @@ def apply_to_config(
             _safety.max_recovery_retries_per_unit)
         cfg.policy.critic_confidence_escalate_threshold = (
             _safety.critic_confidence_escalate_threshold)
+        cfg.record_source("policy.max_retries_per_unit", _profile_src)
+        cfg.record_source("policy.max_critic_retries_per_unit", _profile_src)
+        cfg.record_source("policy.max_recovery_retries_per_unit", _profile_src)
+        cfg.record_source(
+            "policy.critic_confidence_escalate_threshold", _profile_src)
         overridden = list(overridden) + [
             "safety.max_retries_per_unit",
             "safety.max_recovery_retries_per_unit",

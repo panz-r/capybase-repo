@@ -38,10 +38,19 @@ canonical location is `~/.config/capybase/`). Set at minimum:
 
 ```toml
 [model]
-provider = "openai_compatible"
 base_url = "http://localhost:8080/v1"
 api_key  = "sk-local"
 model    = "chat"          # the id /v1/models reports
+```
+
+The config schema is versioned (`schema_version = 2`); older files migrate at
+load with a notice. Feature activation is one-key-per-feature under
+`[features]`; every key's effective value, source layer, and default is
+inspectable:
+
+```bash
+capybase config explain --all            # every key + loader diagnostics
+capybase config explain features.rag     # one key
 ```
 
 ### 3. Calibrate for your model
@@ -306,7 +315,7 @@ Every accepted resolution passes through:
 - **Both-sides-represented** — a side's additions weren't silently dropped.
 - **Verifier-model critic** (default on) — an LLM judge checks the resolution
   preserves both sides' semantic intent. Opt out with
-  `validation.enable_verifier_model = false`.
+  `features.llm_critic = false`.
 - **Silent-resurrection detection** (default on) — after a clean rebase,
   compares the result against content the target branch deliberately deleted
   and flags any that came back.
@@ -518,7 +527,7 @@ in live-eval.
 | **Data** | self-contained fixtures; nothing external fetched | real downloaded repos, processed and extracted (fetch script below) | the same real repos |
 | **Model calls** | never | never (deterministic) | yes — through the provider config + calibration profile |
 | **Entry point** | `pytest tests/ -n 6` | `./corpus/run.sh [python\|rust\|all]` | `scripts/live_eval_realworld.py --provider NAME` |
-| **Wall time** | ~44 s (4,583 tests, 6 workers) | minutes (own runner — never pytest) | hours |
+| **Wall time** | ~45 s (4,594 tests, 6 workers) | minutes (own runner — never pytest) | hours |
 | **Purpose** | the per-change regression gate | validates the verifier + the corpus oracle against real-world conflict shapes | the measured product: full runs, README numbers |
 
 After clone and build (`.venv` created per Setup below):

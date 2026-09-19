@@ -1268,6 +1268,20 @@ class Config(BaseModel):
     # The schema version the loader found (after migration) — for
     # `capybase config explain`.
     _loaded_schema_version: int = PrivateAttr(default=2)
+    # Dotted key path -> human-readable source layer for every value that
+    # came from somewhere OTHER than the built-in default (files, migration,
+    # calibration profile, provider config, CLI flag). For
+    # `capybase config explain`.
+    _value_sources: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    def record_source(self, dotted_path: str, source: str) -> None:
+        """Record where a post-load mutation set a value (explain output)."""
+        self._value_sources[dotted_path] = source
+
+    @property
+    def value_sources(self) -> dict[str, str]:
+        """Where each non-default value came from (dotted path -> source)."""
+        return dict(self._value_sources)
 
     @property
     def load_diagnostics(self) -> list[str]:
@@ -1330,20 +1344,39 @@ class Config(BaseModel):
             repo_local = _repo_local_config_path(path)
             dir_toml = cdir / "capybase.toml"
             diags: list[str] = []
+            sources: dict[str, str] = {}
             if repo_local is not None and dir_toml.is_file() and resolved != dir_toml:
+                # EACH file migrates to the current schema BEFORE merging: a
+                # v1 config-dir file under a v2 repo-local override must get
+                # its v1 keys MIGRATED, not silently ignored.
                 with open(dir_toml, "rb") as fh:
                     base_data = tomllib.load(fh)
                 with open(resolved, "rb") as fh:
                     override_data = tomllib.load(fh)
-                merged = _deep_merge_toml(base_data, override_data)
-                data, version = _normalize_config_dict(merged, diags)
+                base_sources: dict[str, str] = {}
+                override_sources: dict[str, str] = {}
+                _collect_leaf_sources(
+                    base_sources, base_data, f"config-dir file ({dir_toml})")
+                base_data, base_ver = _normalize_config_dict(
+                    base_data, diags, base_sources)
+                _collect_leaf_sources(
+                    override_sources, override_data,
+                    f"repo-local file ({resolved})")
+                override_data, override_ver = _normalize_config_dict(
+                    override_data, diags, override_sources)
+                sources.update(base_sources)
+                sources.update(override_sources)
+                data = _deep_merge_toml(base_data, override_data)
+                version = max(base_ver, override_ver)
                 cfg = cls.model_validate(data)
             else:
                 with open(resolved, "rb") as fh:
                     data = tomllib.load(fh)
-                data, version = _normalize_config_dict(data, diags)
+                _collect_leaf_sources(sources, data, f"file ({resolved})")
+                data, version = _normalize_config_dict(data, diags, sources)
                 cfg = cls.model_validate(data)
             cfg._load_diagnostics.extend(diags)
+            cfg._value_sources.update(sources)
             cfg._loaded_schema_version = version
             cfg.source_path = str(resolved)
         # Rewrite the calibration artifacts to the config dir. A user repo has
@@ -1355,7 +1388,28 @@ class Config(BaseModel):
         return cfg
 
 
-def _normalize_config_dict(data: dict, diags: list[str]) -> tuple[dict, int]:
+def _collect_leaf_sources(
+    sources: dict[str, str], table: dict, source: str,
+    *, skip_existing: bool = False,
+) -> None:
+    """Record dotted paths -> ``source`` for every leaf key in a raw toml
+    table (depth 2: section.key — the schema's fixed shape). Precedence:
+    with ``skip_existing`` the caller's earlier (higher-precedence) layer
+    wins; used for the config-dir layer under a repo-local override."""
+    for section_name, section in table.items():
+        if not isinstance(section, dict):
+            sources[section_name] = source
+            continue
+        for key in section:
+            dotted = f"{section_name}.{key}"
+            if skip_existing and dotted in sources:
+                continue
+            sources[dotted] = source
+
+
+def _normalize_config_dict(
+    data: dict, diags: list[str], sources: dict[str, str] | None = None,
+) -> tuple[dict, int]:
     """Normalize a raw parsed-toml dict to the current schema (in place).
 
     Returns ``(data, version)``. Version 1 files (``schema_version`` absent)
@@ -1396,6 +1450,8 @@ def _normalize_config_dict(data: dict, diags: list[str]) -> tuple[dict, int]:
         # recorded so the run shows what the migration did.
         def _moved(old: str, new: str, value) -> None:
             diags.append(f"migrated v1 key {old} -> {new} = {value!r}")
+            if sources is not None:
+                sources[new] = f"migration from {old}"
 
         if "enable_structural_resolver" in future_table:
             value = future_table.pop("enable_structural_resolver")
@@ -1422,6 +1478,9 @@ def _normalize_config_dict(data: dict, diags: list[str]) -> tuple[dict, int]:
                 diags.append(
                     'migrated v1 key future.enable_shadow_jury -> '
                     'future.jury_mode = "shadow"')
+                if sources is not None:
+                    sources["future.jury_mode"] = (
+                        "migration from future.enable_shadow_jury")
             elif legacy:
                 diags.append(
                     "v1 key future.enable_shadow_jury=true ignored — explicit "
@@ -1438,6 +1497,9 @@ def _normalize_config_dict(data: dict, diags: list[str]) -> tuple[dict, int]:
             diags.append(
                 "migrated v1 keys future.enable_rag AND memory.enabled -> "
                 f"features.rag = {value!r}")
+            if sources is not None:
+                sources["features.rag"] = (
+                    "migration from future.enable_rag AND memory.enabled")
         if "enabled" in structural_table:
             value = structural_table.pop("enabled")
             features.setdefault("structural_context", value)
