@@ -331,7 +331,7 @@
   },
   "generated": "2026-09-16",
   "description": "Sprint-28 FULL-CORPUS results (both legs) plus the sprint-28 fix pass and its targeted validations: the 676-case legacy corpus (leg 1) plus the 826-case large-repo tier (leg 2) under the desktop profile. 1,501 of 1,502 ran; the 1,481-row scored denominator. The fix pass (rust probe baselines, churn-ordered empty_fast_fail, comment-plan truncation prongs 1-3, terminal-taxonomy split, telemetry, python string-balance repair, multi-variant scope-local signature injection) is live; 28 targeted case-runs under fixed resolver versions REPLACE the first-pass rows.",
-  "mechanism_commit": "9c22913 (dev; through the preprocessor form + the D10 syntax-probe extension)",
+  "mechanism_commit": "0f15ab8 (dev; the sprint-28 fix pass through the transitive allowance)",
   "state": "desktop profile via provider <provider-name>; sprint-27 full strengthening live in production; the sprint-28 fix pass IS live (S28-18/38/23 p1-3/29/54/77/79 + telemetry); the model-when-needed audit closed with the PoLL critics skipping deterministic candidates.",
   "command_template": "scripts/live_eval_realworld.py --provider <provider-name> --repeat-nonpass 3 --skip-existing --out full-harvest.json --preserve-flights flights-harvest (env CAPYBASE_WORKTREE_DIR=/var/tmp/capy-wt TMPDIR=/var/tmp CAPYBASE_SKIP_SIZE_GUARD=1); fix pass: same command with targeted --case id sets over full-harvest.json with those rows removed first",
   "ran": "leg 1: 2026-09-15 -> 2026-09-16; leg 2: 2026-09-16 -> 2026-09-18 ~08:30; fix pass: 2026-09-18 ~15:05 (20 cases); follow-up validations: 2026-09-18 (5+1+2+1 targeted case-runs, serial)",
