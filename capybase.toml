@@ -51,7 +51,8 @@ samples_complex = 0
 # (only consulted when enable_self_consistency is on — it is OFF by default).
 consensus_min_agreement = 0.4
 # Two-pass prompting: extract intents first, then generate code conditioned on
-# them. Only activates when samples > 1.
+# them. Runs at any sample count — intent extraction helps the single
+# candidate too. PlanSearch (plan diversity) still needs several candidates.
 two_pass = false
 # Raised temperature for the diverse multi-sampling pass (distinct from the low
 # `temperature` used for focused retries).

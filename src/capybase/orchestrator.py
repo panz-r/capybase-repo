@@ -15938,9 +15938,12 @@ class Orchestrator:
                     unit, context, failures=failures, prev_candidate=prev_candidate,
                     n_samples=1, attempt=retry_count,
                 )
-            elif failures is None and self.config.model.two_pass and n_complex > 1:
-                # Two-pass prompting + consensus: extract intents, then sample
-                # N code candidates conditioned on them, then majority-vote.
+            elif failures is None and self.config.model.two_pass:
+                # Two-pass prompting: extract intents, then sample N code
+                # candidates conditioned on them, then majority-vote when
+                # N > 1. Intent extraction is useful even for the single
+                # candidate (N = 1) — the old n_complex > 1 gate made a
+                # calibrated two_pass silently inert at samples = 1.
                 candidates = self.resolution_engine.propose_two_pass(
                     unit, context,
                     n_samples=n_complex,

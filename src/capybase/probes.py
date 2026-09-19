@@ -786,7 +786,7 @@ def _resolve_under_config(
     engine = ResolutionEngine(model_cfg, client=client)
     t0 = time.monotonic()
     n = max(1, model_cfg.samples)
-    if model_cfg.two_pass and n > 1:
+    if model_cfg.two_pass:
         candidates = engine.propose_two_pass(
             conflict.unit, context, n_samples=n,
             temperature=model_cfg.sampling_temperature,

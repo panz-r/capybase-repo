@@ -709,3 +709,88 @@ def test_plan_search_off_uses_standard_two_pass():
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# The orchestrator gate: two_pass runs at ANY sample count (S28-126)
+# ---------------------------------------------------------------------------
+
+
+def test_orchestrator_two_pass_runs_with_single_sample(repo):
+    """The old gate required samples > 1 for the intent pass, making a
+    calibrated two_pass silently inert at samples = 1. A complex unit with
+    two_pass = true and samples = 1 must still run the intent extraction
+    (intent request + code request = 2 LLM calls, first is the intent pass).
+    """
+    import json
+
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator
+    from capybase.resolution_engine import ResolutionEngine
+
+    class ScriptedClient:
+        """Intent JSON first, then the code JSON — recording every call."""
+
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def complete(self, messages, **kw):
+            prompt = messages[-1]["content"] if isinstance(messages[-1], dict) \
+                else str(messages[-1])
+            self.calls.append(prompt)
+            if "current_side_intent" in prompt:
+                text = json.dumps({
+                    "current_side_intent": ["return 'hi'"],
+                    "replayed_commit_intent": ["return 'howdy'"],
+                })
+            else:
+                text = json.dumps(
+                    {"resolved_text": "    return 'hi' + 'howdy'",
+                     "explanation": "combine both"})
+            from capybase.adapters.llm_openai import LLMResponse
+            return LLMResponse(text=text,
+                               raw={"_accumulated": {"finish_reason": "stop"}})
+
+    client = ScriptedClient()
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.model.samples = 1
+    cfg.model.two_pass = True  # the coupling under test
+    cfg.tests.required = False
+    cfg.tests.pre_continue = "true"
+    cfg.tests.final = "true"
+    # Reach the LLM path: deterministic layers off; comment reconciliation
+    # off so the call accounting covers only the code-resolution pass.
+    cfg.features.structural_resolution = False
+    cfg.features.combination_search = False
+    cfg.future.enable_block_capture = False
+    cfg.future.enable_source_portfolio = False
+    cfg.future.enable_comment_reconciliation = False
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    from tests.conftest import git
+    (repo / "app.py").write_text("def greet():\n    return 'hello'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
+    git(repo, "branch", "feat")
+    git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text("def greet():\n    return 'howdy'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "feat: howdy")
+    git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text("def greet():\n    return 'hi'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "main: hi")
+    git(repo, "checkout", "-q", "feat")
+
+    result = orch.rebase("main")
+    assert not result.escalated, result.reason
+    # The contract under test: at two_pass + samples = 1 the FIRST request
+    # is the intent-extraction pass. Under the old n_complex > 1 gate the
+    # first (and only code-path) request was the plain resolve prompt.
+    # (Total count may exceed 2 — CEGIS retries are orthogonal.)
+    assert len(client.calls) >= 2, (
+        f"expected intent + code requests, got {len(client.calls)}")
+    assert "Do NOT write code" in client.calls[0], (
+        "first request must be the intent-extraction pass — the samples > 1 "
+        "coupling is back")
