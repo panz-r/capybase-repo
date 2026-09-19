@@ -62,6 +62,33 @@ def _isolate_model_profile(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     monkeypatch.setattr(cp.ModelProfile, "load", staticmethod(lambda path: None))
 
 
+@pytest.fixture(autouse=True)
+def _no_leaked_mock_patches():
+    """Fail any test that leaves a unittest.mock patch active (S28-121).
+
+    A ``mock.patch...start()`` without a matching ``stop()``/context survives
+    its test and silently poisons every later test in the same process —
+    under xdist, the same worker. That was the S28-119 "moving failure"
+    class: the failure set changed per run because xdist's timing-dependent
+    scheduling decides which tests co-reside with the leaker, which read as
+    load-correlated flakiness (a leaked ``_true_stage_sides`` made unrelated
+    Python-fixture tests resolve PHP arginfo content). This guard turns the
+    contamination into an immediate, named failure at the leaking test.
+    """
+    from unittest.mock import _patch
+
+    yield
+    leaked = list(_patch._active_patches)
+    if leaked:
+        names = ", ".join(
+            f"{getattr(p, 'getter', '?')!r}.{getattr(p, 'attribute', '?')}"
+            for p in leaked)
+        raise AssertionError(
+            f"test left {len(leaked)} active mock patch(es) — a started patch "
+            f"without stop() poisons every later test in this process: {names}. "
+            "Use a `with mock.patch(...)` context or stop() in a finally.")
+
+
 @pytest.fixture
 def real_profile_loader(monkeypatch: pytest.MonkeyPatch) -> None:
     """Opt IN to the real profile loader for tests that exercise the overlay

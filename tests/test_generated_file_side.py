@@ -165,20 +165,20 @@ def test_file_level_arm_takes_churn_winner_side_file(tmp_path: Path):
 
     import unittest.mock as mock
     # the file-level arm reads the pristine stage sides; stub them (the
-    # test repo's merge is committed, so ls-files -u would be empty)
+    # test repo's merge is committed, so ls-files -u would be empty).
+    # BOTH patches must be context-scoped: a .start() without stop() here
+    # once leaked a PHP-arginfo _true_stage_sides onto the whole xdist
+    # worker and poisoned every later stage-side test on it (S28-121).
     _blk = ("ZEND_BEGIN_ARG_INFO_EX(arginfo_x, 0, 0, 1)\n"
             "ZEND_ARG_INFO(0, a)\n"
             "ZEND_END_ARG_INFO()\n")
     sides = ({"current": "/* newer regen */\n" + _blk + "ZEND_ARG_INFO(0, extra)\n",
               "replayed": "/* older regen */\n" + _blk},
              "/* base */\n" + _blk)
-    mock.patch.object(
-        __import__("capybase.orchestrator", fromlist=["_true_stage_sides"]),
-        "_true_stage_sides", return_value=sides).start()
-    monkey_res = _R()
-    monkeypatch = orch.__dict__
-    import unittest.mock as mock
-    with mock.patch.object(orch, "_gather_step", return_value=monkey_res):
+    with mock.patch.object(
+            __import__("capybase.orchestrator", fromlist=["_true_stage_sides"]),
+            "_true_stage_sides", return_value=sides), \
+         mock.patch.object(orch, "_gather_step", return_value=_R()):
         orch._resolve_step()
     accepted = [e for e in orch.journal.read_events()
                 if e.event_type == "generated_file_take"]
