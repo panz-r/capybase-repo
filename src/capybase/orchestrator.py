@@ -7212,6 +7212,93 @@ class Orchestrator:
         )
         return outcome
 
+    def _try_generated_file_side(self, unit: ConflictUnit) -> UnitOutcome | None:
+        """Deterministic side-take for BUILD-GENERATED conflict files (S28-103).
+
+        Files that are the OUTPUT of a code generator (php's gen_stub.php
+        arginfo headers: complete ZEND_BEGIN_ARG_INFO..ZEND_END_ARG_INFO
+        blocks) are not human-authored merges — the human "merge" is
+        whichever regeneration matched their source. The LLM ladder is the
+        wrong tool (it re-edits machine output); the correct deterministic
+        answer is a side-take of the churn winner (the newer generation),
+        gated by the standard validators.
+
+        Census-licensed (S28-103): block presence is a zero-false-positive
+        discriminator on the php family (4/4 members carry blocks, 146/146
+        non-members carry none), and the churn winner's oracle-sim on all
+        four members is 0.926-1.000 — above the PASS bar. The detector
+        requires the BLOCK signature, never bare ZEND_ macros (the
+        density metric's false-positive lesson).
+        """
+        import re as _re_gen
+
+        block_start = _re_gen.compile(r"^\s*ZEND_BEGIN_ARG_INFO")
+        block_end = _re_gen.compile(r"^\s*ZEND_END_ARG_INFO")
+
+        def _has_complete_block(text: str) -> bool:
+            inside = False
+            for ln in (text or "").splitlines():
+                if not inside and block_start.match(ln):
+                    inside = True
+                elif inside and block_end.match(ln):
+                    return True
+            return False
+
+        texts = [unit.original_worktree_text,
+                 unit.current.text or "", unit.replayed.text or ""]
+        if not any(_has_complete_block(t) for t in texts):
+            return None
+        cur = unit.current.text or ""
+        rep = unit.replayed.text or ""
+        if not cur.strip() or not rep.strip():
+            return None  # deletion shapes belong to the empty-side arm
+        from capybase.merge_intent import side_churn
+        base_text = unit.base.text or ""
+        winner, wtext = (
+            ("current", cur) if side_churn(base_text, cur) >= side_churn(base_text, rep)
+            else ("replayed", rep))
+        cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:generated_file_side",
+            unit_id=unit.unit_id,
+            model_name="generated_file_side",
+            prompt_version="generated-file-side.v1",
+            resolved_text=wtext,
+            provenance="deterministic_generated_file_side",
+            explanation=(
+                f"build-generated file (arginfo blocks): churn-winner "
+                f"{winner} side taken verbatim; regeneration output, not "
+                f"a human merge"),
+        )
+        validation = self.verification.verify(unit, cand)
+        self._journal_validation(unit, cand, validation)
+        if not validation.passed:
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="generated_file_side",
+                candidate=cand, validation=validation,
+                decision="skip", reason="side failed validation")
+            return None
+        if self._strictness_blocks_pre_llm(unit, cand, validation, "generated_file_side"):
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="generated_file_side",
+                candidate=cand, validation=validation,
+                decision="skip", reason="strictness declined")
+            return None
+        outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+        outcome.accepted = cand
+        self._record_resolution_attempt(
+            UnitOutcome(unit=unit), mechanism="generated_file_side",
+            candidate=cand, validation=validation,
+            decision="accept",
+            reason="generated file: churn-winner side",
+        )
+        self.journal.emit(
+            "candidate_accepted",
+            {"candidate_id": cand.candidate_id, "via": "generated_file_side",
+             "side": winner},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        return outcome
+
     def _try_def_site_race(self, unit: ConflictUnit) -> UnitOutcome | None:
         """Shape-gated def-site-race CANDIDATE GENERATOR (S27-24).
 
@@ -15419,6 +15506,15 @@ class Orchestrator:
         # merge resolutions contain only lines from the input sides. When a
         # source composition compiles, it's a valid merge — no generation
         # artifacts (dropped braces, missing semicolons). Zero LLM calls.
+        if failures is None and getattr(self.config.future,
+                                        "enable_generated_file_side", True):
+            # S28-103: build-generated files (arginfo-class codegen output)
+            # resolve by churn-winner side-take — BEFORE the portfolio, the
+            # class signal is stronger than composition heuristics.
+            early = self._cascade_mechanism(
+                "generated_file_side", self._try_generated_file_side, unit)
+            if early is not None:
+                return early
         if failures is None and getattr(self.config.future, "enable_source_portfolio", True):
             early = self._cascade_mechanism(
                 "source_candidate_portfolio", self._try_source_candidate_portfolio, unit)
