@@ -1,0 +1,17 @@
+{
+  "id": "text-uu-simple",
+  "title": "plain text: both sides rewrite the same line's words",
+  "path": "story.txt",
+  "language": "text",
+  "base": "The quick brown fox jumps over the lazy dog.\n",
+  "current": "The quick red fox jumps over the lazy dog.\n",
+  "replayed": "The quick brown fox leaps over the lazy dog.\n",
+  "expected_resolved": "The quick red fox leaps over the lazy dog.\n",
+  "acceptable_alternatives": [
+    "The quick red fox jumps over the lazy dog.\n",
+    "The quick brown fox leaps over the lazy dog.\n"
+  ],
+  "expected_conflict_hunks": 1,
+  "validation": [],
+  "notes": "Single-line plain-text conflict: base says 'brown fox jumps'; the rebase target (current) changes brown->red, the replayed branch changes jumps->leaps. The preferred developer resolution combines both edits (red fox leaps); taking either side alone is acceptable."
+}

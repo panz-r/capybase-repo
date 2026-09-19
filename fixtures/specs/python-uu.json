@@ -1,0 +1,19 @@
+{
+  "id": "python-uu",
+  "title": "python: both sides change the same return expression",
+  "path": "app.py",
+  "language": "python",
+  "base": "def greet():\n    return 'hello'\n",
+  "current": "def greet():\n    return 'hi'\n",
+  "replayed": "def greet():\n    return 'howdy'\n",
+  "expected_resolved": "def greet():\n    return 'hi' + 'howdy'\n",
+  "acceptable_alternatives": [
+    "def greet():\n    return 'hi'\n",
+    "def greet():\n    return 'howdy'\n"
+  ],
+  "expected_conflict_hunks": 1,
+  "validation": [
+    "{python} -m py_compile app.py"
+  ],
+  "notes": "Genuine both-modify-same-line: target returns 'hi', replayed returns 'howdy'. The preferred resolution synthesizes both edits ('hi' + 'howdy'); either side alone is acceptable. Same shape as the tracked regression fixture py-both-modify-same-line."
+}

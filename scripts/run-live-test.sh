@@ -58,12 +58,11 @@ CB_PARALLEL_SAMPLES="${CB_PARALLEL_SAMPLES:-true}"
 CB_ENABLE_SELF_CONSISTENCY="${CB_ENABLE_SELF_CONSISTENCY:-false}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FIXTURES="$REPO_ROOT/fixtures"
 VENV="$REPO_ROOT/.venv"
 PYTHON="${PYTHON:-$VENV/bin/python}"
 CAPYBASE="${CAPYBASE:-$VENV/bin/capybase}"
 
-# Fixture selection: arg1 = fixture (replayed branch base name), arg2 = mode.
+# Fixture selection: arg1 = fixture spec id (fixtures/specs/<id>.json), arg2 = mode.
 FIXTURE="${1:-python-uu}"
 MODE="${2:-run}"
 # P2 default flip: `capybase rebase` now runs candidate mode (source never
@@ -73,16 +72,6 @@ MODE="${2:-run}"
 if [ "$MODE" = "rebase" ]; then
   MODE="rebase --in-place"
 fi
-# Map each fixture to its upstream branch. Fixture and upstream names don't
-# always share a prefix (e.g. text-uu-simple -> text-uu-upstream), so derive
-# from a lookup rather than string interpolation.
-case "$FIXTURE" in
-  python-uu)       UPSTREAM="python-uu-upstream" ;;
-  text-uu-simple)  UPSTREAM="text-uu-upstream" ;;
-  settings-uu)     UPSTREAM="settings-uu-upstream" ;;
-  rust-uu)         UPSTREAM="rust-uu-upstream" ;;
-  *) UPSTREAM="${FIXTURE}-upstream" ;;  # fallback for future fixtures
-esac
 
 # --------------------------------------------------------------------------
 # Preflight
@@ -124,11 +113,12 @@ if [ -z "$CB_PROFILE_PATH" ]; then
     "$CB_PROFILE")"
 fi
 
-if [ ! -d "$FIXTURES/.git" ] && [ ! -f "$FIXTURES/.git" ]; then
-  echo "ERROR: fixtures submodule not checked out at $FIXTURES" >&2
-  echo "       run: git -c protocol.file.allow=always submodule update --init" >&2
+if [ ! -f "$REPO_ROOT/fixtures/specs/$FIXTURE.json" ]; then
+  echo "ERROR: no fixture spec at fixtures/specs/$FIXTURE.json" >&2
+  echo "       available: $(ls "$REPO_ROOT/fixtures/specs/" 2>/dev/null | sed 's/\.json$//' | tr '\n' ' ')" >&2
   exit 2
 fi
+FIXTURES="$REPO_ROOT/fixtures/.built/$FIXTURE"
 
 TS="$(date +%Y%m%d-%H%M%S)"
 LOGDIR="$REPO_ROOT/logs/live-test-$TS"
@@ -208,33 +198,26 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# Set up the fixture: reset, restore branches from origin, drive a conflict.
-# A successful capybase run ADVANCES the fixture branch (the resolved rebase
-# commits), so we must hard-reset it from origin/* on every run to restore
-# the conflict. origin/* is immutable (bare repo), so this is idempotent.
+# Set up the fixture: build the repo from its spec (deterministic OIDs), then
+# drive a conflict. A successful capybase run ADVANCES the fixture branch
+# (the resolved rebase commits), so we rebuild with --force on every run —
+# the same spec always produces the same commits, so this is idempotent.
 # --------------------------------------------------------------------------
-echo "==> setting up fixture '$FIXTURE' (rebase onto $UPSTREAM)..."
+echo "==> building fixture '$FIXTURE' from its spec..."
+"$PYTHON" "$REPO_ROOT/fixtures/build.py" --spec "$FIXTURE" --force
+
+echo "==> setting up fixture '$FIXTURE' (rebase replayed onto current)..."
 (
   cd "$FIXTURES"
-  # Abort any in-progress rebase and detach HEAD so we can force-update
-  # the fixture branches (can't reset the branch we're standing on).
+  # Abort any in-progress rebase and detach HEAD so the conflict-driving
+  # checkout below always starts clean.
   git rebase --abort 2>/dev/null || true
   git checkout -q --detach 2>/dev/null || true
-  # Force-create/restore local branches from origin so a previous successful
-  # run (which advanced the fixture branch) doesn't leave it conflict-free.
-  # origin/* is immutable (bare repo), so this is idempotent.
-  for b in "$FIXTURE" "$UPSTREAM" base; do
-    if git rev-parse --verify --quiet "origin/$b" >/dev/null; then
-      git branch -f "$b" "origin/$b"
-    fi
-  done
-  git checkout -q base 2>/dev/null || true
-  # Drive into the conflict.
-  git checkout -q "$FIXTURE"
-  if git rebase "$UPSTREAM" >/dev/null 2>&1; then
+  git checkout -q replayed
+  if git rebase current >/dev/null 2>&1; then
     echo "    NOTE: rebase did NOT conflict for '$FIXTURE' — fixture may be stale" | tee -a "$RUN_LOG"
   else
-    echo "    conflict established" 
+    echo "    conflict established"
   fi
 )
 
@@ -256,7 +239,7 @@ SID="$(cd "$FIXTURES" && ls -t .rebase-agent/sessions/ 2>/dev/null | head -1 || 
 {
   echo "# live-test summary"
   echo "# timestamp:      $TS"
-  echo "# fixture:        $FIXTURE (rebase onto $UPSTREAM)"
+  echo "# fixture:        $FIXTURE (replayed rebased onto current)"
   echo "# mode:           $MODE"
   echo "# model:          $CB_MODEL @ $CB_BASE_URL"
   echo "# session:        ${SID:-<none>}"
