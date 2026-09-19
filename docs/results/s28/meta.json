@@ -6,20 +6,21 @@
     "pass": 1323,
     "working": 28,
     "era_dead": 40,
-    "accepted": 1388,
+    "gate_dead": 2,
+    "accepted": 1390,
     "pass_pct": 89.3,
-    "adj_pct": 91.8,
-    "pw_adj_pct": 93.8,
+    "adj_pct": 91.9,
+    "pw_adj_pct": 93.9,
     "by_language": {
       "c": {
         "cases": 452,
         "pass": 427,
         "working": 5,
         "era_dead": 0,
-        "llm": 283,
+        "llm": 284,
         "pass_pct": 94.5,
-        "adj_pct": 94.5,
-        "pw_adj_pct": 95.6
+        "adj_pct": 94.9,
+        "pw_adj_pct": 96.0
       },
       "cpp": {
         "cases": 453,
@@ -232,7 +233,7 @@
     "mechanism_participation": [
       {
         "mechanism": "deterministic_structural",
-        "cases": 660,
+        "cases": 661,
         "pct_of_corpus": 44.6
       },
       {
@@ -319,16 +320,21 @@
         "mechanism": "deterministic_docs_union",
         "cases": 1,
         "pct_of_corpus": 0.1
+      },
+      {
+        "mechanism": "deterministic_gcc_fixit",
+        "cases": 1,
+        "pct_of_corpus": 0.1
       }
     ],
-    "readme_table": "| lang | cases | PASS | WORKING | era-dead | llm | PASS % | adj % | P+W adj % |\n|------|-------|------|---------|----------|-----|--------|-----------|-----------|\n| python | 314 | 297 | 6 | 0 | 265 | 94.6% | 94.6% | 96.5% |\n| c | 452 | 427 | 5 | 0 | 283 | 94.5% | 94.5% | 95.6% |\n| cpp | 453 | 389 | 13 | 0 | 271 | 85.9% | 85.9% | 88.7% |\n| rust | 262 | 210 | 4 | 40 | 141 | 80.2% | 94.6% | 96.4% |\n| **total** | **1481** | **1323** | **28** | **40** | **960** | **89.3%** | **91.8%** | **93.8%** |"
+    "readme_table": "| lang | cases | PASS | WORKING | era-dead | llm | PASS % | adj % | P+W adj % |\n|------|-------|------|---------|----------|-----|--------|-----------|-----------|\n| python | 314 | 297 | 6 | 0 | 265 | 94.6% | 94.6% | 96.5% |\n| c | 452 | 427 | 5 | 0 | 284 | 94.5% | 94.9% | 96.0% |\n| cpp | 453 | 389 | 13 | 0 | 271 | 85.9% | 85.9% | 88.7% |\n| rust | 262 | 210 | 4 | 40 | 141 | 80.2% | 94.6% | 96.4% |\n| **total** | **1481** | **1323** | **28** | **40** | **961** | **89.3%** | **91.9%** | **93.9%** |"
   },
   "generated": "2026-09-16",
   "description": "Sprint-28 FULL-CORPUS results (both legs) plus the sprint-28 fix pass and its targeted validations: the 676-case legacy corpus (leg 1) plus the 826-case large-repo tier (leg 2) under the desktop profile. 1,501 of 1,502 ran; the 1,481-row scored denominator. The fix pass (rust probe baselines, churn-ordered empty_fast_fail, comment-plan truncation prongs 1-3, terminal-taxonomy split, telemetry, python string-balance repair, multi-variant scope-local signature injection) is live; 28 targeted case-runs under fixed resolver versions REPLACE the first-pass rows.",
-  "mechanism_commit": "0aa09a4 (dev; the sprint-28 fix pass through the calibrated pystring repair)",
+  "mechanism_commit": "9c22913 (dev; through the preprocessor form + the D10 syntax-probe extension)",
   "state": "desktop profile via provider <provider-name>; sprint-27 full strengthening live in production; the sprint-28 fix pass IS live (S28-18/38/23 p1-3/29/54/77/79 + telemetry); the model-when-needed audit closed with the PoLL critics skipping deterministic candidates.",
   "command_template": "scripts/live_eval_realworld.py --provider <provider-name> --repeat-nonpass 3 --skip-existing --out full-harvest.json --preserve-flights flights-harvest (env CAPYBASE_WORKTREE_DIR=/var/tmp/capy-wt TMPDIR=/var/tmp CAPYBASE_SKIP_SIZE_GUARD=1); fix pass: same command with targeted --case id sets over full-harvest.json with those rows removed first",
   "ran": "leg 1: 2026-09-15 -> 2026-09-16; leg 2: 2026-09-16 -> 2026-09-18 ~08:30; fix pass: 2026-09-18 ~15:05 (20 cases); follow-up validations: 2026-09-18 (5+1+2+1 targeted case-runs, serial)",
   "verification": "S28-49..53 audit series; S28-57/58/79 scoring-defect reclassification (16 rows, both views published); S28-68..82 fix-pass ledger entries (each fix stash-revert-proven, full gate, live validation on named fixtures); S28-77 model-when-needed audit; the recount tool reproduces the as-scored table from the committed extract",
-  "outcome_summary": "as-scored 1,323 PASS + 28 WORKING / 1,481 = 89.3% raw, 91.8% adj, 93.8% P+W (the fix pass moved libuv-0002/0022 to PASS and zenodo-0100 to its oracle side; the balance-fix validations kept all five python fixtures verdict-stable). Reclassified view (16 brace-fallback rows with recorded in-session syntax PASS -> PASS; php 8 + prusaslicer 8): 1,339 = 90.4% raw, 94.9% P+W. 40 era-dead rust rows excluded from adj denominators. scikit-0052's docstring-interior shape is a recorded follow-up (docstring-structure-aware repair); the row stays an honest ESCALATE."
+  "outcome_summary": "as-scored 1,323 PASS + 28 WORKING / 1,481 = 89.3% raw, 91.9% adj, 93.9% P+W (2 GATE_UNAVAILABLE rows excluded from adj denominators per D10; 40 era-dead) (the fix pass moved libuv-0002/0022 to PASS and zenodo-0100 to its oracle side; the balance-fix validations kept all five python fixtures verdict-stable). Reclassified view (16 brace-fallback rows with recorded in-session syntax PASS -> PASS; php 8 + prusaslicer 8): 1,339 = 90.4% raw, 94.9% P+W. 40 era-dead rust rows excluded from adj denominators. scikit-0052's docstring-interior shape is a recorded follow-up (docstring-structure-aware repair); the row stays an honest ESCALATE."
 }

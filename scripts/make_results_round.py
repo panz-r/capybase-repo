@@ -297,7 +297,7 @@ def main() -> None:
     # SAFE_SKIP (git resolved cleanly on replay; verdict=ESCALATE +
     # terminal_reason=SAFE_SKIP) leaves the denominator, matching the
     # README convention (676 loaded − 16 skips = 660).
-    total = passes = working = era = 0
+    total = passes = working = era = gate_dead = 0
     for lang, rows in by_lang.items():
         for row in rows:
             if _is_skip(row):
@@ -309,7 +309,9 @@ def main() -> None:
                 working += 1
             if row.get("toolchain_dead"):
                 era += 1
-    denom_adj = total - era
+            if row["verdict"] == "GATE_UNAVAILABLE":
+                gate_dead += 1
+    denom_adj = total - era - gate_dead
 
     # Per-language table (README rows). llm = whole-process model
     # involvement (row flag, else the journal predicate) — the README's
@@ -321,7 +323,7 @@ def main() -> None:
     llm_unknown = 0
     by_language = {}
     for lang, rows in sorted(by_lang.items()):
-        lt = lp = lw = le = lllm = 0
+        lt = lp = lw = le = lg = lllm = 0
         for row in rows:
             if _is_skip(row):
                 continue
@@ -333,12 +335,14 @@ def main() -> None:
                 lw += 1
             if row.get("toolchain_dead"):
                 le += 1
+            if v == "GATE_UNAVAILABLE":
+                lg += 1
             involved = _llm_involved(row, flights_idx)
             if involved is None:
                 llm_unknown += 1
             elif involved:
                 lllm += 1
-        denom = lt - le
+        denom = lt - le - lg
         by_language[lang] = {
             "cases": lt, "pass": lp, "working": lw, "era_dead": le,
             "llm": lllm,
@@ -486,6 +490,7 @@ def main() -> None:
             "pass": passes,
             "working": working,
             "era_dead": era,
+            "gate_dead": gate_dead,
             "accepted": accepted,
             "pass_pct": round(100 * passes / total, 1) if total else 0,
             "adj_pct": round(100 * passes / denom_adj, 1) if denom_adj else 0,

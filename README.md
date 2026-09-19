@@ -392,10 +392,10 @@ mechanism regressions).
 | lang | cases | PASS | WORKING | era-dead | llm | PASS % | adj % | P+W adj % |
 |------|-------|------|---------|----------|-----|--------|-----------|------------|
 | python | 314 | 297 | 6 | 0 | 265 | 94.6% | 94.6% | 96.5% |
-| c | 452 | 427 | 5 | 0 | 283 | 94.5% | 94.5% | 95.6% |
+| c | 452 | 427 | 5 | 0 | 284 | 94.5% | 94.9% | 96.0% |
 | cpp | 453 | 389 | 13 | 0 | 271 | 85.9% | 85.9% | 88.7% |
 | rust | 262 | 210 | 4 | 40 | 141 | 80.2% | 94.6% | 96.4% |
-| **total** | **1481** | **1323** | **28** | **40** | **960** | **89.3%** | **91.8%** | **93.8%** |
+| **total** | **1481** | **1323** | **28** | **40** | **961** | **89.3%** | **91.9%** | **93.9%** |
 
 Sixteen rows score ORACLE_DIVERGENT only because the post-hoc
 brace-balance fallback overrode a recorded in-session compiler-syntax
@@ -415,7 +415,12 @@ other:
 
 All 40 era-dead rows are rust — 39 in polars and tikv, one in
 sea-orm — each verified by the preflight's
-sides-plus-oracle-fail-identically probe. cpp's lower rate is
+sides-plus-oracle-fail-identically probe. Two generated-header rows
+(php 0090/0148) classify GATE_UNAVAILABLE: the oracle itself fails
+the same degraded whole-file gate the merge faced (a bare arginfo
+header cannot parse without its tree's include context), verified by
+the post-hoc oracle probe — these measure the sandbox, not the
+resolver, and leave the adjusted denominators like era-dead. cpp's lower rate is
 duckdb's interlocked parser weaves under GCC-15 template-body
 diagnostics plus prusaslicer's macro-braced GUI files.
 
