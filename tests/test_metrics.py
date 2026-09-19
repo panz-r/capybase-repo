@@ -208,8 +208,7 @@ def test_metrics_cli_command_prints_table(repo, monkeypatch):
     from capybase.memory.store import ExperienceStore
 
     cfg = Config()
-    cfg.memory.enabled = True
-    cfg.future.enable_rag = True
+    cfg.features.rag = True
     git = GitBackend(str(repo))
     store = ExperienceStore.for_repo(str(git.repo), cfg.memory.store_path)
     store.append(_exp("accepted", "deterministic_structural"))
@@ -230,7 +229,7 @@ def test_metrics_cli_when_memory_disabled(repo):
     from capybase.cli import _run_metrics
 
     cfg = Config()
-    cfg.memory.enabled = False  # disabled
+    cfg.features.rag = False  # disabled
     buf = io.StringIO()
     rc = _run_metrics(cfg, repo=str(repo), out=buf)
     assert rc == 0

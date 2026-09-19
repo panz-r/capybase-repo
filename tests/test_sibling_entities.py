@@ -137,7 +137,7 @@ def test_enricher_populates_sibling_entities():
         def read_worktree_file(self, path):
             return worktree.encode("utf-8")
 
-    ex = ConflictExtractor(FakeGit(), structural_config=StructuralConfig(enabled=True))
+    ex = ConflictExtractor(FakeGit(), structural_config=StructuralConfig(), structural_context=True)
     units = ex.extract_file_units("svc.py", 1, "s")
     assert len(units) == 1
     sibs = units[0].structural_metadata.get("sibling_entities")

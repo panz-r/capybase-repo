@@ -344,7 +344,7 @@ def test_extractor_populates_structural_metadata():
         "=======\n    return 'howdy'\n>>>>>>> b\n"
     )
     ex = ConflictExtractor(
-        _FakeGit(base, worktree), structural_config=StructuralConfig(enabled=True)
+        _FakeGit(base, worktree), structural_config=StructuralConfig(), structural_context=True
     )
     units = ex.extract_file_units("app.py", 1, "s")
     assert len(units) == 1
@@ -393,7 +393,7 @@ def test_context_builder_surfaces_enclosing_node():
     # reads enclosing_node_type from structural_metadata, which only the
     # extractor populates — not the bare _unit helper).
     ex = ConflictExtractor(
-        _FakeGit(base, worktree), structural_config=StructuralConfig(enabled=True)
+        _FakeGit(base, worktree), structural_config=StructuralConfig(), structural_context=True
     )
     unit = ex.extract_file_units("app.py", 1, "s")[0]
     ctx = ContextBuilder(context_lines=5).build(unit)

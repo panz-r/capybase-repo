@@ -1045,7 +1045,7 @@ def _run_metrics(config: Config, repo: str, *, out=sys.stdout) -> int:
     from capybase.memory.store import ExperienceStore
 
     git = GitBackend(repo)
-    if not (config.memory.enabled and config.future.enable_rag):
+    if not config.features.rag:
         print("metrics: experience store not configured (memory/rag disabled)", file=out)
         return 0
     store = ExperienceStore.for_repo(str(git.repo), config.memory.store_path)
@@ -1140,10 +1140,8 @@ def main(argv: list[str] | None = None) -> int:
     # [future] jury_mode from capybase.toml for this invocation only.
     if getattr(args, "no_jury", False):
         config.future.jury_mode = "off"
-        config.future.enable_shadow_jury = False
     elif getattr(args, "jury_mode", None):
         config.future.jury_mode = args.jury_mode
-        config.future.enable_shadow_jury = False  # explicit mode wins over legacy
 
     # The global --profile overrides the profile location for BOTH reading
     # (provider resolution / explicit path) and writing (calibrate writes it

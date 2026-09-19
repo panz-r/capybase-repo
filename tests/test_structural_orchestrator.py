@@ -180,7 +180,7 @@ def test_structural_resolution_disabled_falls_through_to_model(repo: Path):
     client = CallCountingClient(payload)
     engine = ResolutionEngine(_config(repo).model, client=client)
     cfg = _config(repo)
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
     orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
                         out=lambda *_a, **_k: None)
     result = orch.run()
@@ -290,7 +290,7 @@ def test_step_shape_reuse_returns_cached_resolution():
         rp = Path(d)
         git(rp, "init", "-q", "-b", "main")
         cfg = Config()
-        cfg.future.enable_structural_resolver = True
+        cfg.features.structural_resolution = True
         client = CallCountingClient()
         engine = ResolutionEngine(cfg.model, client=client)
         orch = Orchestrator(cfg, repo=str(rp), resolution_engine=engine,

@@ -202,7 +202,7 @@ def test_extractor_refines_with_diff3():
 
     ex = ConflictExtractor(
         FakeGit(),
-        structural_config=StructuralConfig(enabled=True, refine_with_diff3=True),
+        structural_config=StructuralConfig(refine_with_diff3=True), structural_context=True,
     )
     units = ex.extract_file_units("app.py", 1, "s")
     assert len(units) == 1

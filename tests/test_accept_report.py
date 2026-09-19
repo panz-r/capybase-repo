@@ -176,7 +176,7 @@ def test_escalation_does_not_write_accept_report(conflicted_repo):
     # bad LLM output actually forces escalation. Without this, the source
     # portfolio's current_only candidate (valid Python) resolves the conflict
     # before the LLM is called, and the step doesn't escalate.
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
     cfg.future.enable_source_portfolio = False
     # A client that returns leaked markers → forces escalation.
     bad = json.dumps({"resolved_text": "    x\n<<<<<<< still\n"})

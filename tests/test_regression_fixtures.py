@@ -151,7 +151,7 @@ def test_escalation_fixture(case, tmp_path: Path):
     # resolve this fixture's same-target value conflict before the client is
     # ever called — disable them so the LeakingClient decides the outcome.
     cfg.future.enable_source_portfolio = False
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
 
     class _LeakingClient:
         """Always returns leaked conflict markers → forces escalation."""

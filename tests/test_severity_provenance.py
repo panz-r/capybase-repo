@@ -94,7 +94,7 @@ def _extract(gb, path="app.py"):
     from capybase.conflict_extractor import ConflictExtractor
     from capybase.config import StructuralConfig
 
-    extractor = ConflictExtractor(gb, structural_config=StructuralConfig(enabled=False))
+    extractor = ConflictExtractor(gb, structural_config=StructuralConfig(), structural_context=False)
     unmerged = next(
         (u for u in gb.list_unmerged_paths() if u.path == path), None
     )

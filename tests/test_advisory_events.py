@@ -157,8 +157,7 @@ def test_exact_reuse_failure_emits_advisory_not_mislabeled(repo: Path, tmp_path,
     from capybase.memory.store import ExperienceStore
 
     cfg = _base_cfg(repo)
-    cfg.memory.enabled = True
-    cfg.future.enable_rag = True
+    cfg.features.rag = True
     orch = Orchestrator(cfg, repo=str(repo), out=lambda *_a, **_k: None)
     store = ExperienceStore(tmp_path / "exp.jsonl")
     orch.memory_store = store

@@ -328,7 +328,7 @@ def test_first_empty_oversized_prompt_skips_retries(tmp_path: Path):
     cfg.tests.pre_continue = "true"
     cfg.tests.final = "true"
     cfg.future.enable_source_portfolio = False      # reach the LLM path
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
     engine = ResolutionEngine(cfg.model, client=_EmptyClient())
     orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
                         out=lambda *_a, **_k: None)
@@ -384,7 +384,7 @@ def test_transport_failure_does_not_become_a_side_pick(tmp_path: Path):
     cfg.tests.pre_continue = "true"
     cfg.tests.final = "true"
     cfg.future.enable_source_portfolio = False      # reach the LLM path
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
     engine = ResolutionEngine(cfg.model, client=_DeadClient())
     orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
                         out=lambda *_a, **_k: None)
@@ -691,7 +691,8 @@ def test_empty_side_rule_insertion_wins_when_deleter_unchanged(tmp_path: Path):
     # synthesize the base section the default-style marker lacks
     _blocks[0].__dict__['base_text'] = _blocks[0].replayed_text.replace(
         "new_style", "old_style")
-    orch.config.validation.enable_verifier_model = False  # no endpoint in tests
+    orch.config.features.llm_critic = False  # no endpoint in tests
+    orch.verification.config.enable_verifier_model = False
     orch._empty_side_stage_sides = lambda path: (
         {"current": E_BASE, "replayed": E_REP}, E_BASE, _blocks)
     unit = _empty_side_unit(repo, cur_block="", rep_block="grad=new_style(\n            [1, 2, 3],\n            dtype=floatX,\n        ),")
@@ -811,7 +812,8 @@ def test_absorbed_side_fires_on_true_absorption(tmp_path: Path):
     repo.mkdir()
     _empty_side_repo(repo, cur_text=E_CUR_DELETED, rep_text=E_REP)
     orch = _orch(repo)
-    orch.config.validation.enable_verifier_model = False
+    orch.config.features.llm_critic = False
+    orch.verification.config.enable_verifier_model = False
     _absorbed_stages(orch)
     worktree = ("top = 0\n"
                 "<<<<<<< ours\n"
@@ -838,7 +840,8 @@ def test_absorbed_side_ignores_sibling_conflict_blocks(tmp_path: Path):
     repo.mkdir()
     _empty_side_repo(repo, cur_text=E_CUR_DELETED, rep_text=E_REP)
     orch = _orch(repo)
-    orch.config.validation.enable_verifier_model = False
+    orch.config.features.llm_critic = False
+    orch.verification.config.enable_verifier_model = False
     _absorbed_stages(orch)
     from capybase.adapters.parsers import parse_marker_blocks as _pmb
     worktree = ("top = 0\n"
@@ -872,7 +875,8 @@ def test_absorbed_side_requires_line_anchored_match(tmp_path: Path):
     repo.mkdir()
     _empty_side_repo(repo, cur_text=E_CUR_DELETED, rep_text=E_REP)
     orch = _orch(repo)
-    orch.config.validation.enable_verifier_model = False
+    orch.config.features.llm_critic = False
+    orch.verification.config.enable_verifier_model = False
     other = "    total = 0\n    return total\n"
     worktree = ("def run():\n"
                 "    top = 0\n"

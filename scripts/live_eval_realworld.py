@@ -1145,12 +1145,12 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
         _target = _C_BUILD_TARGETS.get(case.dataset, "")
         if _target:
             cfg.validation.cc_build_target_template = _target
-    cfg.future.enable_structural_resolver = True
+    cfg.features.structural_resolution = True
     # Sprint-23 mechanisms: F1 is always-on (smart conditions in the
     # orchestrator); R3 best-of-N is config-gated (default False,
     # enabled here for the specimen/full runs)
     cfg.future.enable_best_of_n = True
-    cfg.future.enable_combination_search = True
+    cfg.features.combination_search = True
     # Sprint-21 S21.5 cohort validation: the member-split composition is
     # OFF by default; the env gate flips it for the validation run (the
     # pre-registered acceptance: 15-case oversized cohort, majority-of-3,
@@ -1168,11 +1168,9 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # stops being apples-to-apples with prior rows. Default OFF; the
     # flag remains ONLY for a deliberate, journaled A/B with a re-seeded
     # and freshness-validated store (next sprint's design).
-    cfg.memory.enabled = False
-    cfg.future.enable_rag = False
+    cfg.features.rag = False
     if os.environ.get("CAPYBASE_GOLDEN_PATH", "") == "1":
-        cfg.memory.enabled = True
-        cfg.future.enable_rag = True
+        cfg.features.rag = True
         cfg.memory.store_path = os.environ.get(
             "CAPYBASE_MEMORY_DIR",
             "/var/tmp/capybase-live/s21/memory/experiences.jsonl")
@@ -1188,7 +1186,7 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # Threshold: >40 non-blank conflict lines ≈ >10 regions (each region
     # has ~3-4 non-blank lines: base/current/replayed).
     if _conflict_lines > 120:
-        cfg.validation.enable_verifier_model = False
+        cfg.features.llm_critic = False
         cfg.validation.enable_verifier_reflection = False
         cfg.validation.enable_verifier_guardrail = False
     # Recovery retry budget: when the model self-reports needs_human, give it
@@ -1243,7 +1241,7 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     if jury_mode in ("off", "shadow", "enforce"):
         cfg.future.jury_mode = jury_mode
     elif os.environ.get("CAPYBASE_SHADOW_JURY", "").lower() in ("1", "true", "yes"):
-        cfg.future.enable_shadow_jury = True  # back-compat → effective shadow
+        cfg.future.jury_mode = "shadow"
     # Autonomous code_reopen is separately gated (default off). Enable only when
     # positive-path evidence exists outside the shadow corpus.
     reopen = os.environ.get("CAPYBASE_JURY_CODE_REOPEN", "").strip().lower()

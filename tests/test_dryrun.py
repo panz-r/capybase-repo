@@ -53,7 +53,7 @@ def _config(repo: Path) -> Config:
     # exercise the ESCALATION reporting path, so disable the deterministic
     # layers to let the FailingClient decide.
     cfg.future.enable_source_portfolio = False
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
     return cfg
 
 

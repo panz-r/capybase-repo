@@ -4807,7 +4807,8 @@ def _apply_profile_capability_flags(config: Config, profile: "object") -> Config
 
     Currently: ``enable_embedding_rag`` flips ``config.memory.retriever`` to
     ``"embedding"`` (the orchestrator then builds an EmbeddingRetriever). Only
-    honors the flag when the user has RAG enabled at all; never forces it on.
+    honors the flag when the user has the rag feature enabled at all; never
+    forces it on.
 
     The calibrated ``embedding_min_similarity`` (from ``calibrate-embeddings``)
     overrides the config default so the EmbeddingRetriever uses a model-specific
@@ -4816,7 +4817,7 @@ def _apply_profile_capability_flags(config: Config, profile: "object") -> Config
     ``fusion_method`` is threaded for the HybridRetriever.
     """
     if getattr(profile, "enable_embedding_rag", False):
-        if config.memory.enabled and config.future.enable_rag:
+        if config.features.rag:
             if config.memory.retriever == "lexical":
                 config.memory.retriever = "embedding"
     emb_sim = getattr(profile, "embedding_min_similarity", None)
@@ -5063,14 +5064,16 @@ class Orchestrator:
         config = _apply_model_profile(config, self.git.repo, self.journal)
         self.config = config
         self.extractor = ConflictExtractor(
-            self.git, structural_config=config.structural, future_config=config.future
+            self.git, structural_config=config.structural,
+            structural_context=config.features.structural_context,
+            future_config=config.future
         )
         # Memory: experience store + retriever for RAG few-shot. Built lazily
-        # from config; both are None when [memory] is disabled, so the context
-        # builder gets no retriever and retrieved_examples stays empty.
+        # from config; both are None when the rag feature is off, so the
+        # context builder gets no retriever and retrieved_examples stays empty.
         self.memory_store = None
         retriever = None
-        if config.memory.enabled and config.future.enable_rag:
+        if config.features.rag:
             from capybase.memory.retriever import EmbeddingRetriever, LexicalRetriever
             from capybase.memory.store import ExperienceStore
 
@@ -5117,7 +5120,7 @@ class Orchestrator:
         # failure, so a missing endpoint never breaks matching. The same client
         # is reused for critic-feedback deduplication and drift
         # detection — one connection, one model, consistent vectors.
-        if config.memory.enabled:
+        if config.features.rag:
             try:
                 from capybase.adapters import structural
                 from capybase.memory.embeddings import OpenAIEmbeddingsClient
@@ -5171,6 +5174,9 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 — advisory; never break orchestrator init
             pass
         _val_cfg = ValidationConfig.from_dict(config.validation.model_dump())
+        # The critic's activation is a [features] flag; the engine mirror keeps
+        # its own enable_verifier_model copy, seeded here (schema v2).
+        _val_cfg.enable_verifier_model = config.features.llm_critic
         # Repo root for path-aware validators: the per-unit Rust syntax gate
         # infers the crate's declared edition from the nearest Cargo.toml
         # (edition changes what parses; a wrong-edition gate reports errors
@@ -5215,7 +5221,7 @@ class Orchestrator:
         # critic needs a real client to make its call, so absence is a clean
         # no-op rather than a crash. The critic's own verify() also degrades
         # gracefully on any call/parse failure.
-        if config.validation.enable_verifier_model and getattr(
+        if config.features.llm_critic and getattr(
             self.resolution_engine, "client", None
         ) is not None:
             from capybase.verification import VerifierModelValidator
@@ -15523,7 +15529,7 @@ class Orchestrator:
         # Only on a FRESH resolve (not CEGIS retries, where the model must see the
         # counterexample). Any resolution still runs the full validation pipeline;
         # on failure it falls through to the model, so this can only cut LLM load,
-        # never produce a worse merge. Gated by [future] enable_structural_resolver.
+        # never produce a worse merge. Gated by [features] structural_resolution.
         if failures is None and getattr(self.config.future,
                                         "enable_generated_file_side", True):
             # S28-104: build-generated files (arginfo-class codegen output)
@@ -15535,7 +15541,7 @@ class Orchestrator:
                 "generated_file_side", self._try_generated_file_side, unit)
             if early is not None:
                 return early
-        if failures is None and self.config.future.enable_structural_resolver:
+        if failures is None and self.config.features.structural_resolution:
             early = self._cascade_mechanism(
                 "structural_resolve", self._try_structural_resolve, unit)
             if early is not None:
@@ -15587,9 +15593,9 @@ class Orchestrator:
         # structural resolver declines and BEFORE the LLM. Searches order-
         # preserving interleavings for the best combination; the candidate is
         # validated before acceptance, so an invalid combination falls through to
-        # the model. Only on a FRESH resolve. Gated by [future]
-        # enable_combination_search.
-        if failures is None and self.config.future.enable_combination_search:
+        # the model. Only on a FRESH resolve. Gated by [features]
+        # combination_search.
+        if failures is None and self.config.features.combination_search:
             # Difficulty-aware SBCR skip: SBCR is addition-only
             # (empty-base scope), and hard conflicts are overwhelmingly
             # modification conflicts where SBCR's search would decline on scope
@@ -15909,12 +15915,9 @@ class Orchestrator:
             else:
                 n_complex = self.config.model.samples
 
-            # Self-consistency: read from ModelConfig (so the calibrated profile
-            # overlay flows through) with fallback to the legacy FutureConfig flag.
-            self_consistency = (
-                self.config.model.enable_self_consistency
-                or self.config.future.enable_self_consistency
-            )
+            # Self-consistency: read from ModelConfig so the calibrated
+            # profile overlay flows through.
+            self_consistency = self.config.model.enable_self_consistency
 
             # Recovery retry (CEGIS loop hardening): a model that self-reported
             # needs_human gets one retry with build_recovery_prompt (a reframed

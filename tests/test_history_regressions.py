@@ -147,7 +147,7 @@ def test_multistep_rebase_resolves_conflicts_at_different_commits(repo: Path):
     # test scripts the client's per-file merges and counts LLM accepts,
     # so disable the deterministic layers.
     cfg.future.enable_source_portfolio = False
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
 
     # capybase splices the candidate's resolved_text into the conflict BLOCK. Here
     # the block is just the `return` line (the `def a():` header is outside the
@@ -363,10 +363,9 @@ def test_history_augmented_llm_provenance_restamping(repo: Path):
     # test scripts the client's per-file merges and counts LLM accepts,
     # so disable the deterministic layers.
     cfg.future.enable_source_portfolio = False
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
 
-    cfg.memory.enabled = True  # record the Experience for the provenance check
-    cfg.future.enable_rag = True
+    cfg.features.rag = True # record the Experience for the provenance check
     from tests.test_rust_cross_file import PathAwareClient
     from capybase.resolution_engine import ResolutionEngine
     client = PathAwareClient({"cfg.py": "    return 2\n"})
@@ -403,8 +402,7 @@ def test_exact_reuse_record_then_replay_loop(repo: Path):
     SECOND rebase whose conflict has the IDENTICAL shape. Assert the second rebase
     accepts via exact_history_reuse and makes ZERO LLM calls for that unit."""
     cfg = _base_cfg(repo)
-    cfg.memory.enabled = True  # the store persists across the two rebases
-    cfg.future.enable_rag = True
+    cfg.features.rag = True # the store persists across the two rebases
 
     # --- Rebase 1: resolve a conflict, recording it to the store. ---
     build_multistep_rebase(

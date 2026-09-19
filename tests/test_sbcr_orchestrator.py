@@ -133,7 +133,7 @@ def test_combination_search_disabled_falls_through_to_model(repo: Path):
     client = CallCountingClient(payload)
     engine = ResolutionEngine(_config(repo).model, client=client)
     cfg = _config(repo)
-    cfg.future.enable_combination_search = False
+    cfg.features.combination_search = False
     cfg.future.enable_source_portfolio = False
     orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
                         out=lambda *_a, **_k: None)

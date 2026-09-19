@@ -1415,7 +1415,13 @@ class VerifierModelValidator:
 
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
         cfg = ctx.config
-        if not getattr(cfg, "enable_verifier_model", False):
+        # Activation authority: [features] llm_critic gates REGISTRATION (the
+        # orchestrator only builds this validator when the feature is on) and
+        # the engine's ValidationConfig mirror carries the seeded flag. A
+        # config object WITHOUT the attribute (e.g. the pydantic
+        # ValidationConfig section, which no longer has the field) means
+        # "no opinion" — enabled.
+        if not getattr(cfg, "enable_verifier_model", True):
             return VerificationCheckResult(
                 name=self.name,
                 passed=True,
@@ -7451,7 +7457,7 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
         "referenced_symbol_dropped": cfg.reject_if_drops_referenced_symbol,
         "needs_human": cfg.reject_if_model_needs_human,
         "syntax": cfg.require_syntax_if_supported,
-        "verifier_model": cfg.enable_verifier_model,
+        "verifier_model": getattr(cfg, "enable_verifier_model", True),
         "policy_gate": cfg.enable_policy_gate,
         "code_smell": cfg.enable_code_smell_checks,
     }
@@ -7460,7 +7466,7 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
     # PoLL jury members are named verifier_model_<focus>; all route through the
     # same enable_verifier_model gate (the jury is on iff the critic is on).
     if name.startswith("verifier_model_"):
-        return cfg.enable_verifier_model
+        return getattr(cfg, "enable_verifier_model", True)
     return True
 
 

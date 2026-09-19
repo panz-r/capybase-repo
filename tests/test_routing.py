@@ -230,8 +230,8 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
     # path where samples_complex applies. (Without this the union/structural
     # rules merge them with zero LLM calls, exercising the resolver not the
     # sample allocation.)
-    cfg.future.enable_structural_resolver = False
-    cfg.future.enable_combination_search = False
+    cfg.features.structural_resolution = False
+    cfg.features.combination_search = False
     cfg.future.enable_block_capture = False
     cfg.future.enable_source_portfolio = False
     # The comment-reconciliation pass + the verifier-model critic are always-on
@@ -240,7 +240,7 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
     # not comment reconciliation or critic evaluation, so disable both to keep
     # the call-count assertion precise.
     cfg.future.enable_comment_reconciliation = False
-    cfg.validation.enable_verifier_model = False
+    cfg.features.llm_critic = False
     engine = ResolutionEngine(cfg.model, client=client)
     orch = Orchestrator(
         cfg, repo=str(repo), resolution_engine=engine,

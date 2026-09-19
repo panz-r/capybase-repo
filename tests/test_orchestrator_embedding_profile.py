@@ -51,8 +51,7 @@ def _cfg(repo: Path, *, model: str = "vibethink", retriever: str = "lexical") ->
     cfg.model.model = model
     cfg.calibration.model_profile_path = str(_profile_path(repo))
     # Enable RAG so the orchestrator builds a retriever at all.
-    cfg.memory.enabled = True
-    cfg.future.enable_rag = True
+    cfg.features.rag = True
     cfg.memory.retriever = retriever
     return cfg
 

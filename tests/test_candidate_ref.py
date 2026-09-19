@@ -54,7 +54,7 @@ def _config(repo: Path) -> Config:
     # Let the (failing/fake) model decide — disable the deterministic
     # layers so both outcomes are reachable.
     cfg.future.enable_source_portfolio = False
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
     return cfg
 
 

@@ -68,10 +68,14 @@ class ConflictExtractor:
         git: GitBackend,
         *,
         structural_config: "StructuralConfig | None" = None,
+        structural_context: bool = False,
         future_config: "FutureConfig | None" = None,
     ) -> None:
         self.git = git
         self.structural_config = structural_config
+        # AST context-enrichment activation ([features] structural_context;
+        # was StructuralConfig.enabled before schema v2).
+        self.structural_context = structural_context
         self.future_config = future_config
 
     def extract_file_units(
@@ -230,7 +234,7 @@ class ConflictExtractor:
         # structurally identical after splicing. Silently skipped when the lib
         # is absent or the language has no grammar — units keep unit_kind
         # "text_marker_block" and downstream code falls back to line windows.
-        if self.structural_config and self.structural_config.enabled:
+        if self.structural_context and self.structural_config:
             _enrich_structural(units, worktree_text, base_text, self.structural_config)
         # Diff3 marker refinement: recompute the tightest
         # conflict boundaries via `git merge-file`. This is logically SEPARATE

@@ -61,7 +61,7 @@ def _config(repo: Path) -> Config:
     # deterministic layers so the FailingClient escalation (the behavior
     # under test) is what decides the outcome.
     cfg.future.enable_source_portfolio = False
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
     return cfg
 
 

@@ -132,7 +132,7 @@ def test_test_gated_side_declines_when_no_test_configured(repo):
     # Disable deterministic pre-LLM layers so the conflict reaches the LLM
     # path (where no client is configured → escalate). Without this, the
     # source portfolio resolves the conflict before the LLM is called.
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
     cfg.future.enable_source_portfolio = False
     # The empty fast-fail's deterministic side fallback would rescue the
     # escalation (no client → empty response → side picked). This test's

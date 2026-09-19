@@ -265,8 +265,8 @@ def _config_for(scenario: Scenario, *, critic_enabled: bool = True) -> Config:
     cfg.tests.required = True
     cfg.tests.timeout_seconds = 300
     # Structural resolver + combination search: keep ON (production defaults).
-    cfg.future.enable_structural_resolver = True
-    cfg.future.enable_combination_search = True
+    cfg.features.structural_resolution = True
+    cfg.features.combination_search = True
     # Fix #3: grant more whole-file repair cycles for Rust (cargo) scenarios —
     # a two-hunk conflict where the deterministic brace repair (Fix #2) + the
     # enriched cross-hunk context (Fix #1) need a few shots to converge. A
@@ -275,7 +275,7 @@ def _config_for(scenario: Scenario, *, critic_enabled: bool = True) -> Config:
         cfg.policy.max_whole_file_repair_retries = 3
     # Verifier-model critic A/B arm. Default ON (the production default); the
     # A/B harness toggles this to measure the critic's contribution.
-    cfg.validation.enable_verifier_model = critic_enabled
+    cfg.features.llm_critic = critic_enabled
     cfg.validation.verifier_severity = "warning"
     # Embeddings features (embeddings survey): env-gated so the default live-eval
     # behavior is unchanged. Set CAPYBASE_EMBED=1 to enable memory + RAG +
@@ -285,8 +285,7 @@ def _config_for(scenario: Scenario, *, critic_enabled: bool = True) -> Config:
     # embeddings on a remote server). CAPYBASE_EMBED_MODEL selects the embedding
     # model id (defaults to "embed").
     if os.environ.get("CAPYBASE_EMBED", "").strip() in ("1", "true", "yes", "on"):
-        cfg.memory.enabled = True
-        cfg.future.enable_rag = True
+        cfg.features.rag = TrueNone
         cfg.memory.retriever = "hybrid"  # BM25 + dense fusion
         # Provider config supplies the embeddings identity when it defines one;
         # the legacy env names remain per-run overrides.

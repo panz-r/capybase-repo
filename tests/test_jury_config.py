@@ -108,7 +108,6 @@ class TestCliJuryFlags:
         # Replicate the main() override logic.
         if getattr(args, "no_jury", False):
             cfg.future.jury_mode = "off"
-            cfg.future.enable_shadow_jury = False
         assert effective_jury_mode(cfg.future) == "off"
 
     def test_apply_override_jury_mode_wins_over_config(self):
@@ -118,19 +117,20 @@ class TestCliJuryFlags:
         args = self._parse("--jury-mode", "shadow")
         if getattr(args, "jury_mode", None):
             cfg.future.jury_mode = args.jury_mode
-            cfg.future.enable_shadow_jury = False
         assert effective_jury_mode(cfg.future) == "shadow"
 
-    def test_apply_override_jury_mode_beats_legacy_shadow_flag(self):
-        """An explicit --jury-mode wins over a legacy enable_shadow_jury."""
-        from capybase.config import effective_jury_mode
-        cfg = Config()
-        cfg.future.enable_shadow_jury = True  # legacy → would be shadow
-        args = self._parse("--jury-mode", "off")
-        if getattr(args, "jury_mode", None):
-            cfg.future.jury_mode = args.jury_mode
-            cfg.future.enable_shadow_jury = False
-        assert effective_jury_mode(cfg.future) == "off"
+    def test_legacy_enable_shadow_jury_migrates_to_shadow(self):
+        """The legacy enable_shadow_jury flag no longer exists on the model;
+        a v1 toml carrying it migrates to jury_mode = "shadow" at load."""
+        import tempfile
+        from pathlib import Path
+        d = Path(tempfile.mkdtemp())
+        (d / "capybase.toml").write_text(
+            "[future]\nenable_shadow_jury = true\n")
+        cfg = Config.load(d / "capybase.toml")
+        assert effective_jury_mode(cfg.future) == "shadow"
+        assert any("enable_shadow_jury" in line
+                   for line in cfg.load_diagnostics)
 
 
 # ---------------------------------------------------------------------------

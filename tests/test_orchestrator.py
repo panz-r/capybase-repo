@@ -1149,7 +1149,7 @@ class FakeConsensusEngine:
 def _self_consistency_config(repo):
     """Enable self-consistency so the orchestrator takes the multi-candidate path."""
     cfg = _config(repo)
-    cfg.future.enable_self_consistency = True
+    cfg.model.enable_self_consistency = True
     return cfg
 
 
@@ -1438,7 +1438,7 @@ def test_run_escalates_when_whole_file_invalid(multi_unit_conflicted_repo):
     # same dropped-content pattern and reroute to a retry before Phase B.
     cfg.validation.reject_if_drops_a_side = False
     cfg.validation.reject_if_drops_referenced_symbol = False
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
     engine = ResolutionEngine(cfg.model, client=FakeClient([bad, bad]))
     orch = Orchestrator(
         cfg, repo=str(repo), resolution_engine=engine,
@@ -1480,7 +1480,7 @@ def test_whole_file_repair_recovers_and_accepts(multi_unit_conflicted_repo):
         _make_resolved_payload(flags_good),
     ])
     cfg = _config(repo)
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
     engine = ResolutionEngine(cfg.model, client=client)
     orch = Orchestrator(
         cfg, repo=str(repo), resolution_engine=engine,
@@ -1681,7 +1681,7 @@ class SequenceClient:
 
 def _verifier_config(repo):
     cfg = _config(repo)
-    cfg.validation.enable_verifier_model = True
+    cfg.features.llm_critic = True
     # Disable the critic guardrail phases in the raw-critic-behavior tests: they
     # exercise the critic's verdict→escalation path with fake clients that return
     # the verdict schema (not the reassessment schema), so Phase 2 would squash a
@@ -2013,8 +2013,8 @@ def test_wall_time_budget_escalates_non_converging_unit(distinct_additions_repo,
     # Disable the pre-LLM resolvers: distinct additions would otherwise be
     # unioned deterministically (resolving without the LLM), so the loop the
     # wall-time deadline must bound would never start.
-    cfg.future.enable_structural_resolver = False
-    cfg.future.enable_combination_search = False
+    cfg.features.structural_resolution = False
+    cfg.features.combination_search = False
     # Tiny wall budget so the loop escalates quickly (well under a second). The
     # retry-count budgets are large enough that they wouldn't trigger first.
     cfg.policy.max_wall_time_per_unit_seconds = 0.2
@@ -2084,8 +2084,8 @@ def test_file_wall_deadline_caps_repair_retries(distinct_additions_repo, verifie
     ])
     cfg = _verifier_config(repo)
     cfg.validation.verifier_severity = "warning"
-    cfg.future.enable_structural_resolver = False
-    cfg.future.enable_combination_search = False
+    cfg.features.structural_resolution = False
+    cfg.features.combination_search = False
     # Large per-unit budget + retry counts so they DON'T trigger first.
     cfg.policy.max_wall_time_per_unit_seconds = 50.0
     cfg.policy.max_retries_per_unit = 50
@@ -2113,7 +2113,7 @@ def test_verifier_not_registered_when_flag_off(conflicted_repo):
     so no critic call is ever made (zero-cost default)."""
     repo = conflicted_repo["repo"]
     cfg = _config(repo)  # enable_verifier_model defaults False
-    cfg.validation.enable_verifier_model = False
+    cfg.features.llm_critic = False
     orch = Orchestrator(cfg, repo=str(repo))
     names = [type(v).__name__ for v in orch.verification.validators]
     assert "VerifierModelValidator" not in names
@@ -2294,8 +2294,7 @@ def test_context_built_event_carries_retrieval_scores(conflicted_repo):
     )
 
     cfg = _config(repo)
-    cfg.memory.enabled = True
-    cfg.future.enable_rag = True
+    cfg.features.rag = True
     cfg.memory.retriever = "lexical"  # dependency-free; no network needed
     cfg.memory.min_examples_for_retrieval = 1
     payload = _make_resolved_payload("    return 'hi' + 'howdy'")
@@ -2368,8 +2367,8 @@ def test_simple_routing_uses_one_sample_even_when_samples_is_three(conflicted_re
     repo = conflicted_repo["repo"]
     cfg = _config(repo)
     cfg.routing.enabled = True  # classify difficulty
-    cfg.future.enable_structural_resolver = False
-    cfg.future.enable_combination_search = False  # isolate the simple LLM path
+    cfg.features.structural_resolution = False
+    cfg.features.combination_search = False  # isolate the simple LLM path
     cfg.future.enable_block_capture = False
     cfg.model.samples = 3  # the value that must NOT leak into the simple path
     payload = _make_resolved_payload("a = 1\nx = 9\nb = 2\nc = 3")

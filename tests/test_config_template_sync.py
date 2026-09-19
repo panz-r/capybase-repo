@@ -18,10 +18,17 @@ from pathlib import Path
 
 import pytest
 
-from capybase.config import Config
+from capybase.config import (
+    Config, FutureConfig, FUTURE_EXPERIMENTAL_FIELDS, FUTURE_MECHANISMS_FIELDS,
+)
 
 _REPO = Path(__file__).resolve().parent.parent
 _TEMPLATE = _REPO / "capybase.toml"
+
+# toml section name -> the pydantic model class backing it. [mechanisms] and
+# [experimental] both back FutureConfig (the schema-v2 section split); their
+# field partition has its own completeness test below.
+FUTURE_SECTION_ALIASES = ("mechanisms", "experimental")
 
 
 def _template_sections() -> dict:
@@ -36,6 +43,8 @@ def _model_section_classes() -> dict[str, type]:
         if name == "source_path":  # set by load(), not a toml key
             continue
         classes[name] = type(getattr(root, name))
+    for alias in FUTURE_SECTION_ALIASES:
+        classes[alias] = type(root.future)
     return classes
 
 
@@ -43,6 +52,9 @@ def _model_section_classes() -> dict[str, type]:
     "section", sorted(_template_sections()), ids=lambda s: f"[{s}]")
 def test_template_section_exists_in_model(section: str):
     classes = _model_section_classes()
+    data = _template_sections()[section]
+    if not isinstance(data, dict):
+        pytest.skip("top-level scalar (e.g. schema_version)")
     assert section in classes, (
         f"[{section}] exists in capybase.toml but not in the config model — "
         "its keys parse and silently vanish. Add the section to the model or "
@@ -58,7 +70,11 @@ def test_template_keys_exist_in_model(section: str):
     model_cls = _model_section_classes().get(section)
     if model_cls is None:
         pytest.fail(f"[{section}] has no model counterpart (see section test)")
-    fields = model_cls.model_fields
+    if section in FUTURE_SECTION_ALIASES:
+        fields = (FUTURE_MECHANISMS_FIELDS if section == "mechanisms"
+                  else FUTURE_EXPERIMENTAL_FIELDS)
+    else:
+        fields = model_cls.model_fields
     unknown = [k for k in data if k not in fields]
     assert not unknown, (
         f"{section}.{'/'.join(unknown)} exists in capybase.toml but not in "
@@ -66,12 +82,23 @@ def test_template_keys_exist_in_model(section: str):
         "delete the key.")
 
 
+def test_experimental_partition_is_complete():
+    """Every FutureConfig field lives in exactly one of the two sections."""
+    all_fields = set(FutureConfig.model_fields)
+    assert FUTURE_MECHANISMS_FIELDS | FUTURE_EXPERIMENTAL_FIELDS == all_fields
+    assert not (FUTURE_MECHANISMS_FIELDS & FUTURE_EXPERIMENTAL_FIELDS)
+
+
 def test_template_parses_and_has_expected_sections():
     sections = set(_template_sections())
     expected = {"model", "policy", "tests", "validation", "journal",
-                "structural", "memory", "calibration", "routing", "future"}
+                "structural", "memory", "calibration", "routing",
+                "features", "mechanisms", "experimental"}
     missing = expected - sections
     assert not missing, f"template lost expected sections: {missing}"
+    assert "future" not in sections, (
+        "[future] was split into [mechanisms]/[experimental] in schema v2 — "
+        "the template must not carry the deprecated section name")
 
 
 def test_ghost_keys_stay_gone():

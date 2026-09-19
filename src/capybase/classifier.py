@@ -99,9 +99,9 @@ def classify(unit: "object", config: "object | None" = None) -> ConflictClassifi
     # samples_complex allocation the test expects.
     _resolver_on = True
     if config is not None:
-        _future = getattr(config, "future", None)
-        if _future is not None:
-            _val = getattr(_future, "enable_structural_resolver", True)
+        _feat_cfg = getattr(config, "features", None)
+        if _feat_cfg is not None:
+            _val = getattr(_feat_cfg, "structural_resolution", True)
             _resolver_on = bool(getattr(_val, "real", _val))
     if _resolver_on:
         det_mergeable = _deterministically_mergeable(unit)

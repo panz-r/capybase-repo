@@ -16,6 +16,10 @@
 # they are intentionally repo-local, unlike the shared config dir.
 # Packaging metadata lives in pyproject.toml; this is runtime.
 
+# Config schema version. Absent = 1 (migrated at load with a notice);
+# keys from the v1 layout are migrated or reported as ignored.
+schema_version = 2
+
 [model]
 # OpenAI-compatible local endpoint (e.g. llama-server). NO endpoint is baked
 # into this repo: set base_url / model / api_key for YOUR server in the shared
@@ -179,11 +183,9 @@ enable_shadow_tests = false
 # resolution preserves BOTH sides' semantic intent — the one failure the
 # syntactic validators are blind to (a merge that parses cleanly but drops a
 # side's intent). Uses the same black-box API as the resolver; no model is
-# trained or hosted. OPT-OUT (default true): the critic is the only check for
-# silently-dropped intent, so it runs on every resolution by default. Set false
-# to disable (e.g. to cut latency/cost on a trusted corpus). Gracefully skips
+# trained or hosted. Its ACTIVATION lives in [features] llm_critic (default
+# ON, opt-out) — this section carries only the severity. Gracefully skips
 # (no hard-reject) if the call fails or the verdict is unparseable.
-enable_verifier_model = true
 # Critic disagreement severity: "warning" (bias toward retry/escalate) or
 # "error" (hard-reject a dropped-intent resolution).
 verifier_severity = "warning"
@@ -247,12 +249,13 @@ store_snapshots = true
 store_candidates = true
 
 # Structural AST context (built in: the grammar-free abstract parser — no
-# tree-sitter, no extra install). When enabled the resolver sees the enclosing
-# logical block (def/impl/struct) instead of a blind line window, and an
-# AST-preservation validator guards against silent deletion of unchanged code.
-# Silently degrades to the line-window behavior when the parse fails.
+# tree-sitter, no extra install). ACTIVATION lives in [features]
+# structural_context; this section carries only the context-shaping knobs.
+# When enabled the resolver sees the enclosing logical block
+# (def/impl/struct) instead of a blind line window, and an AST-preservation
+# validator guards against silent deletion of unchanged code. Silently
+# degrades to the line-window behavior when the parse fails.
 [structural]
-enabled = false
 languages = ["python", "rust"]
 # If the lowest enclosing node is larger than this (lines), fall back to the
 # line window — a whole 500-line module is not a useful "isolated block".
@@ -273,10 +276,10 @@ refine_with_diff3 = true
 diff_algorithm = "histogram"
 
 # RAG experience replay: store labeled outcomes, retrieve similar past merges
-# as dynamic few-shot. Requires [future] enable_rag = true to activate.
-# The store accumulates from every capybase run; no manual labeling needed.
+# as dynamic few-shot. ACTIVATION lives in [features] rag; this section
+# carries only the store/retriever knobs. The store accumulates from every
+# capybase run; no manual labeling needed.
 [memory]
-enabled = false
 store_path = ".rebase-agent/memory/experiences.jsonl"
 retriever = "lexical"        # "lexical" (BM25, no deps) or "embedding" (semantic)
 # The embedding model for /v1/embeddings (distinct from the completion model on
@@ -316,29 +319,38 @@ enabled = false
 # 0.0 = always accept SBCR when it resolves (disable the guard).
 min_balance_for_sbcr_accept = 0.15
 
-# [future] documents planned seams — most are parsed, some are now wired.
-[future]
-enable_self_consistency = false   # opt-in: raise [model] samples + set true for majority voting
-enable_rag = false                # set true + [memory] enabled = true for RAG few-shot
-# Deterministic structural pre-resolution (survey §6.4 layer 1): BEFORE the LLM,
-# attempt a model-free resolution (identical sides / one-sided change / disjoint
-# line edits). Safe-by-construction + validated — a guess that fails validation
-# falls through to the model, so it only cuts LLM load, never a worse merge.
-enable_structural_resolver = true
+# --- Feature switches (one controlling key per feature) ----------------------
+[features]
+# Deterministic structural pre-resolution (survey §6.4 layer 1): BEFORE the
+# LLM, attempt a model-free resolution (identical sides / one-sided change /
+# disjoint line edits). Safe-by-construction + validated — a guess that fails
+# validation falls through to the model, so it only cuts LLM load, never a
+# worse merge. Default ON.
+structural_resolution = true
 # Search-based combination resolution (survey §4.1 SBCR): AFTER the structural
 # resolver declines, search order-preserving interleavings of the two sides for
 # the best combination (mean similarity to both parents). Covers the ~98.6% of
-# combination resolutions that add no new lines. Pure/heuristic, so every
-# candidate is validated before acceptance; an invalid combination (e.g.
-# contradictory lines concatenated) is rejected and falls through to the model.
-enable_combination_search = true
-# SBCR tuning (arXiv:2605.16646 §4.1). Fitness is char-level Gestalt, mean-
-# aggregated over both parents; the search is union-constrained (every candidate
-# keeps all lines from both sides). These knobs expose the research-tuned params.
-sbcr_floor = 0.6                  # min fitness to accept a candidate
-sbcr_stagnation_limit = 10        # stop hill-climb after N consecutive non-improving evals
-sbcr_max_time_seconds = 15.0      # wall-clock budget for hill-climb on large blocks
-sbcr_max_iterations = 2000        # hard budget on fitness evaluations
+# combination resolutions that add no new lines. Default ON.
+combination_search = true
+# Structural AST context injection: populate units with their enclosing AST
+# node so context/validators see logical blocks (knobs in [structural] above).
+# Default OFF (opt-in).
+structural_context = false
+# RAG experience replay (few-shot retrieval from past accepted merges; store
+# knobs in [memory] above). Single gate — no second flag needed. Default ON
+# (sprint-21 golden path); retrieval stays inert until the store holds
+# min_examples_for_retrieval examples.
+rag = true
+# Verifier-model critic: the LLM judge checking that a resolution preserves
+# both sides' semantic intent (the failure mode syntactic validators are blind
+# to). Default ON (opt-out).
+llm_critic = true
+
+# --- Mechanism toggles (stable, individually switchable) ---------------------
+# Fine-grained switches for the deterministic resolution mechanisms and their
+# research-tuned tuning. Dormant/planned seams + the jury canary live in
+# [experimental] below.
+[mechanisms]
 # Deterministic import-union editor (Rust): AFTER the model produces a
 # candidate, if change-accounting detects it copied one side and dropped an
 # additive ``use`` import leaf, insert the missing leaf mechanically — no
@@ -347,7 +359,19 @@ sbcr_max_iterations = 2000        # hard budget on fitness evaluations
 # import is missing or a safety precondition fails; cargo/rustc remains
 # authoritative after the edit. Default ON.
 enable_import_union = true
+# SBCR tuning (arXiv:2605.16646 §4.1). Fitness is char-level Gestalt, mean-
+# aggregated over both parents; the search is union-constrained (every candidate
+# keeps all lines from both sides). These knobs expose the research-tuned params.
+sbcr_floor = 0.6                  # min fitness to accept a candidate
+sbcr_stagnation_limit = 10        # stop hill-climb after N consecutive non-improving evals
+sbcr_max_time_seconds = 15.0      # wall-clock budget for hill-climb on large blocks
+sbcr_max_iterations = 2000        # hard budget on fitness evaluations
+# (Every other [mechanisms] toggle keeps its code default — the full list is
+# the FutureConfig fields outside FUTURE_EXPERIMENTAL_FIELDS; see
+# `capybase config explain --all`.)
 
+# --- Experimental (dormant seams + the jury canary) ---------------------------
+[experimental]
 # --- Comment jury enforcement (Phase 4) -------------------------------------
 # off (default) | shadow | enforce. In 'enforce' the jury acts on the four
 # typed routes AFTER all deterministic gates + comment reconciliation + the

@@ -89,7 +89,7 @@ def test_rust_rebase_resolves_and_compiles(rust_conflicted_repo):
     # combined string). Disable them so the scripted merge is used.
     cfg = _config(repo)
     cfg.future.enable_source_portfolio = False
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
     engine = ResolutionEngine(
         cfg.model, client=CyclingClient([_payload(r_new), _payload(r_label)])
     )
@@ -132,7 +132,7 @@ def test_rust_rebase_rejects_noncompiling_merge(rust_conflicted_repo):
         client=CyclingClient([_payload(r_new_broken), _payload(r_label)]),
     )
     cfg = _config(repo)
-    cfg.future.enable_structural_resolver = False  # exercise the LLM/Phase-B path
+    cfg.features.structural_resolution = False  # exercise the LLM/Phase-B path
     orch = Orchestrator(
         cfg, repo=str(repo), resolution_engine=engine,
         out=lambda *_a, **_k: None,

@@ -364,7 +364,7 @@ def apply_to_config(
     # by the orchestrator's ambient overlay — now the provider path's job.
     _prof = resolved.profile
     if getattr(_prof, "enable_embedding_rag", False):
-        if cfg.memory.enabled and cfg.future.enable_rag:
+        if cfg.features.rag:
             if cfg.memory.retriever == "lexical":
                 cfg.memory.retriever = "embedding"
     _emb_sim = getattr(_prof, "embedding_min_similarity", None)

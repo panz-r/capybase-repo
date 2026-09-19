@@ -73,7 +73,7 @@ def _config(repo, *, tests_required: bool = True) -> Config:
     # client-merge paths, so disable the deterministic layers to let the
     # scripted fake client decide the outcome.
     cfg.future.enable_source_portfolio = False
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
     # Per-unit syntax validators false-fail on the fake client's partial snippets;
     # disable in the hermetic loop-mechanics tests (the validators have dedicated
     # tests with complete code).
@@ -482,7 +482,7 @@ def test_rebase_rust_resolves_and_compiles(repo):
     # would resolve the disjoint struct-field hunk themselves and value-pick
     # the format-string hunk. Disable them so the scripted merge is used.
     cfg.future.enable_source_portfolio = False
-    cfg.future.enable_structural_resolver = False
+    cfg.features.structural_resolution = False
     engine = ResolutionEngine(
         cfg.model, client=CyclingClient([_payload(r_new), _payload(r_label)])
     )

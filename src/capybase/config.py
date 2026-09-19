@@ -13,7 +13,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 # The calibration-artifact default filename in the config dir, and the
@@ -461,16 +461,15 @@ class ValidationConfig(BaseModel):
     # Shadow tests: if a tests/test_<module>.py exists for the modified file,
     # run it before declaring success (best-effort, Phase B).
     enable_shadow_tests: bool = False
-    # Verifier-model critic (Proposer-Critic; the reserved
-    # `enable_verifier_model` seam): an LLM judge that checks the resolved text
+    # Verifier-model critic: an LLM judge that checks the resolved text
     # preserves BOTH sides' semantic intent — the one failure mode the syntactic
     # validators (markers, splice scope, AST, LSP) are structurally blind to:
     # a merge that parses cleanly but silently drops a side's intent. Uses the
     # same black-box API client already in the orchestrator; no model is trained
-    # or hosted. OPT-OUT (default ON): the critic is the only check for
-    # silently-dropped intent, so it runs by default in every real resolution
-    # — set false to disable (e.g. to cut latency/cost on a trusted corpus).
-    enable_verifier_model: bool = True
+    # or hosted. Its ACTIVATION lives in [features] llm_critic (FeaturesConfig,
+    # default ON) — this section carries only severity. The verification
+    # engine's internal mirror keeps an enable_verifier_model flag seeded from
+    # the feature at orchestrator init.
     # Severity of a critic disagreement: "warning" (default — bias toward
     # retry/escalate but don't hard-reject a syntactically-valid merge) or
     # "error" (strict — treat a dropped-intent verdict as a hard failure).
@@ -600,34 +599,25 @@ class JournalConfig(BaseModel):
 
 
 class FutureConfig(BaseModel):
-    """Resolution-mechanism toggles (the pre-LLM + RAG layers).
+    """Resolution-mechanism toggles (the pre-LLM layers).
 
-    A mix of operational toggles and documented planned seams. NOTE: the
-    history-aware features (future probes, obligations, branch intent, exact
-    reuse, provenance restamping) are NOT config knobs here — they are always-on
-    and ADAPTIVE: they derive their behavior from the conflict's own data (e.g.
-    the probe mode is chosen by whether intervening commits exist, not a setting).
-    Tuning those behaviors is a code change (documented constants in the relevant
-    module), not a per-deploy config, by design — minimal config, no hidden knobs.
+    NOTE: the history-aware features (future probes, obligations, branch
+    intent, exact reuse, provenance restamping) are NOT config knobs here —
+    they are always-on and ADAPTIVE: they derive their behavior from the
+    conflict's own data (e.g. the probe mode is chosen by whether intervening
+    commits exist, not a setting). Tuning those behaviors is a code change
+    (documented constants in the relevant module), not a per-deploy config,
+    by design — minimal config, no hidden knobs.
+
+    The SECTION-level feature switches (structural resolution, combination
+    search, structural context, RAG, the LLM critic) live in [features]
+    (FeaturesConfig), not here. In capybase.toml this model is written as
+    TWO sections: [mechanisms] (the stable wired toggles below that are not
+    in FUTURE_EXPERIMENTAL_FIELDS) and [experimental] (the dormant/planned
+    seams in FUTURE_EXPERIMENTAL_FIELDS) — the loader maps both onto this
+    model; see the partition constants under this class.
     """
 
-    # OPT-IN (mirrors [model]); see ModelConfig.enable_self_consistency. Default
-    # off — best-of-N is opt-in for models whose per-draw success rate justifies it.
-    enable_self_consistency: bool = False
-    # Sprint-21 golden-path: causally validated by the paired A/B
-    # (OFF: 4/4 escalate; ON: 0037 PASS + 0046 NEAR_MATCH, zero
-    # regressions) — 2 of 4 hard LLM-walking cases improved. Default ON
-    # for eval runs; the store must be seeded (golden-path corpus at
-    # /var/tmp/capybase-live/s21/memory or a per-repo store).
-    enable_rag: bool = True
-    # Deterministic structural pre-resolution: BEFORE the
-    # LLM, attempt a model-free resolution from base+sides via provably-safe
-    # rules (identical sides, one-sided change, disjoint line edits). Every
-    # resolution still runs the full validation pipeline; a guess that fails
-    # validation falls through to the model — so this only cuts LLM load on
-    # trivial conflicts, never produces a worse merge. Default ON (safe-by-
-    # construction); flip off to force the model to handle every conflict.
-    enable_structural_resolver: bool = True
     #: Calibrated-confidence priors (candidate-ref design P3): a json of
     #: historical per-class pass rates (capybase.calibration_priors
     #: derives it from eval results). When set, acceptance reasons carry
@@ -636,13 +626,8 @@ class FutureConfig(BaseModel):
     # Search-based combination resolution (SBCR): AFTER the
     # structural resolver declines and BEFORE the LLM, search order-preserving
     # interleavings of the two sides for the best combination (mean similarity
-    # to both parents). Covers the ~98.6% of combination resolutions that use no
-    # newly-invented lines. Pure/heuristic — so, like the structural resolver,
-    # every candidate is STILL validated (syntax/AST/splice) before acceptance;
-    # an invalid combination (e.g. contradictory lines concatenated) is rejected
-    # and falls through to the LLM. Default ON; only fires when the structural
-    # resolver declined, so the cheap provably-safe rules always run first.
-    enable_combination_search: bool = True
+    # to both parents). ACTIVATION lives in [features] combination_search.
+    # Tuning: the sbcr_* knobs below.
     # EXTEND-96: deterministic resolution when exactly one marker-block
     # side is EMPTY (a deletion vs a modification/insertion) — the
     # empty-side fragment rule (see orchestrator
@@ -954,12 +939,6 @@ class FutureConfig(BaseModel):
     # policy, or other deterministic failures. All unknown/degraded states fail
     # closed to human_review.
     jury_mode: Literal["off", "shadow", "enforce"] = "off"
-    # BACK-COMPAT: the original opt-in flag. Setting ``enable_shadow_jury = true``
-    # is honored as ``jury_mode = "shadow"`` (read via the
-    # :func:`effective_jury_mode` helper). New deployments should set
-    # ``jury_mode`` directly. Kept so an existing toml/env still enables the
-    # shadow run without modification.
-    enable_shadow_jury: bool = False
     # Autonomous jury-driven code reopen. The shadow corpus contains no positive
     # ``code_reopen`` example, so this is separately gated: default OFF. When OFF
     # and a reopen request would otherwise be satisfied (full evidence quorum),
@@ -998,6 +977,50 @@ class FutureConfig(BaseModel):
     jury_prompt_version: str = "jury-prompt-v1"
 
 
+# --- [mechanisms] / [experimental] partition -------------------------------
+# FutureConfig is WRITTEN as two toml sections: [mechanisms] (stable wired
+# toggles + their tuning) and [experimental] (dormant/planned seams and the
+# jury canary knobs). One python model backs both; the loader folds both
+# tables onto the `future` attribute. This partition is the single source
+# of truth for the loader diagnostics, the v1 migration, and
+# `capybase config explain`.
+FUTURE_EXPERIMENTAL_FIELDS = frozenset({
+    "enable_convergence_seed",
+    "enable_def_site_race",
+    "enable_move_edit_transposition",
+    "enable_best_of_n",
+    "jury_mode",
+    "enable_jury_code_reopen",
+    "jury_comment_cegis_budget",
+    "jury_eligible_languages",
+    "jury_human_review_blocks",
+    "jury_config_version",
+    "jury_prompt_version",
+})
+FUTURE_MECHANISMS_FIELDS = (
+    frozenset(FutureConfig.model_fields) - FUTURE_EXPERIMENTAL_FIELDS
+)
+
+# The config schema version this capybase loads and writes. Version 1 is the
+# pre-features layout ([future] holding everything; activation gates scattered
+# across [memory]/[structural]/[validation]); version 2 introduced
+# schema_version itself, [features], and the mechanisms/experimental split.
+SCHEMA_VERSION = 2
+
+# v1-only keys, mapped to their v2 replacement (display form). In a v1 file
+# they are MIGRATED; in a v2 file they are IGNORED with this hint.
+DEPRECATED_V1_KEYS = {
+    "future.enable_structural_resolver": "features.structural_resolution",
+    "future.enable_combination_search": "features.combination_search",
+    "future.enable_rag": "features.rag",
+    "future.enable_self_consistency": "model.enable_self_consistency",
+    "future.enable_shadow_jury": 'future.jury_mode = "shadow"',
+    "memory.enabled": "features.rag",
+    "structural.enabled": "features.structural_context",
+    "validation.enable_verifier_model": "features.llm_critic",
+}
+
+
 class StructuralConfig(BaseModel):
     """Tree-sitter AST parsing for structural context + preservation checks.
 
@@ -1008,9 +1031,12 @@ class StructuralConfig(BaseModel):
     window. The abstract parser is imported lazily; when the language is
     unrecognized or parsing fails, capybase silently degrades to the
     line-window behavior.
+
+    ACTIVATION moved to [features] structural_context (FeaturesConfig) —
+    the flag that used to live here. This section carries only the
+    context-shaping knobs.
     """
 
-    enabled: bool = False
     languages: list[str] = Field(default_factory=lambda: ["python", "rust"])
     max_enclosing_node_lines: int = 60
     cross_file_slice: bool = True
@@ -1065,15 +1091,12 @@ class MemoryConfig(BaseModel):
     triple. The memory layer distills accepted resolutions into a labeled
     corpus of ``HistoricalExample`` records, retrieves the most similar past
     merges for a new conflict, and injects them into the prompt as dynamic
-    few-shot demonstrations. Disabled by default; activates
-    ``future.enable_rag``.
+    few-shot demonstrations.
+
+    ACTIVATION moved to [features] rag (FeaturesConfig) — this section
+    carries only the store/retriever knobs.
     """
 
-    # Sprint-21 golden-path: default ON (causally validated by the
-    # paired A/B — 2/4 hard cases improved, zero regressions). The
-    # store seeds from the golden-path corpus; an empty store simply
-    # means no retrieval, which is the prior behavior.
-    enabled: bool = True
     store_path: str = ".rebase-agent/memory/experiences.jsonl"
     # "lexical" (dependency-free BM25, the default) or "embedding" (semantic
     # retrieval via the /v1/embeddings endpoint, The embedding
@@ -1195,7 +1218,37 @@ class RoutingConfig(BaseModel):
     min_balance_for_sbcr_accept: float = 0.15
 
 
+class FeaturesConfig(BaseModel):
+    """Section-level feature switches — ONE controlling key per feature.
+
+    These are the only activation gates; the per-mechanism detail toggles
+    live in [mechanisms]/[experimental] (FutureConfig) and the tuning knobs
+    in their domain sections ([structural], [memory]). Schema version 2.
+    """
+
+    # Deterministic structural pre-resolution (provably-safe model-free
+    # rules before the LLM). Default ON — safe by construction: every
+    # resolution still runs the full validation pipeline.
+    structural_resolution: bool = True
+    # Search-based combination resolution (SBCR) after the structural
+    # resolver declines. Default ON.
+    combination_search: bool = True
+    # Structural AST context injection: populate ConflictUnit.structural_
+    # metadata (enclosing node, signatures) so context/validators see
+    # logical blocks. Default OFF (opt-in; parser availability permitting).
+    structural_context: bool = False
+    # RAG experience replay (few-shot retrieval from past accepted merges).
+    # Default ON (sprint-21 golden path); retrieval is inert until the
+    # store holds min_examples_for_retrieval examples. Single gate: the old
+    # memory.enabled AND future.enable_rag conjunction is gone.
+    rag: bool = True
+    # Verifier-model critic: the LLM judge for silently-dropped intent.
+    # Default ON (opt-out) — the only check for that failure mode.
+    llm_critic: bool = True
+
+
 class Config(BaseModel):
+    features: FeaturesConfig = Field(default_factory=FeaturesConfig)
     model: ModelConfig = Field(default_factory=ModelConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     tests: TestsConfig = Field(default_factory=TestsConfig)
@@ -1207,6 +1260,23 @@ class Config(BaseModel):
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     future: FutureConfig = Field(default_factory=FutureConfig)
     source_path: str | None = None
+
+    # Loader diagnostics (NOT a toml key; excluded from model_dump): applied
+    # migrations, ignored/deprecated keys, unknown-key suggestions. Populated
+    # only by Config.load from files; programmatic Config() stays silent.
+    _load_diagnostics: list[str] = PrivateAttr(default_factory=list)
+    # The schema version the loader found (after migration) — for
+    # `capybase config explain`.
+    _loaded_schema_version: int = PrivateAttr(default=2)
+
+    @property
+    def load_diagnostics(self) -> list[str]:
+        """Diagnostics from the last Config.load (migrations, ignored keys)."""
+        return self._load_diagnostics
+
+    @property
+    def loaded_schema_version(self) -> int:
+        return self._loaded_schema_version
 
     @classmethod
     def load(
@@ -1259,16 +1329,22 @@ class Config(BaseModel):
             # standalone (no merge): the merge is only for repo-local overrides.
             repo_local = _repo_local_config_path(path)
             dir_toml = cdir / "capybase.toml"
+            diags: list[str] = []
             if repo_local is not None and dir_toml.is_file() and resolved != dir_toml:
                 with open(dir_toml, "rb") as fh:
                     base_data = tomllib.load(fh)
                 with open(resolved, "rb") as fh:
                     override_data = tomllib.load(fh)
-                cfg = cls.model_validate(_deep_merge_toml(base_data, override_data))
+                merged = _deep_merge_toml(base_data, override_data)
+                data, version = _normalize_config_dict(merged, diags)
+                cfg = cls.model_validate(data)
             else:
                 with open(resolved, "rb") as fh:
                     data = tomllib.load(fh)
+                data, version = _normalize_config_dict(data, diags)
                 cfg = cls.model_validate(data)
+            cfg._load_diagnostics.extend(diags)
+            cfg._loaded_schema_version = version
             cfg.source_path = str(resolved)
         # Rewrite the calibration artifacts to the config dir. A user repo has
         # no business carrying calibration data — it's the model endpoint's
@@ -1277,6 +1353,166 @@ class Config(BaseModel):
         # deliberate override and is left alone.
         _relocate_calibration_paths(cfg, cdir)
         return cfg
+
+
+def _normalize_config_dict(data: dict, diags: list[str]) -> tuple[dict, int]:
+    """Normalize a raw parsed-toml dict to the current schema (in place).
+
+    Returns ``(data, version)``. Version 1 files (``schema_version`` absent)
+    get the v1->v2 moves applied and every applied rename recorded in
+    ``diags``; version 2 files keep v1-only keys OUT (reported as
+    deprecated+ignored). ``[future]``/``[mechanisms]``/``[experimental]``
+    tables are folded onto the single ``future`` attribute; unknown sections
+    and keys are reported with a nearest-match hint.
+    """
+    import difflib
+
+    declared = data.pop("schema_version", None)
+    if declared is None:
+        version = 1
+        diags.append(
+            "schema_version absent — treated as 1 and migrated to "
+            f"{SCHEMA_VERSION} (add schema_version = {SCHEMA_VERSION} to "
+            "silence this notice)")
+    else:
+        version = int(declared)
+        if version > SCHEMA_VERSION:
+            diags.append(
+                f"schema_version {version} is newer than this capybase "
+                f"understands ({SCHEMA_VERSION}) — loading as {SCHEMA_VERSION}")
+            version = SCHEMA_VERSION
+
+    future_table = dict(data.pop("future", None) or {})
+    mechanisms = dict(data.pop("mechanisms", None) or {})
+    experimental = dict(data.pop("experimental", None) or {})
+    features = dict(data.get("features", None) or {})
+    model_table = dict(data.get("model", None) or {})
+    memory_table = dict(data.get("memory", None) or {})
+    structural_table = dict(data.get("structural", None) or {})
+    validation_table = dict(data.get("validation", None) or {})
+
+    if version < 2:
+        # v1 -> v2 moves. Only keys actually present move; each move is
+        # recorded so the run shows what the migration did.
+        def _moved(old: str, new: str, value) -> None:
+            diags.append(f"migrated v1 key {old} -> {new} = {value!r}")
+
+        if "enable_structural_resolver" in future_table:
+            value = future_table.pop("enable_structural_resolver")
+            features.setdefault("structural_resolution", value)
+            _moved("future.enable_structural_resolver",
+                   "features.structural_resolution", value)
+        if "enable_combination_search" in future_table:
+            value = future_table.pop("enable_combination_search")
+            features.setdefault("combination_search", value)
+            _moved("future.enable_combination_search",
+                   "features.combination_search", value)
+        if "enable_self_consistency" in future_table:
+            # v1 semantics: model OR future (the orchestrator OR'd the twins).
+            legacy = bool(future_table.pop("enable_self_consistency"))
+            model_table["enable_self_consistency"] = (
+                bool(model_table.get("enable_self_consistency", False)) or legacy)
+            _moved("future.enable_self_consistency",
+                   "model.enable_self_consistency",
+                   model_table["enable_self_consistency"])
+        if "enable_shadow_jury" in future_table:
+            legacy = bool(future_table.pop("enable_shadow_jury"))
+            if legacy and future_table.get("jury_mode", "off") == "off":
+                future_table["jury_mode"] = "shadow"
+                diags.append(
+                    'migrated v1 key future.enable_shadow_jury -> '
+                    'future.jury_mode = "shadow"')
+            elif legacy:
+                diags.append(
+                    "v1 key future.enable_shadow_jury=true ignored — explicit "
+                    "jury_mode wins")
+        rag_conjuncts: list[bool] = []
+        if "enable_rag" in future_table:
+            rag_conjuncts.append(bool(future_table.pop("enable_rag")))
+        if "enabled" in memory_table:
+            rag_conjuncts.append(bool(memory_table.pop("enabled")))
+        if rag_conjuncts:
+            # v1 semantics: rag required BOTH flags.
+            value = all(rag_conjuncts)
+            features.setdefault("rag", value)
+            diags.append(
+                "migrated v1 keys future.enable_rag AND memory.enabled -> "
+                f"features.rag = {value!r}")
+        if "enabled" in structural_table:
+            value = structural_table.pop("enabled")
+            features.setdefault("structural_context", value)
+            _moved("structural.enabled", "features.structural_context", value)
+        if "enable_verifier_model" in validation_table:
+            value = validation_table.pop("enable_verifier_model")
+            features.setdefault("llm_critic", value)
+            _moved("validation.enable_verifier_model",
+                   "features.llm_critic", value)
+
+        data["model"] = model_table
+        data["memory"] = memory_table
+        data["structural"] = structural_table
+        data["validation"] = validation_table
+    else:
+        # v2 file: v1-only keys are honored NOT at all.
+        for table_name, table in (("future", future_table),
+                                  ("memory", memory_table),
+                                  ("structural", structural_table),
+                                  ("validation", validation_table)):
+            for key in list(table):
+                dep = DEPRECATED_V1_KEYS.get(f"{table_name}.{key}")
+                if dep is not None:
+                    table.pop(key)
+                    diags.append(
+                        f"deprecated v1 key {table_name}.{key} ignored — "
+                        f"use {dep}")
+
+    if future_table and version >= 2:
+        diags.append(
+            "section [future] is deprecated in schema_version 2 — use "
+            "[mechanisms] / [experimental]; its keys were applied")
+    combined_future = dict(future_table)
+    for key, value in mechanisms.items():
+        if version >= 2 and key in FUTURE_EXPERIMENTAL_FIELDS:
+            diags.append(
+                f"[mechanisms].{key} belongs in [experimental] — applied "
+                "anyway")
+        combined_future[key] = value
+    for key, value in experimental.items():
+        if version >= 2 and key not in FUTURE_EXPERIMENTAL_FIELDS:
+            diags.append(
+                f"[experimental].{key} belongs in [mechanisms] — applied "
+                "anyway")
+        combined_future[key] = value
+    if combined_future:
+        data["future"] = combined_future
+    if features:
+        data["features"] = features
+
+    # Unknown sections/keys: pydantic would silently drop them — surface that.
+    known_sections = set(Config.model_fields) - {"source_path"}
+    known_sections |= {"mechanisms", "experimental"}
+    for section_name, table in list(data.items()):
+        if section_name not in known_sections:
+            hint = difflib.get_close_matches(
+                section_name, sorted(known_sections), n=1)
+            suffix = f" (did you mean '{hint[0]}'?)" if hint else ""
+            diags.append(f"ignored unknown section [{section_name}]{suffix}")
+            continue
+        if not isinstance(table, dict):
+            continue
+        if section_name in ("mechanisms", "experimental"):
+            valid = frozenset(FutureConfig.model_fields)
+        else:
+            valid = frozenset(
+                type(getattr(Config(), section_name)).model_fields)
+        for key in table:
+            if key in valid:
+                continue
+            hint = difflib.get_close_matches(key, sorted(valid), n=1)
+            suffix = f" (did you mean '{hint[0]}'?)" if hint else ""
+            diags.append(
+                f"ignored unknown key {section_name}.{key}{suffix}")
+    return data, version
 
 
 def _resolve_config_path(
@@ -1359,19 +1595,14 @@ JURY_MODES = frozenset({"off", "shadow", "enforce"})
 
 
 def effective_jury_mode(future: "FutureConfig") -> str:
-    """Resolve the jury mode, honoring the back-compat ``enable_shadow_jury`` flag.
+    """The jury operating mode (kept as an accessor for orchestrator/replay).
 
-    ``jury_mode`` is authoritative when set to anything but the default ``off``.
-    When ``jury_mode == "off"`` AND the legacy ``enable_shadow_jury`` is True,
-    treat it as ``"shadow"`` (back-compat for existing toml/env that opt into
-    the shadow run via the boolean). Otherwise return ``jury_mode`` as-is.
-
-    This is the single accessor the orchestrator + replay harness use, so the
-    back-compat migration lives in one place.
+    The legacy ``enable_shadow_jury`` back-compat flag was folded away: the
+    config migration maps ``enable_shadow_jury = true`` to
+    ``jury_mode = "shadow"`` at load time, so ``jury_mode`` is the only
+    knob.
     """
     mode = getattr(future, "jury_mode", "off")
-    if mode == "off" and getattr(future, "enable_shadow_jury", False):
-        return "shadow"
     return mode if mode in JURY_MODES else "off"
 
 
