@@ -71,3 +71,54 @@ def test_verdict_chain_gate_unavailable_on_degraded_probe():
         matches_oracle=0.76, toolchain_dead=False, oracle_builds=False,
     )
     assert mod._verdict_chain(r2) == "ESCALATE"
+
+
+def _mini_clone(tmp_path: Path, with_member_in_replayed: bool):
+    import subprocess
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    f = clone / "src.hpp"
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(clone)] + list(a),
+                              capture_output=True, text=True)
+    # current edits src.hpp; replayed adds a SEPARATE file (carrying the
+    # drifted member when licensed) — the merge then auto-resolves and
+    # produces a real merge commit with two parents.
+    git("init", "-q", "-b", "main")
+    f.write_text("struct Api { int common(); }\n")
+    git("add", "-A"); git("commit", "-q", "-m", "base")
+    git("checkout", "-q", "-b", "current")
+    f.write_text("struct Api { int current_only(); }\n")
+    git("add", "-A"); git("commit", "-q", "-m", "current")
+    git("checkout", "-q", "main"); git("checkout", "-q", "-b", "replayed")
+    g2 = clone / "drifted.hpp"
+    g2.write_text("int drifted(int);\n" if with_member_in_replayed
+                  else "int unrelated(void);\n")
+    git("add", "-A"); git("commit", "-q", "-m", "replayed")
+    git("checkout", "-q", "replayed")
+    git("merge", "--no-ff", "-m", "merge", "current")
+    sha = subprocess.run(["git", "-C", str(clone), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    return clone, sha
+
+
+def test_api_drift_probe_detects_member_only_in_replayed(tmp_path):
+    """S28-110 built: a member present only in the replayed tree is drift —
+    the validated 2-grep probe returns the evidence string."""
+    import sys as _sys
+    clone, sha = _mini_clone(tmp_path, with_member_in_replayed=True)
+    _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    spec = importlib.util.spec_from_file_location(
+        "ler_drift",
+        Path(__file__).resolve().parent.parent / "scripts" / "live_eval_realworld.py")
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules["ler_drift"] = mod
+    spec.loader.exec_module(mod)
+    out = mod._api_drift_probe(
+        clone=clone, merge_sha=sha, path="src.hpp",
+        expected_current="struct Api { int current_only(); }\n",
+        expected_replayed="struct Api { int replayed_only(); }\n",
+        escalated_reason="error: 'drifted' was not declared in this scope")
+    assert out is not None and "drifted" in out, (
+        "the probe must detect the member present only in the replayed tree")

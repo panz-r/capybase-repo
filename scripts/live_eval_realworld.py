@@ -548,6 +548,12 @@ class CaseResult:
     # verdict => GATE_UNAVAILABLE: the case measures the sandbox, not the
     # resolver. Probed only for cases heading to a non-clean verdict.
     oracle_builds: bool | None = None
+    # S28-110: cross-revision API drift (attribution-only). True when an
+    # escalated merge references members absent from the CURRENT tree but
+    # present in the REPLAYED tree — the conflict is under-scoped and no
+    # in-case mechanism can fix it. None = not probed / no drift.
+    api_drift: bool | None = None
+    api_drift_evidence: str | None = None
     # Sprint-25 decision 1: the project's own tests run on the resolver's
     # output tree (post-hoc, divergent band only). True → the WORKING
     # verdict regardless of preservation (tests pass = un-gameable merge
@@ -1642,6 +1648,69 @@ def _mark_toolchain_dead(res: "CaseResult", probe: dict, t0: float) -> "CaseResu
     return res
 
 
+def _api_drift_probe(
+    clone: Path, merge_sha: str, path: str,
+    expected_current: str, expected_replayed: str,
+    escalated_reason: str,
+) -> str | None:
+    """S28-110: is the escalation cross-revision API drift?
+
+    S28-95's validated 2-grep probe: for member references in the
+    escalation reason (the build errors name the undeclared identifiers /
+    missing members), count tree-wide occurrences in each merge parent.
+    A member present in the REPLAYED tree and absent from the CURRENT
+    tree is drift — the fragment called the API as the replayed side's
+    headers define it, and the gate compiles against current's. Returns
+    the evidence string ("member X: current 0 / replayed N hits") or
+    None (no drift shape, or the greps are inconclusive).
+    """
+    import re as _re
+    try:
+        parents = subprocess.run(
+            ["git", "-C", str(clone), "rev-parse",
+             f"{merge_sha}^1", f"{merge_sha}^2"],
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+    except Exception:
+        return None
+    if len(parents) != 2:
+        return None
+    # identify which parent carries the current side's version of the file
+    try:
+        cur_blob = subprocess.run(
+            ["git", "-C", str(clone), "show", f"{parents[0]}:{path}"],
+            capture_output=True, text=True, check=True).stdout
+        cur_parent, rep_parent = parents[0], parents[1]
+        if cur_blob != expected_current:
+            cur_parent, rep_parent = parents[1], parents[0]
+    except Exception:
+        return None
+
+    members: list[str] = []
+    for m in _re.finditer(
+            r"[‘\']([A-Za-z_]\w*)[’\'] was not declared", escalated_reason):
+        if m.group(1) not in members:
+            members.append(m.group(1))
+    if not members:
+        return None
+    for member in members[:2]:
+        counts = []
+        for parent in (cur_parent, rep_parent):
+            r = subprocess.run(
+                ["git", "-C", str(clone), "grep", member, parent],
+                capture_output=True, text=True)
+            counts.append(len(r.stdout.splitlines()))
+        if counts[0] == 0 and counts[1] > 0:
+            return (f"member {member!r}: 0 occurrences in the current tree, "
+                    f"{counts[1]} in the replayed tree — cross-revision API "
+                    f"drift; the correct merge must carry the API-defining "
+                    f"changes")
+        if counts[1] == 0 and counts[0] > 0:
+            return (f"member {member!r}: present only in the current tree "
+                    f"({counts[0]} hits) — reverse drift")
+    return None
+
+
 def _oracle_builds(repo: Path, case: Case, crate_source: Path | None) -> bool | None:
     """Does the ORACLE (expected_resolved) pass the same gate the merge faced?
 
@@ -2040,6 +2109,31 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
                 oracle_builds_result = _oracle_builds(repo, case, crate_source)
             except Exception:  # noqa: BLE001 — classification is best-effort
                 oracle_builds_result = None
+        # S28-110: the API-drift probe (attribution-only, zero model cost).
+        # When the merge escalated with undeclared-member failures, check
+        # whether the named members exist in the REPLAYED tree but not the
+        # CURRENT tree — cross-revision API drift (S28-95's validated
+        # 2-grep probe): the conflict is under-scoped, the correct merge
+        # must carry the API-defining files, and no in-case mechanism can
+        # fix it. Stamps api_drift + evidence onto the row so the next
+        # failure analysis reads the class directly.
+        api_drift_result: bool | None = None
+        api_drift_evidence: str | None = None
+        if (case.language in ("c", "cpp", "c++")
+                and res.escalated and case.merge_sha and content
+                and crate_source is not None):
+            try:
+                drift = _api_drift_probe(
+                    clone=crate_source, merge_sha=case.merge_sha,
+                    path=case.path, expected_current=case.current,
+                    expected_replayed=case.replayed,
+                    escalated_reason=res.reason or "",
+                )
+                if drift is not None:
+                    api_drift_result = True
+                    api_drift_evidence = drift
+            except Exception:  # noqa: BLE001 — attribution is best-effort
+                pass
         # Sprint-25 decisions 1+3: the output-tests probe. When the merge is
         # marker-free, non-escalated, and BELOW the PASS bar (the divergent
         # band — clear PASSes never pay the test cost), run the dataset's
@@ -2087,6 +2181,8 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
             shutil.rmtree(td, ignore_errors=True)
     res.elapsed = time.time() - t0
     res.oracle_builds = oracle_builds_result
+    res.api_drift = api_drift_result
+    res.api_drift_evidence = api_drift_evidence
     res.output_tests = output_tests_result
     res.marker_free = not _contains_markers(content) if content else False
     # Non-code files (markdown, lockfiles, prose): marker-free is the only
