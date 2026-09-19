@@ -1660,8 +1660,31 @@ def _oracle_builds(repo: Path, case: Case, crate_source: Path | None) -> bool | 
         target.write_text(case.expected_resolved)
         if case.language in ("c", "cpp", "c++"):
             _full = _c_builds(repo, case)
-            if _full is not True:
-                return _full  # False stays False; None stays undecidable
+            if _full is False:
+                return False
+            if _full is None:
+                # S28-105 (the D10 extension): the tree gate is DEGRADED
+                # ("true" — no prepare/build entry, S28-78's honest
+                # degrade), so the resolver's whole-file verdicts came from
+                # the STANDALONE SYNTAX FALLBACK. Probe the oracle through
+                # the SAME check, mirroring the verifier's own invocation
+                # (language-appropriate compiler/std; repo + file-dir
+                # includes): oracle-fails-too => GATE_UNAVAILABLE — the
+                # case measures the sandbox, not the resolver (the php
+                # arginfo band: bare generated headers that cannot parse
+                # without their tree's include context; every resolution
+                # including the human one fails identically).
+                from capybase.verification import _compile_ccs
+                _cpp = case.language in ("cpp", "c++")
+                _dir = (repo / case.path).parent
+                _ok, _ = _compile_ccs(
+                    case.expected_resolved,
+                    cc_path="g++" if _cpp else "gcc",
+                    std="c++17" if _cpp else "c11",
+                    suffix=".cpp" if _cpp else ".c",
+                    include_paths=[str(repo), str(_dir)],
+                )
+                return bool(_ok)
             # D10 (s27): the resolver's IN-SESSION gate is the TARGETED
             # per-file build for sqlite/redis, not the full tree build.
             # The oracle passing the full gate while failing the targeted
