@@ -678,12 +678,14 @@ def load_cases(
         # before the size guard so a selected case is never silently dropped.
         if case_ids and c.id not in case_ids:
             continue
-        # Skip pathologically huge conflicts (>48K chars ≈ blow context window).
-        # Entity splitting is always-on and adaptively breaks oversized multi-
-        # entity marker blocks into per-entity sub-units whose prompts fit the
-        # window, so for those cases the guard is a false proxy — lift it via
-        # CAPYBASE_SKIP_SIZE_GUARD=1. (Cases it can't help — a single oversized
-        # entity, or an un-splittable language — still need the guard.)
+        # Skip pathologically huge conflicts (>1M chars). S28-99 re-baseline,
+        # measured on the s28 full corpus (guard bypassed): the 48K-1M range
+        # runs at corpus-parity (48-128K: 90.6% PASS, 128-256K: 88.7%,
+        # 256-512K: 86.2%, 512K-1M: 80.0%) — context trimming + the in-window
+        # essential-token guard handle those. The collapse is >1M (25% PASS:
+        # both harness MemoryErrors and the in-window OVERSIZED class), which
+        # is this guard's proper territory. CAPYBASE_SKIP_SIZE_GUARD=1 still
+        # lifts it entirely for exploratory runs.
         # Lockfile exemption (sprint-20 S20.5): a Cargo.lock case never builds
         # an LLM prompt — the lockfile takeover resolves the whole file
         # deterministically pre-cascade — so the window-size rationale doesn't
@@ -694,7 +696,7 @@ def load_cases(
                         in _LOCK_NAMES)
         _skip_guard = os.environ.get("CAPYBASE_SKIP_SIZE_GUARD", "") == "1"
         if (not _skip_guard and not _is_lockfile
-                and len(c.marker_original) > 48 * 1024):
+                and len(c.marker_original) > 1024 * 1024):
             if dropped_ids is not None:
                 dropped_ids.append(c.id)
             continue
