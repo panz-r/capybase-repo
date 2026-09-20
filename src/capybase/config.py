@@ -102,15 +102,17 @@ class ModelConfig(BaseModel):
     # Draw samples concurrently in a thread pool (each is a blocking HTTP call).
     # Safe because the LLM adapter is stateless per-call.
     parallel_samples: bool = True
-    # Parameter-diversity portfolio: when sampling N>1, split the
-    # samples across the high sampling_temperature (exploratory) and the low
-    # base temperature (conservative). Raises the odds that at least one sample
-    # is both valid and distinct on a 3B model. Bypasses the server-side batched
-    # n path (which forces one temperature) to use N separate requests. Off by
-    # default; for N=1 it is a no-op.
+    # Parameter-diversity schedule (S28-129 re-scope): the iteration
+    # temperature alternates base (conservative, first retry) and the high
+    # sampling_temperature (exploratory, later retries) instead of drawing a
+    # uniform batch. A truncated retry always overrides the schedule with the
+    # engine's truncation-escape bump. Never touches the consensus batch
+    # (enable_self_consistency draws its full set in one go, high-temp
+    # weighted). Off by default; for a single iteration it is a no-op.
     diverse_sampling: bool = False
-    # Prompt-variant sampling (Code Roulette): when on AND samples > 1
-    # AND this is a fresh resolve (no CEGIS retry/repair), draw the samples across
+    # Prompt-variant sampling (Code Roulette): consensus-batch only — when on
+    # AND samples > 1 AND this is a fresh resolve (no CEGIS retry/repair), draw
+    # the samples across
     # semantically-equivalent resolve-prompt phrasings instead of identical prompts
     # at varied temperatures. A candidate stable across prompt variants is a
     # stronger correctness signal, and the existing consensus + rank-order

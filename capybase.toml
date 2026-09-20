@@ -48,8 +48,10 @@ samples = 1
 # repaired retry more often needs the extra attempt. 0 = disabled (complex
 # units use `samples`). Sets the ceiling only — never an upfront spend.
 samples_complex = 0
-# Agreement fraction below which a best-of-N merge is flagged low-confidence
-# (only consulted when enable_self_consistency is on — it is OFF by default).
+# Agreement fraction below which a self-consistency merge is flagged
+# low-confidence (only consulted when enable_self_consistency is on — it is
+# OFF by default; the consensus batch is the one place all N candidates are
+# drawn before validation).
 consensus_min_agreement = 0.4
 # Two-pass prompting: extract intents first, then generate code conditioned on
 # them. Runs at any sample count — intent extraction helps the single

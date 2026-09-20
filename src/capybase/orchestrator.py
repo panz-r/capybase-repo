@@ -15494,6 +15494,11 @@ class Orchestrator:
         # resolver and source portfolio still run (pre-LLM).
         _unit_path = unit.path or ""
         _is_header = _unit_path.endswith((".h", ".hpp", ".hh", ".hxx", ".H"))
+        # Header cap (blind CEGIS retries): acts as the FLOOR of the
+        # iteration budget. A raised samples/samples_complex ceiling still
+        # lifts a header's budget above it — a calibrated ceiling is an
+        # explicit opt-in, but headers never inherit MORE than the ceiling
+        # (see _resolution_iteration_cap).
         _header_max_retries = 1 if _is_header else self.config.policy.max_retries_per_unit
         # Unit-count-aware retry budget: when a file has many units, each unit
         # gets fewer retries so the total model-call count stays within the
