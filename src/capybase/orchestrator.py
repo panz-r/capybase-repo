@@ -15984,10 +15984,11 @@ class Orchestrator:
                 )
             elif failures is None and self.config.model.two_pass:
                 # Two-pass prompting: extract intents once, then generate the
-                # code candidate conditioned on them. ONE draw per iteration —
-                # the outer loop re-enters with validation feedback up to the
-                # iteration ceiling (n_cap); the intent map is reused across
-                # iterations at no extra intent cost.
+                # code candidate conditioned on them. ONE draw per iteration.
+                # A FAILED two-pass iteration does NOT redraw from the intent
+                # map: the next iteration carries the validation feedback as
+                # a CEGIS retry (observed failure beats predicted intent) up
+                # to the iteration ceiling (n_cap).
                 candidates = self.resolution_engine.propose_two_pass(
                     unit, context,
                     n_samples=1,
@@ -16013,7 +16014,20 @@ class Orchestrator:
                 # portfolio schedules ACROSS iterations (exploratory high temp
                 # on later draws) instead of inside an upfront parallel burst.
                 _iter_temp = None
-                if (self.config.model.diverse_sampling and retry_count > 0):
+                _prev_truncated = (
+                    prev_candidate is not None
+                    and (
+                        getattr(prev_candidate, "finish_reason", None) == "length"
+                        or (getattr(prev_candidate, "failure_kind", "") or "")
+                        == "truncated"
+                    )
+                )
+                if (self.config.model.diverse_sampling and retry_count > 0
+                        and not _prev_truncated):
+                    # Diverse schedule across iterations — but NEVER on a
+                    # truncated retry: the engine's truncation-escape bump
+                    # (+0.35) only applies when no override is given, and
+                    # escaping the truncation loop outranks the schedule.
                     _sched = [self.config.model.temperature,
                               self.config.model.sampling_temperature]
                     _iter_temp = _sched[(retry_count - 1) % len(_sched)]

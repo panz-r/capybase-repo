@@ -89,6 +89,11 @@ class ModelConfig(BaseModel):
     # Only engages when two_pass AND more than one candidate is drawn (plan
     # diversity needs several code samples). Defaults off; falls back to the
     # single-intent path if the plan-search call fails or yields <2 plans.
+    # NOTE (S28-129): the standard resolution path now draws ONE candidate
+    # per validated iteration, so plan_search currently engages only via the
+    # consensus batch (self-consistency + samples>1) and calibration probes.
+    # A lazy per-plan iteration queue (plans drawn once, code per plan
+    # validated across iterations) is a recorded follow-up.
     plan_search: bool = False
     # Raised temperature for the diverse multi-sampling pass (distinct from
     # the low `temperature` used for focused retries). Higher temp → more
