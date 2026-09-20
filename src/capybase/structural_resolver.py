@@ -3998,7 +3998,12 @@ def _prepare_entity_merge(unit: ConflictUnit) -> _EntityMergeCtx | None:
     meta = unit.structural_metadata
     enc_text = meta.get("enclosing_node_text")
     if not enc_text:
-        return None  # no enclosing container known → can't enumerate
+        # S28-135 (scoped gate relaxation): metadata-free path — the CURRENT
+        # side's own text provides the container framing (it is the region's
+        # target-state evolution, and the entity enumeration below is the
+        # real gate: sides that fail to parse into entities decline). The
+        # metadata, when present, remains authoritative.
+        enc_text = unit.current.text or ""
 
     base_ents = structural.enumerate_entities(unit.base.text or "", lang)
     cur_ents = structural.enumerate_entities(unit.current.text or "", lang)

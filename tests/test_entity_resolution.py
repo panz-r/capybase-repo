@@ -229,16 +229,18 @@ def test_one_side_adds_other_modifies_same_entity_declines():
 
 
 @needs_ts
-def test_declines_without_enclosing_metadata():
-    """No enclosing_node_text in metadata → can't enumerate → decline."""
+def test_entity_rules_engage_without_enclosing_metadata():
+    """S28-135: enclosing_node_text is OPTIONAL — the side texts' own parse
+    gates the entity family. The old contract (decline without metadata)
+    made the entity rules inert under the default config; now both sides'
+    DISTINCT additions to the same class merge deterministically — both
+    additions preserved, never a silent one-sided pick."""
     unit = _unit("class C:\n    pass", "class C:\n    def a(self): pass", "class C:\n    def b(self): pass")
     unit.structural_metadata.pop("enclosing_node_text")
     result = resolve_structurally(unit)
-    # partial_disjoint_merge may resolve the deterministic tails; the
-    # contested lines must be EXPLICITLY deferred (deferred_core) or the
-    # rule declines — never a silent one-sided pick. The orchestrator
-    # rejects the candidate when a deferred core can't be resolved.
-    assert (not result.resolved) or (result.deferred_core is not None)
+    assert result.resolved, "the both-add-different-methods shape must resolve"
+    assert result.rule == "entity_disjoint"
+    assert "def a" in result.text and "def b" in result.text
 
 
 @needs_ts

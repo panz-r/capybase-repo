@@ -305,3 +305,80 @@ def test_refactoring_aware_resolution_is_valid_python():
     result = _try_refactoring_aware_merge(_overlap_unit(base, cur, rep))
     assert result is not None
     ast.parse(result)
+
+
+# ---------------------------------------------------------------------------
+# S28-135: the metadata-free path — the entity family engages WITHOUT
+# enclosing_node_text (the side texts' own parse is the gate; the container
+# framing comes from the current side)
+# ---------------------------------------------------------------------------
+
+
+def _overlap_unit_nometa(base, cur, rep, *, lang="python"):
+    """Same overlap shape as _overlap_unit, but with NO enclosing_node_text —
+    the relaxed `_prepare_entity_merge` gate (S28-135) must still resolve it
+    (framing derived from the current side's text)."""
+    u = _unit(base, cur, rep, lang=lang)
+    u.structural_metadata.pop("enclosing_node_text", None)
+    return u
+
+
+def test_nometa_rename_plus_body_modify_resolves():
+    base = "class C:\n    def foo():\n        x = 1\n        return x"
+    cur = "class C:\n    def bar():\n        x = 1\n        return x"
+    rep = "class C:\n    def foo():\n        x = 2\n        return x"
+    result = _try_refactoring_aware_merge(_overlap_unit_nometa(base, cur, rep))
+    assert result is not None
+    assert "def bar():" in result
+    assert "x = 2" in result
+    assert "return x" in result
+
+
+def test_nometa_declines_on_double_body_modify():
+    base = "class C:\n    def foo():\n        x = 1\n        return x"
+    cur = "class C:\n    def foo():\n        x = 9\n        return x"
+    rep = "class C:\n    def foo():\n        x = 2\n        return x"
+    assert _try_refactoring_aware_merge(
+        _overlap_unit_nometa(base, cur, rep)) is None
+
+
+def test_nometa_declines_on_rename_plus_signature_change():
+    base = "class C:\n    def foo():\n        x = 1\n        return x"
+    cur = "class C:\n    def bar():\n        x = 1\n        return x"        # rename
+    rep = "class C:\n    def foo(a, b):\n        x = 1\n        return x"  # sig change
+    assert _try_refactoring_aware_merge(
+        _overlap_unit_nometa(base, cur, rep)) is None
+
+
+def test_nometa_declines_on_conflicting_renames():
+    base = "class C:\n    def foo():\n        x = 1\n        return x"
+    cur = "class C:\n    def bar():\n        x = 1\n        return x"
+    rep = "class C:\n    def baz():\n        x = 1\n        return x"
+    assert _try_refactoring_aware_merge(
+        _overlap_unit_nometa(base, cur, rep)) is None
+
+
+def test_nometa_rename_resolution_is_valid_python():
+    import ast
+
+    base = "class C:\n    def foo():\n        x = 1\n        return x"
+    cur = "class C:\n    def bar():\n        x = 1\n        return x"
+    rep = "class C:\n    def foo():\n        x = 2\n        return x"
+    result = _try_refactoring_aware_merge(_overlap_unit_nometa(base, cur, rep))
+    assert result is not None
+    ast.parse(result)
+
+
+def test_nometa_degenerate_side_stays_inert():
+    """Gate integrity: the grammar-free parser is lenient, so a side rarely
+    fails to parse outright — but a DEGENERATE side (empty region) yields no
+    entities to merge and the family stays inert end-to-end."""
+    from capybase.structural_resolver import (
+        _prepare_entity_merge, _try_refactoring_aware_merge,
+    )
+    base = "class C:\n    def foo():\n        x = 1\n        return x"
+    u = _overlap_unit_nometa(base, "", "")  # empty current/replayed sides
+    ctx = _prepare_entity_merge(u)
+    assert ctx is None or not (ctx.cur_ents or ctx.rep_ents), (
+        "degenerate sides must not produce mergeable entities")
+    assert _try_refactoring_aware_merge(u) is None
