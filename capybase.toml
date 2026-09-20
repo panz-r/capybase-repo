@@ -378,6 +378,15 @@ enable_import_union = true
 # the model has produced a usable candidate) and all-or-nothing under the
 # token budget.
 enable_near_miss_seeding = true
+# Common-span factoring (S28-136, default OFF pending the oversized-case
+# pilot): when the three conflict sides share large identical line runs,
+# the prompt renders the sides as differing segments + ordered @An
+# references and the model's resolution may reference them; capybase
+# re-expands the shared spans verbatim and the full validation pipeline
+# gates the reconstruction. Protocol violations latch the unit to
+# unfactored retries. Flip to true after the pilot (the conversion of
+# oversized escalations into resolutions is the headline metric).
+enable_common_span_factoring = false
 # SBCR tuning (arXiv:2605.16646 §4.1). Fitness is char-level Gestalt, mean-
 # aggregated over both parents; the search is union-constrained (every candidate
 # keeps all lines from both sides). These knobs expose the research-tuned params.

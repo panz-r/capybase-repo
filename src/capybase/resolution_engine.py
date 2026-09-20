@@ -291,6 +291,16 @@ def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
     deferred comments are reconciled later in Phase 3.
     """
     refined = unit.refined_sides
+    # S28-136 common-span factoring: when the stash is active (and the
+    # protocol hasn't failed for this unit), the sides render as differing
+    # segments + @An shared-span references; capybase re-expands them
+    # verbatim after the parse. The latch forces the full-sides prompt.
+    factored = unit.structural_metadata.get("_common_span_factoring")
+    if factored is not None and not unit.structural_metadata.get(
+            "_common_span_protocol_failed"):
+        return (factored["rendered_cur"], factored["rendered_base"],
+                factored["rendered_rep"])
+
     # Prefer the separator-projected sides for the LLM prompt when available —
     # they give the model a tighter conflict window (separator-split alignment
     # strips non-conflicting context). These carry projection newlines that are
@@ -3377,6 +3387,18 @@ object, nothing else:
 """
 
 
+def _factoring_active(unit: ConflictUnit) -> bool:
+    """Whether common-span factoring is active for this unit's prompts
+    (stash present, protocol not failed). When active, _prompt_sides
+    returns the factored rendering and candidate parsing expands the
+    @An references."""
+    md = unit.structural_metadata
+    return (
+        md.get("_common_span_factoring") is not None
+        and not md.get("_common_span_protocol_failed")
+    )
+
+
 class ResolutionEngine:
     def __init__(
         self,
@@ -3411,125 +3433,129 @@ class ResolutionEngine:
         self._repair_prev_texts: dict[str, list[str]] = {}
 
     def build_attempt_prompt(
-        self,
-        unit: ConflictUnit,
-        context: ContextBundle,
-        *,
-        failures: list[VerificationFailure] | None = None,
-        prev_candidate: CandidateResolution | None = None,
-        pending_recovery: bool = False,
-        attempt: int = 0,
-        shatter: bool = False,
-        budget: TokenBudget | None = None,
-    ) -> tuple[str, str, list[dict]]:
-        """THE attempt-prompt dispatch (single implementation — audit-2 D1/D2).
+            self,
+            unit: ConflictUnit,
+            context: ContextBundle,
+            *,
+            failures: list[VerificationFailure] | None = None,
+            prev_candidate: CandidateResolution | None = None,
+            pending_recovery: bool = False,
+            attempt: int = 0,
+            shatter: bool = False,
+            budget: TokenBudget | None = None,
+        ) -> tuple[str, str, list[dict]]:
+            """THE attempt-prompt dispatch (single implementation — audit-2 D1/D2).
 
-        Both the model path (``_propose_impl``) and the orchestrator's
-        journal/oversized mirror call THIS — there is exactly one copy of the
-        dispatch and one copy of each prompt text. Builds under the CURRENTLY
-        ACTIVE profile (the R5 ladder activation stays with the callers:
-        ``propose`` wraps the whole build+sample, the mirror recomputes the
-        same deterministic variant around its call).
+            Both the model path (``_propose_impl``) and the orchestrator's
+            journal/oversized mirror call THIS — there is exactly one copy of the
+            dispatch and one copy of each prompt text. Builds under the CURRENTLY
+            ACTIVE profile (the R5 ladder activation stays with the callers:
+            ``propose`` wraps the whole build+sample, the mirror recomputes the
+            same deterministic variant around its call).
 
-        Returns ``(prompt, prompt_version, trims)``.
-        """
-        prompt_trims: list[dict] = []
-        _budget = budget or self.token_budget
-        # Near-miss ephemeral rule (S28-128): the rejected deterministic
-        # draft may seed an attempt ONLY while the model has produced no
-        # usable candidate of its own — a genuine LLM hypothesis supersedes
-        # it (keeping it would re-anchor the model on something already
-        # rejected, after it moved past it). Fresh resolves trivially
-        # qualify (prev is None); retries/recovery check explicitly.
-        _seed_ok = _near_miss_stash(unit) is not None and not (
-            prev_candidate and getattr(prev_candidate, "resolved_text", ""))
-        if pending_recovery:
-            pv = "cegis_recovery.v1"
-            prompt = build_recovery_prompt(
-                unit, context, failures, budget=_budget, near_miss=_seed_ok)
-            if _NM_MARKER in prompt:
-                pv += "#nm"
-            return prompt, pv, prompt_trims
-        if shatter and prev_candidate and prev_candidate.resolved_text:
-            # The context-shattering repair (s25 item 4): replace the full
-            # repair prompt with the diff-only window — the loop's
-            # attractor is the repetitive context itself.
-            pv = "shattered_repair.v1"
-            prompt = build_shattered_repair_prompt(
-                unit, prev_candidate, list(failures or []))
-            return prompt, pv, prompt_trims
-        if failures and prev_candidate and prev_candidate.resolved_text:
-            pv = PROMPT_REPAIR
-            # D1b: prior-attempt memory (failure signatures + candidate
-            # diffs) computed from ENGINE-owned per-unit history — the model
-            # now actually receives it (formerly journal-mirror-only).
-            hist = self._repair_failure_history.setdefault(unit.unit_id, [])
-            prevs = self._repair_prev_texts.setdefault(unit.unit_id, [])
-            # s27-82 (ninth-pass follow-up): bound the UNIT count too — the
-            # per-unit lists are trimmed but the dicts grew one key per unit
-            # for the whole session, and whole-file candidates are hundreds
-            # of KB each. Keep the 32 most recent units.
-            for _mem in (self._repair_failure_history,
-                         self._repair_prev_texts):
-                while len(_mem) > 32:
-                    _mem.pop(next(iter(_mem)))
-            _current_sig = "; ".join(
-                f"{f.validator}: {f.message[:60]}" for f in failures[:2])
-            if _current_sig and _current_sig not in [
-                    s.split(": ", 1)[-1] for s in hist]:
-                hist.append(f"attempt {attempt + 1}: {_current_sig}")
-            del hist[:-12]
-            prior_summaries = list(hist)
-            if len(prevs) >= 1 and prevs[-1] and prev_candidate.resolved_text:
-                import difflib as _dl_cdf
-                _diff_lines = list(_dl_cdf.unified_diff(
-                    prevs[-1].splitlines()[:50],
-                    prev_candidate.resolved_text.splitlines()[:50],
-                    fromfile="previous_attempt",
-                    tofile="current_attempt",
-                    lineterm=""))[:20]
-                if len(_diff_lines) > 2:  # not just the headers
-                    prior_summaries.append(
-                        "CHANGES SINCE LAST ATTEMPT:\n" + "\n".join(_diff_lines))
-            # The journal mirror and the model path both call this builder per
-            # round — append-once per round (dedup against the last entry).
-            if not prevs or prevs[-1] != prev_candidate.resolved_text:
-                prevs.append(prev_candidate.resolved_text)
-            del prevs[:-12]
-            prompt = build_repair_prompt(
-                unit, context, prev_candidate, failures, attempt=attempt,
-                prior_attempt_summaries=prior_summaries or None, budget=_budget)
+            Returns ``(prompt, prompt_version, trims)``.
+            """
+            prompt_trims: list[dict] = []
+            _budget = budget or self.token_budget
+            # Near-miss ephemeral rule (S28-128): the rejected deterministic
+            # draft may seed an attempt ONLY while the model has produced no
+            # usable candidate of its own — a genuine LLM hypothesis supersedes
+            # it (keeping it would re-anchor the model on something already
+            # rejected, after it moved past it). Fresh resolves trivially
+            # qualify (prev is None); retries/recovery check explicitly.
+            _seed_ok = _near_miss_stash(unit) is not None and not (
+                prev_candidate and getattr(prev_candidate, "resolved_text", ""))
+            if pending_recovery:
+                pv = "cegis_recovery.v1"
+                prompt = build_recovery_prompt(
+                    unit, context, failures, budget=_budget, near_miss=_seed_ok)
+                if _NM_MARKER in prompt:
+                    pv += "#nm"
+                return prompt, pv, prompt_trims
+            if shatter and prev_candidate and prev_candidate.resolved_text:
+                # The context-shattering repair (s25 item 4): replace the full
+                # repair prompt with the diff-only window — the loop's
+                # attractor is the repetitive context itself.
+                pv = "shattered_repair.v1"
+                prompt = build_shattered_repair_prompt(
+                    unit, prev_candidate, list(failures or []))
+                return prompt, pv, prompt_trims
+            if failures and prev_candidate and prev_candidate.resolved_text:
+                pv = PROMPT_REPAIR
+                # D1b: prior-attempt memory (failure signatures + candidate
+                # diffs) computed from ENGINE-owned per-unit history — the model
+                # now actually receives it (formerly journal-mirror-only).
+                hist = self._repair_failure_history.setdefault(unit.unit_id, [])
+                prevs = self._repair_prev_texts.setdefault(unit.unit_id, [])
+                # s27-82 (ninth-pass follow-up): bound the UNIT count too — the
+                # per-unit lists are trimmed but the dicts grew one key per unit
+                # for the whole session, and whole-file candidates are hundreds
+                # of KB each. Keep the 32 most recent units.
+                for _mem in (self._repair_failure_history,
+                             self._repair_prev_texts):
+                    while len(_mem) > 32:
+                        _mem.pop(next(iter(_mem)))
+                _current_sig = "; ".join(
+                    f"{f.validator}: {f.message[:60]}" for f in failures[:2])
+                if _current_sig and _current_sig not in [
+                        s.split(": ", 1)[-1] for s in hist]:
+                    hist.append(f"attempt {attempt + 1}: {_current_sig}")
+                del hist[:-12]
+                prior_summaries = list(hist)
+                if len(prevs) >= 1 and prevs[-1] and prev_candidate.resolved_text:
+                    import difflib as _dl_cdf
+                    _diff_lines = list(_dl_cdf.unified_diff(
+                        prevs[-1].splitlines()[:50],
+                        prev_candidate.resolved_text.splitlines()[:50],
+                        fromfile="previous_attempt",
+                        tofile="current_attempt",
+                        lineterm=""))[:20]
+                    if len(_diff_lines) > 2:  # not just the headers
+                        prior_summaries.append(
+                            "CHANGES SINCE LAST ATTEMPT:\n" + "\n".join(_diff_lines))
+                # The journal mirror and the model path both call this builder per
+                # round — append-once per round (dedup against the last entry).
+                if not prevs or prevs[-1] != prev_candidate.resolved_text:
+                    prevs.append(prev_candidate.resolved_text)
+                del prevs[:-12]
+                prompt = build_repair_prompt(
+                    unit, context, prev_candidate, failures, attempt=attempt,
+                    prior_attempt_summaries=prior_summaries or None, budget=_budget)
+                prof_tag = active_profile().tag()
+                if prof_tag:
+                    pv = PROMPT_REPAIR + prof_tag
+                return prompt, pv, prompt_trims
+            if failures:
+                pv = PROMPT_RETRY
+                prompt, prompt_trims = retry_prompt_with_trims(
+                    unit, context, failures, budget=_budget, attempt=attempt,
+                    near_miss=_seed_ok)
+                prof_tag = active_profile().tag()
+                if _factoring_active(unit):
+                    pv += "#f"
+                if _NM_MARKER in prompt:
+                    pv += "#nm"
+                if prof_tag:
+                    pv = pv + prof_tag
+                return prompt, pv, prompt_trims
+            # Fresh resolve: routes through _resolve_prompt_parts + the profile's
+            # layout/framing/position axes, prepending the outline preamble when
+            # the outline axis is active. The profile tag is folded into the
+            # version for offline attribution.
+            outline_prompt, outline_tag = build_outline_resolve_prompt(
+                unit, context, budget=_budget, near_miss=_seed_ok)
             prof_tag = active_profile().tag()
-            if prof_tag:
-                pv = PROMPT_REPAIR + prof_tag
-            return prompt, pv, prompt_trims
-        if failures:
-            pv = PROMPT_RETRY
-            prompt, prompt_trims = retry_prompt_with_trims(
-                unit, context, failures, budget=_budget, attempt=attempt,
-                near_miss=_seed_ok)
-            prof_tag = active_profile().tag()
-            if _NM_MARKER in prompt:
-                pv += "#nm"
-            if prof_tag:
-                pv = pv + prof_tag
-            return prompt, pv, prompt_trims
-        # Fresh resolve: routes through _resolve_prompt_parts + the profile's
-        # layout/framing/position axes, prepending the outline preamble when
-        # the outline axis is active. The profile tag is folded into the
-        # version for offline attribution.
-        outline_prompt, outline_tag = build_outline_resolve_prompt(
-            unit, context, budget=_budget, near_miss=_seed_ok)
-        prof_tag = active_profile().tag()
-        # Version composition: the "#nm" suffix rides the POST-BUDGET
-        # prompt (marker check), before the profile/outline tag —
-        # e.g. resolve_text_block.v6#nm#md.
-        _nm_tag = "#nm" if _NM_MARKER in outline_prompt else ""
-        _tail = prof_tag or outline_tag or ""
-        pv = PROMPT_RESOLVE + _nm_tag + _tail
-        parts = _resolve_prompt_parts(unit, context, budget=_budget)
-        prompt_trims = parts["trims"]
-        return outline_prompt, pv, prompt_trims
+            # Version composition: suffixes ride the POST-BUDGET prompt
+            # (marker checks), before the profile/outline tag — e.g.
+            # resolve_text_block.v6#f#nm#md. #f = common-span factoring
+            # active for this unit (S28-136).
+            _nm_tag = "#nm" if _NM_MARKER in outline_prompt else ""
+            _f_tag = "#f" if _factoring_active(unit) else ""
+            _tail = prof_tag or outline_tag or ""
+            pv = PROMPT_RESOLVE + _f_tag + _nm_tag + _tail
+            parts = _resolve_prompt_parts(unit, context, budget=_budget)
+            prompt_trims = parts["trims"]
+            return outline_prompt, pv, prompt_trims
 
     def _log_prompt(
         self, prompt: str, *, unit: ConflictUnit | None = None,
@@ -4316,6 +4342,27 @@ class ResolutionEngine:
                 failure_kind="empty",
             )
         needs_human = bool(data.get("needs_human", False))
+        resolved_text = str(data.get("resolved_text", ""))
+        if "#f" in (prompt_version or ""):
+            # S28-136: the factored protocol — re-expand the @An
+            # references verbatim. A protocol violation (out-of-order,
+            # unknown, or missing refs) latches the unit to unfactored
+            # retries.
+            from capybase.common_spans import expand_factored_resolution
+            stash = unit.structural_metadata.get(
+                "_common_span_factoring") or {}
+            expanded = expand_factored_resolution(
+                resolved_text, stash.get("spans", []))
+            if expanded is None:
+                unit.structural_metadata[
+                    "_common_span_protocol_failed"] = True
+                return _failed_candidate(
+                    unit, self.config.model, prompt_version,
+                    "factored-resolution protocol violation "
+                    "(invalid or incomplete @A references)",
+                    resp.text, failure_kind="parse_failed",
+                )
+            resolved_text = expanded
         cand = CandidateResolution(
             candidate_id=f"{unit.unit_id}:{uuid.uuid4().hex[:6]}",
             unit_id=unit.unit_id,
@@ -4323,7 +4370,7 @@ class ResolutionEngine:
             prompt_version=prompt_version,
             current_side_intent=list(data.get("current_side_intent", [])),
             replayed_commit_intent=list(data.get("replayed_commit_intent", [])),
-            resolved_text=str(data.get("resolved_text", "")),
+            resolved_text=resolved_text,
             explanation=str(data.get("explanation", "")),
             repair_plan=str(data.get("plan", "")),
             preserved_current_side=bool(data.get("preserved_current_side", True)),

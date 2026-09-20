@@ -737,6 +737,14 @@ class FutureConfig(BaseModel):
     # ON (always-on integral part), but the skip-when-empty gate means files
     # with no affected comments pay no cost.
     enable_comment_reconciliation: bool = True
+    # Common-span factoring (S28-136, default OFF pending the targeted
+    # oversized-case pilot): when the three conflict sides share large
+    # identical line runs, the prompt renders the sides as differing
+    # segments + ordered @An references, and the model's resolution may
+    # reference them; capybase re-expands verbatim and the full validation
+    # pipeline gates the reconstruction. Oversized units (sides alone
+    # exceeding the window) get an LLM chance they otherwise never had.
+    enable_common_span_factoring: bool = False
     # Near-miss seeding (S28-128; default ON after the paired targeted A/B
     # won: 12/13 slice cases identical-or-better, no attributable regression,
     # seeded cases resolved in fewer LLM attempts with 27-51% less wall time

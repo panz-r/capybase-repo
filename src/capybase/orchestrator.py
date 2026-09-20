@@ -6014,6 +6014,16 @@ class Orchestrator:
             return False, 0, 0  # unconfigured → no guard
         reserve = int(getattr(self.config.model, "completion_reserve", 1024) or 1024)
         available = max(0, window - reserve)
+        # S28-136: with common-span factoring active, the essential content
+        # the model must see is the FACTORED sides (differing segments +
+        # @An reference lines) — the shared runs are re-expanded verbatim
+        # and need no window.
+        factored = unit.structural_metadata.get("_common_span_factoring")
+        if factored is not None:
+            essential = estimate_tokens(
+                factored["rendered_cur"] + "\n" + factored["rendered_base"]
+                + "\n" + factored["rendered_rep"])
+            return essential > available, essential, available
         # Essential content = the text the prompt ACTUALLY sends to the model.
         # The context_builder sends a windowed slice: lines[marker_start - ctx :
         # marker_end + ctx], where ctx = ContextBuilder.context_lines (default
@@ -6539,6 +6549,9 @@ class Orchestrator:
             # core fragment is a narrower unit and must not inherit the
             # parent's whole-unit draft.
             core_meta.pop("_deterministic_near_miss", None)
+            # Same for the common-span factoring stash (S28-136): the core
+            # fragment's sides are not the parent's factored sides.
+            core_meta.pop("_common_span_factoring", None)
             core_meta["deferred_core_context"] = "\n".join(pad_before + pad_after)
             core_meta["deferred_core_depth"] = (
                 int(unit.structural_metadata.get("deferred_core_depth", 0) or 0) + 1
@@ -16023,6 +16036,28 @@ class Orchestrator:
             # their deterministic provenance under their OWN unit_id, so
             # per-unit audits never read them as LLM-without-evidence.
             self._emit_synthetic_provenance(unit)
+            # S28-136 common-span factoring: when enabled (and not a
+            # two-pass resolve — its hand-rolled intent/code prompts are
+            # not wired for the protocol), factor runs identical across
+            # the three sides into shared spans; the sides render as
+            # deltas + @An references and the parse re-expands them.
+            if (getattr(self.config.future, "enable_common_span_factoring",
+                        False)
+                    and not self.config.model.two_pass
+                    and "_common_span_factoring" not in unit.structural_metadata
+                    and "_common_span_protocol_failed"
+                    not in unit.structural_metadata):
+                from capybase.resolution_engine import _prompt_sides
+                from capybase.common_spans import factor_common_spans
+                cur_t, base_t, rep_t = _prompt_sides(unit)
+                _factored = factor_common_spans(base_t, cur_t, rep_t)
+                if _factored is not None:
+                    unit.structural_metadata["_common_span_factoring"] = {
+                        "spans": _factored["spans"],
+                        "rendered_cur": _factored["rendered_cur"],
+                        "rendered_base": _factored["rendered_base"],
+                        "rendered_rep": _factored["rendered_rep"],
+                    }
 
             # Self-consistency: read from ModelConfig so the calibrated
             # profile overlay flows through. It is the explicit BATCH
