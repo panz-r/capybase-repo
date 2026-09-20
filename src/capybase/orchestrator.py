@@ -5971,10 +5971,14 @@ class Orchestrator:
         # conflict content itself doesn't fit. estimate_tokens is ~4 chars/tok.
         marker_text = unit.original_worktree_text or ""
         if marker_text and unit.marker_span is not None:
-            # Window the marker block the same way context_builder does.
+            # Window the marker block the same way context_builder does. The
+            # builder is constructed with policy.context_lines (see init), so
+            # the guard MUST read the same knob — a hardcoded 15 under-measured
+            # whenever the config raised the window, passing units whose real
+            # prompt was over budget into the send-anyway path.
             start, end = unit.marker_span
             lines = marker_text.split("\n")
-            ctx = 15  # match ContextBuilder default (context_builder.py:23)
+            ctx = int(getattr(self.config.policy, "context_lines", 15) or 15)
             lo = max(0, start - ctx)
             hi = min(len(lines) - 1, end + ctx)
             marker_text = "\n".join(lines[lo : hi + 1])

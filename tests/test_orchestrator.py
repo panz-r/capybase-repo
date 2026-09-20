@@ -384,6 +384,65 @@ def test_oversized_guard_uses_hunk_not_full_file():
     )
 
 
+def test_oversized_guard_honors_configured_context_lines():
+    """The guard must measure the window with the CONFIGURED
+    policy.context_lines — the same knob the orchestrator feeds
+    ContextBuilder — not a hardcoded 15. Regression: with context_lines=30
+    the real prompt carries +/-30 lines around the marker while the guard
+    measured +/-15, under-measuring essential content and passing units
+    whose actual prompt was over budget into the send-anyway path."""
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+
+    # ~360-char padding lines = ~120 tokens each (estimate_tokens //3).
+    # conflict block ~5 lines. Slice at +/-15 -> ~35 lines ~ 4200t;
+    # at +/-30 -> ~65 lines ~ 7800t. available = 8192 - 2048 = 6144t.
+    pad = "\n".join(f"// padding line {i} " + "x" * 330 for i in range(100))
+    conflict_block = (
+        "<<<<<<< current\n"
+        'pub const VERSION: &str = "1.28.1";\n'
+        "=======\n"
+        'pub const VERSION: &str = "1.29.0";\n'
+        ">>>>>>> replayed\n"
+    )
+    full_text = pad + "\n" + conflict_block + "\n" + pad
+    lines = full_text.split("\n")
+    start = next(i for i, l in enumerate(lines) if l.startswith("<<<<<<<"))
+    end = next(i for i, l in enumerate(lines) if l.startswith(">>>>>>>"))
+
+    def _unit() -> ConflictUnit:
+        return ConflictUnit(
+            session_id="test", step_index=0, path="src/lib.rs",
+            language="rust", unit_id="src/lib.rs:1:0",
+            base=ConflictSide(label="BASE", text='pub const VERSION: &str = "1.28.1";'),
+            current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text='pub const VERSION: &str = "1.28.1";'),
+            replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text='pub const VERSION: &str = "1.29.0";'),
+            original_worktree_text=full_text, marker_span=(start, end),
+        )
+
+    def _orch(context_lines: int):
+        cfg = Config()
+        cfg.model.context_window = 8192
+        cfg.model.completion_reserve = 2048
+        cfg.policy.context_lines = context_lines
+        return Orchestrator(cfg, repo=".", resolution_engine=None,
+                            out=lambda *_a, **_k: None)
+
+    # Default 15: the windowed slice fits -> not oversized.
+    oversized, essential_15, available = _orch(15)._llm_oversized_for_window(_unit())
+    assert not oversized, (
+        f"+/-15 slice ({essential_15}t) should fit {available}t")
+    # Configured 30: the REAL prompt window doesn't fit -> must fire. The
+    # old hardcoded-15 guard returned False here and the over-budget
+    # prompt was sent anyway.
+    oversized, essential_30, _ = _orch(30)._llm_oversized_for_window(_unit())
+    assert essential_30 > essential_15
+    assert oversized, (
+        f"+/-30 slice ({essential_30}t) exceeds {available}t — the guard "
+        "must honor policy.context_lines, not the hardcoded 15")
+
+
 def test_escape_hatch_accepts_advisory_cycling_candidate(repo):
     """V7 regression: the convergence escape hatch fired 0 times across 143
     cases because it only matched preservation_heuristic/STRUCTURAL_CODE. The

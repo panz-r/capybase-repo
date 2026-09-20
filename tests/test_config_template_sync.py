@@ -108,7 +108,11 @@ def test_ghost_keys_stay_gone():
                   "canary_mode", "complex_if_sibling_count_gt",
                   "max_simple_node_lines", "max_simple_side_chars",
                   "allow_delete_conflicted_file", "lsp_baseline_strict",
-                  "enable_verifier_assertion"):
+                  "enable_verifier_assertion",
+                  # a journal-note name that never existed in src; the old
+                  # template comment claimed it documented the removed
+                  # send-anyway policy
+                  "context_budget_exceeded"):
         assert ghost not in text, (
             f"ghost key {ghost!r} reappeared in capybase.toml — it has no "
             "backing field (or was removed as dead) and is silently ignored")

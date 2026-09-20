@@ -85,10 +85,12 @@ retry_max_delay_seconds = 30.0   # backoff cap per sleep
 # prompt is capped to this window: the three conflict sides + the JSON contract
 # are ALWAYS sent intact, and the augmentation sections (few-shot examples,
 # cross-file deps, surrounding context) are trimmed — lowest-value first — to
-# fit. A unit whose sides + boilerplate alone exceed the window is sent anyway
-# (the model must see the actual conflict) with a logged warning + a
-# context_budget_exceeded note in the journal. Trimming is journaled per
-# resolution on the candidate_generated event's prompt_trims field.
+# fit. A unit whose essential conflict content ALONE exceeds the window is
+# never sent: the LLM call is skipped and the unit escalates (the
+# llm_skipped_oversized journal event) — the model must never be asked to
+# infer which part of a silently truncated prompt disappeared. Trimming is
+# journaled per resolution on the candidate_generated event's prompt_trims
+# field.
 context_window = 0
 # Tokens held back for the completion when sizing the input budget:
 # available_input = context_window - completion_reserve.
