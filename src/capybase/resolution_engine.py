@@ -802,6 +802,48 @@ def _sub_unit_function_context(unit: ConflictUnit) -> str:
     return "\n".join(parts) + "\n\n"
 
 
+#: Unique header of the rendered near-miss section — the post-budget
+#: presence detector for the "#nm" prompt-version suffix and the
+#: near_miss_used journal event (marker-in-prompt: one source of truth).
+_NM_MARKER = "### deterministic draft (validation REJECTED"
+
+
+def _near_miss_stash(unit: ConflictUnit) -> dict | None:
+    """The validation-rejected deterministic draft stashed on this unit.
+
+    Written by the orchestrator's ``_stash_near_miss`` (structural/SBCR
+    failure branches, gated by ``[mechanisms] enable_near_miss_seeding``).
+    Plain strings only — the stash rides ``structural_metadata``, which
+    must stay safe for any generic dict copy/serialization.
+    """
+    stash = unit.structural_metadata.get("_deterministic_near_miss")
+    return stash if isinstance(stash, dict) and stash.get("text") else None
+
+
+def _near_miss_block(unit: ConflictUnit) -> str:
+    """Render the rejected deterministic draft + its validator diagnostic.
+
+    All-or-nothing: the draft goes in verbatim (never compacted, never
+    truncated) or the section is absent — a mutilated near-miss is worse
+    than none. The header states the draft was REJECTED so the model
+    treats it as a starting point, not an answer.
+    """
+    stash = _near_miss_stash(unit)
+    if stash is None:
+        return ""
+    failures = "\n".join(stash.get("failures") or []) or "- (no diagnostic recorded)"
+    return (
+        f"{_NM_MARKER} — a starting point, not an answer)\n"
+        "A deterministic merge produced the draft below; the validators\n"
+        "REJECTED it.\n\n"
+        f"{stash['text']}\n\n"
+        "Validator failures:\n"
+        f"{failures}\n\n"
+        "Produce the correct resolution: fix what failed above. Do not\n"
+        "resubmit the draft as-is.\n\n"
+    )
+
+
 def _sibling_resolutions_block(unit: ConflictUnit, *, max_tokens: int = 300) -> str:
     """The one-way Shared Resolution Context (SRC) for entity-split sub-units.
 
@@ -1298,7 +1340,8 @@ def _fit_to_budget(
     unit: ConflictUnit,
     history: str = "",
     obligations: str = "",
-) -> tuple[str, str, str, str, str, str, str, list[dict], str]:
+    near_miss_block: str = "",
+) -> tuple[str, str, str, str, str, str, str, str, list[dict], str]:
     """Trim the prompt's AUGMENTATION sections to fit ``budget``, protecting the
     essential conflict sides + the JSON contract.
 
@@ -1359,7 +1402,8 @@ def _fit_to_budget(
     # No budget / disabled → unbounded (current behavior).
     if budget is None or not budget.enabled:
         return (structural_anchor, siblings_block, deps, few_shot,
-                primary_text, history, obligations, trims, _skeleton_block)
+                primary_text, history, obligations, near_miss_block,
+                trims, _skeleton_block)
 
     # System message is a fixed ~12 tokens; account for it once.
     system_tokens = 12
@@ -1382,7 +1426,7 @@ def _fit_to_budget(
                     f"augmentation sections (sides + skeleton protected)"
                 ),
             })
-        return "", "", "", "", "", "", "", trims, _skeleton_block
+        return "", "", "", "", "", "", "", "", trims, _skeleton_block
 
     # Sprint-20 S20.9: compaction BEFORE the drop cascade. When the
     # assembled prompt overflows, strip comments and blank-run padding
@@ -1392,9 +1436,11 @@ def _fit_to_budget(
     # prose. The conflict sides, contract, and skeleton are never
     # touched. Compounds with the cascade below (which now trims the
     # COMPACTED sections if still needed); journaled via trims.
+    # The near-miss draft joins the totals (it competes for budget) but is
+    # NEVER compacted — all-or-nothing, verbatim or dropped.
     _aug_total = estimate_tokens(
         structural_anchor + siblings_block + deps + few_shot
-        + primary_text + history + obligations)
+        + primary_text + history + obligations + near_miss_block)
     _budget_total = budget.available - overhead - essential
     if _aug_total > _budget_total:
         _before = _aug_total
@@ -1404,7 +1450,7 @@ def _fit_to_budget(
         primary_text = _compact_context_text(primary_text, unit.language)
         _after = estimate_tokens(
             structural_anchor + siblings_block + deps + few_shot
-            + primary_text + history + obligations)
+            + primary_text + history + obligations + near_miss_block)
         if _after < _before:
             trims.append({
                 "section": "compaction",
@@ -1424,9 +1470,10 @@ def _fit_to_budget(
     primary = primary_text
     hist = history
     obls = obligations
+    nm = near_miss_block
 
     def _aug_tokens() -> int:
-        return estimate_tokens(anchor + siblings + dep_block + shot + primary + hist + obls)
+        return estimate_tokens(anchor + siblings + dep_block + shot + primary + hist + obls + nm)
 
     # 1. Drop history context (lowest value — nice-to-have replay facts).
     if _aug_tokens() > available_for_augmentation and hist:
@@ -1460,14 +1507,21 @@ def _fit_to_budget(
     if _aug_tokens() > available_for_augmentation and anchor:
         anchor = ""
         trims.append({"section": "structural_anchor", "detail": "dropped enclosing AST node text"})
-    # 7. Drop obligations LAST (#idea 9) — history-critical info (what later
+    # 7. Drop the rejected deterministic near-miss draft (all-or-nothing).
+    # Highly conflict-specific, so it outlives generic context — but hard
+    # obligations (what later commits EXPECT) still outlive it: known
+    # requirements beat known-wrong information.
+    if _aug_tokens() > available_for_augmentation and nm:
+        nm = ""
+        trims.append({"section": "near_miss", "detail": "dropped rejected deterministic draft (budget)"})
+    # 8. Drop obligations LAST (#idea 9) — history-critical info (what later
     #    commits expect of the resolution) survives trimming before generic
     #    context. This is the highest-priority augmentation.
     if _aug_tokens() > available_for_augmentation and obls:
         obls = ""
         trims.append({"section": "obligations", "detail": "dropped future obligations + branch intent"})
 
-    return anchor, siblings, dep_block, shot, primary, hist, obls, trims, _skeleton_block
+    return anchor, siblings, dep_block, shot, primary, hist, obls, nm, trims, _skeleton_block
 
 
 def _resolve_prompt_parts(
@@ -1477,6 +1531,7 @@ def _resolve_prompt_parts(
     *,
     profile: PromptProfile | None = None,
     attempt: int = 0,
+    near_miss: bool = True,
 ):
     """Build the reusable building blocks of the resolve prompt.
 
@@ -1648,7 +1703,7 @@ def _resolve_prompt_parts(
     sides_text = (
         f"{struct_ctx}{side_intent}{semantic_change}{value_resolution}{_sides}"
     )
-    anchor_t, siblings_t, deps_t, few_shot_t, primary_t, history_t, obls_t, trims, skeleton_block = _fit_to_budget(
+    anchor_t, siblings_t, deps_t, few_shot_t, primary_t, history_t, obls_t, nm_t, trims, skeleton_block = _fit_to_budget(
         budget=budget,
         intro=intro,
         contract=contract,
@@ -1661,6 +1716,7 @@ def _resolve_prompt_parts(
         primary_text=context.primary_text,
         history=history,
         obligations=obligations,
+        near_miss_block=_near_miss_block(unit) if near_miss else "",
         unit=unit,
     )
     # The non-instruction sections (anchor, siblings, deps, obligations, history,
@@ -1671,6 +1727,7 @@ def _resolve_prompt_parts(
     data_block = (
         f"{skeleton_block}{func_ctx}{src_block}{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{struct_ctx}{side_intent}{semantic_change}{value_resolution}"
         f"{_sides}"
+        f"{nm_t}"
         f"Surrounding file context:\n{primary_t}\n\n"
     )
     return {"intro": intro, "data": data_block, "contract": contract, "rules": rules, "trims": trims}
@@ -2103,6 +2160,7 @@ def retry_prompt_with_trims(
     failures: Iterable[VerificationFailure],
     budget: TokenBudget | None = None,
     attempt: int = 0,
+    near_miss: bool = True,
 ) -> tuple[str, list[dict]]:
     """THE retry prompt (single implementation — audit-2 D1).
 
@@ -2119,7 +2177,7 @@ def retry_prompt_with_trims(
     # journal-mirror copy of the retry prompt; the model never saw it.
     _decl_guard = _missing_symbol_decl_guard(failures)
     parts = _resolve_prompt_parts(unit, context, budget=budget,
-                                  attempt=attempt)
+                                  attempt=attempt, near_miss=near_miss)
     inner = _compose_resolve_prompt(
         active_profile(),
         intro=parts["intro"], data=parts["data"],
@@ -2159,6 +2217,7 @@ def build_recovery_prompt(
     context: ContextBundle,
     failures: Iterable[VerificationFailure] | None,
     budget: TokenBudget | None = None,
+    near_miss: bool = True,
 ) -> str:
     """The recovery prompt for a model that self-reported needs_human (CEGIS loop).
 
@@ -2184,7 +2243,8 @@ def build_recovery_prompt(
         or "- (the previous attempt self-reported it could not merge; no specific validator failure)"
     )
     profile = active_profile()
-    parts = _resolve_prompt_parts(unit, context, budget=budget or TokenBudget())
+    parts = _resolve_prompt_parts(unit, context, budget=budget or TokenBudget(),
+                                  near_miss=near_miss)
     # Recovery framing: the same DATA (the sides + structural anchor) as a fresh
     # resolve, but a CUSTOM contract+rules block. The standard contract/rules
     # mention needs_human (the escape hatch the recovery retry must strip so the
@@ -3373,9 +3433,20 @@ class ResolutionEngine:
         """
         prompt_trims: list[dict] = []
         _budget = budget or self.token_budget
+        # Near-miss ephemeral rule (S28-128): the rejected deterministic
+        # draft may seed an attempt ONLY while the model has produced no
+        # usable candidate of its own — a genuine LLM hypothesis supersedes
+        # it (keeping it would re-anchor the model on something already
+        # rejected, after it moved past it). Fresh resolves trivially
+        # qualify (prev is None); retries/recovery check explicitly.
+        _seed_ok = _near_miss_stash(unit) is not None and not (
+            prev_candidate and getattr(prev_candidate, "resolved_text", ""))
         if pending_recovery:
             pv = "cegis_recovery.v1"
-            prompt = build_recovery_prompt(unit, context, failures, budget=_budget)
+            prompt = build_recovery_prompt(
+                unit, context, failures, budget=_budget, near_miss=_seed_ok)
+            if _NM_MARKER in prompt:
+                pv += "#nm"
             return prompt, pv, prompt_trims
         if shatter and prev_candidate and prev_candidate.resolved_text:
             # The context-shattering repair (s25 item 4): replace the full
@@ -3433,10 +3504,13 @@ class ResolutionEngine:
         if failures:
             pv = PROMPT_RETRY
             prompt, prompt_trims = retry_prompt_with_trims(
-                unit, context, failures, budget=_budget, attempt=attempt)
+                unit, context, failures, budget=_budget, attempt=attempt,
+                near_miss=_seed_ok)
             prof_tag = active_profile().tag()
+            if _NM_MARKER in prompt:
+                pv += "#nm"
             if prof_tag:
-                pv = PROMPT_RETRY + prof_tag
+                pv = pv + prof_tag
             return prompt, pv, prompt_trims
         # Fresh resolve: routes through _resolve_prompt_parts + the profile's
         # layout/framing/position axes, prepending the outline preamble when
@@ -3445,12 +3519,12 @@ class ResolutionEngine:
         outline_prompt, outline_tag = build_outline_resolve_prompt(
             unit, context, budget=_budget)
         prof_tag = active_profile().tag()
-        if prof_tag:
-            pv = PROMPT_RESOLVE + prof_tag
-        elif outline_tag:
-            pv = PROMPT_RESOLVE + outline_tag
-        else:
-            pv = PROMPT_RESOLVE
+        # Version composition: the "#nm" suffix rides the POST-BUDGET
+        # prompt (marker check), before the profile/outline tag —
+        # e.g. resolve_text_block.v6#nm#md.
+        _nm_tag = "#nm" if _NM_MARKER in outline_prompt else ""
+        _tail = prof_tag or outline_tag or ""
+        pv = PROMPT_RESOLVE + _nm_tag + _tail
         parts = _resolve_prompt_parts(unit, context, budget=_budget)
         prompt_trims = parts["trims"]
         return outline_prompt, pv, prompt_trims
@@ -3891,6 +3965,7 @@ class ResolutionEngine:
         context: ContextBundle,
         *,
         failures: list[VerificationFailure] | None = None,
+        prev_candidate: CandidateResolution | None = None,
     ) -> list[CandidateResolution]:
         """One recovery candidate via build_recovery_prompt (CEGIS loop hardening).
 
@@ -3902,7 +3977,8 @@ class ResolutionEngine:
         recovery retry (the __recovery_retry__ followup marker).
         """
         prompt, _pv, _trims = self.build_attempt_prompt(
-            unit, context, failures=failures, pending_recovery=True)
+            unit, context, failures=failures, prev_candidate=prev_candidate,
+            pending_recovery=True)
         resp = self._one(unit, context, prompt, PROMPT_RECOVERY)
         return [resp] if resp is not None else []
 

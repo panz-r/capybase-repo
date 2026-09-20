@@ -1078,6 +1078,13 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
         cfg.model.enable_self_consistency = True
         cfg.model.samples = int(_sc_n)
         cfg.model.samples_complex = int(_sc_n)
+    # Near-miss seeding A/B arm (S28-128): the treatment run flips the
+    # default-off mechanism on without code edits; the journal's
+    # near_miss_stashed/near_miss_used pair makes the arms exactly
+    # attributable.
+    if os.environ.get("CAPYBASE_NEAR_MISS_SEEDING", "").strip().lower() in (
+            "1", "true", "yes"):
+        cfg.future.enable_near_miss_seeding = True
     # Output token cap proportional to conflict size: a 3-line conflict doesn't
     # need 8K tokens of generation headroom (the model would hallucinate
     # boilerplate, wasting time on the slow endpoint). Cap at 16× the conflict's

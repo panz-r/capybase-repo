@@ -327,8 +327,9 @@ min_balance_for_sbcr_accept = 0.15
 # Deterministic structural pre-resolution (survey §6.4 layer 1): BEFORE the
 # LLM, attempt a model-free resolution (identical sides / one-sided change /
 # disjoint line edits). Safe-by-construction + validated — a guess that fails
-# validation falls through to the model, so it only cuts LLM load, never a
-# worse merge. Default ON.
+# validation falls through to the model (seeded with the rejected draft when
+# [mechanisms] enable_near_miss_seeding is on), so it only cuts LLM load,
+# never a worse merge. Default ON.
 structural_resolution = true
 # Search-based combination resolution (survey §4.1 SBCR): AFTER the structural
 # resolver declines, search order-preserving interleavings of the two sides for
@@ -362,6 +363,12 @@ llm_critic = true
 # import is missing or a safety precondition fails; cargo/rustc remains
 # authoritative after the edit. Default ON.
 enable_import_union = true
+# Near-miss seeding (default OFF pending the paired targeted evaluation):
+# on the standard LLM resolution path, a rejected structural/SBCR draft may
+# seed the first model attempt together with its validation failure — the
+# seed is ephemeral (gone once the model has produced a usable candidate)
+# and all-or-nothing under the token budget. Flip via the paired A/B.
+enable_near_miss_seeding = false
 # SBCR tuning (arXiv:2605.16646 §4.1). Fitness is char-level Gestalt, mean-
 # aggregated over both parents; the search is union-constrained (every candidate
 # keeps all lines from both sides). These knobs expose the research-tuned params.

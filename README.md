@@ -273,6 +273,9 @@ runs the full validation pipeline before it's applied.
    keep/delete/escalate decision and splices the chosen side verbatim.
 6. **LLM resolution** — the model resolves conflicts the pre-LLM layers
    declined, grounded in base + both sides + structural context + RAG few-shot.
+   On the standard LLM resolution path, a rejected structural/SBCR draft may
+   seed the first model attempt together with its validation failure
+   (near-miss seeding; default off, `mechanisms.enable_near_miss_seeding`).
    For oversized files, a lightweight file skeleton (extracted entity names)
    gives the model global awareness the windowed conflict region can't provide.
    An empty first response fast-fails to verified single-side candidates
@@ -527,7 +530,7 @@ in live-eval.
 | **Data** | self-contained fixtures; nothing external fetched | real downloaded repos, processed and extracted (fetch script below) | the same real repos |
 | **Model calls** | never | never (deterministic) | yes — through the provider config + calibration profile |
 | **Entry point** | `pytest tests/ -n 6` | `./corpus/run.sh [python\|rust\|all]` | `scripts/live_eval_realworld.py --provider NAME` |
-| **Wall time** | ~45 s (4,596 tests, 6 workers) | minutes (own runner — never pytest) | hours |
+| **Wall time** | ~45 s (4,612 tests, 6 workers) | minutes (own runner — never pytest) | hours |
 | **Purpose** | the per-change regression gate | validates the verifier + the corpus oracle against real-world conflict shapes | the measured product: full runs, README numbers |
 
 After clone and build (`.venv` created per Setup below):

@@ -89,7 +89,7 @@ class TestBudgetIntegration:
         # budget between the compacted and full totals: without compaction
         # the cascade would DROP the anchor; with it, the anchor survives.
         avail = overhead + essential + (anchor_compact + anchor_full) // 2
-        anchor, _sib, _deps, _fs, _pt, _hist, _obl, trims, _skel = _fit_to_budget(
+        anchor, _sib, _deps, _fs, _pt, _hist, _obl, _nm, trims, _skel = _fit_to_budget(
             budget=_budget(avail),
             intro="intro", contract="contract", rules="rules",
             sides_text="CURRENT\nx = 1\n=======\ny = 2\n",
@@ -103,7 +103,7 @@ class TestBudgetIntegration:
         assert "// padding comment" not in anchor
 
     def test_no_overflow_no_compaction(self):
-        _a, _s, _d, _f, _p, _h, _o, trims, _sk = _fit_to_budget(
+        _a, _s, _d, _f, _p, _h, _o, _nm, trims, _sk = _fit_to_budget(
             budget=_budget(10 ** 6),
             intro="intro", contract="contract", rules="rules",
             sides_text="x\n",
@@ -114,7 +114,7 @@ class TestBudgetIntegration:
         assert not [t for t in trims if t["section"] == "compaction"]
 
     def test_budget_disabled_passthrough(self):
-        _a, _s, _d, _f, _p, _h, _o, trims, _sk = _fit_to_budget(
+        _a, _s, _d, _f, _p, _h, _o, _nm, trims, _sk = _fit_to_budget(
             budget=SimpleNamespace(enabled=False, available=0, total=0),
             intro="i", contract="c", rules="r", sides_text="x",
             structural_anchor=_ANNOTATED_ANCHOR,

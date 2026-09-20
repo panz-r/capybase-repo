@@ -19,6 +19,7 @@ Three modes share the same inspection core:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -6349,6 +6350,7 @@ class Orchestrator:
             step_index=self.step, path=unit.path, unit_id=unit.unit_id,
         )
         if not validation.passed:
+            self._stash_near_miss(unit, "structural", cand, validation)
             self._record_resolution_attempt(
                 UnitOutcome(unit=unit), mechanism="structural",
                 candidate=cand, validation=validation,
@@ -6476,6 +6478,10 @@ class Orchestrator:
             # family (see _deferred_core_depth), so the core resolves via
             # portfolio/SBCR/LLM instead of recursing.
             core_meta = dict(unit.structural_metadata)
+            # The near-miss stash belongs to THIS unit instance only: the
+            # core fragment is a narrower unit and must not inherit the
+            # parent's whole-unit draft.
+            core_meta.pop("_deterministic_near_miss", None)
             core_meta["deferred_core_context"] = "\n".join(pad_before + pad_after)
             core_meta["deferred_core_depth"] = (
                 int(unit.structural_metadata.get("deferred_core_depth", 0) or 0) + 1
@@ -7645,8 +7651,11 @@ class Orchestrator:
         )
         if not validation.passed:
             # The combination guess failed validation (e.g. contradictory lines
-            # concatenated into invalid code). Discard and let the model handle
-            # it. This is why SBCR is safe despite a heuristic fitness function.
+            # concatenated into invalid code). Discard-and-seed: the model
+            # handles it, seeded with the rejected draft + diagnostic when
+            # near-miss seeding is on (this is why SBCR is safe despite a
+            # heuristic fitness function).
+            self._stash_near_miss(unit, "sbcr", cand, validation)
             self._record_resolution_attempt(
                 UnitOutcome(unit=unit), mechanism="sbcr",
                 candidate=cand, validation=validation,
@@ -15860,6 +15869,20 @@ class Orchestrator:
                                 )
                                 return outcome
                         self.journal.store_prompt(unit.unit_id, retry_count, prompt)
+                        # near_miss_used: the POST-BUDGET prompt actually
+                        # carried the rejected deterministic draft (#nm in
+                        # the version is marker-in-prompt — budget drops
+                        # strip both together).
+                        if "#nm" in _pv:
+                            _nm = unit.structural_metadata.get(
+                                "_deterministic_near_miss") or {}
+                            self.journal.emit(
+                                "near_miss_used",
+                                {"mechanism": _nm.get("mechanism", "?"),
+                                 "attempt": retry_count},
+                                step_index=self.step, path=unit.path,
+                                unit_id=unit.unit_id,
+                            )
                 finally:
                     if _mirror_ladder_base is not None:
                         from capybase.prompt_profile import (
@@ -15932,6 +15955,7 @@ class Orchestrator:
                 pending_recovery = False  # consume
                 candidates = self.resolution_engine.propose_recovery(
                     unit, context, failures=failures,
+                    prev_candidate=prev_candidate,
                 )
             elif difficulty == "simple":
                 # Fast path: one low-temperature sample, no intent pass, no
@@ -17601,6 +17625,60 @@ class Orchestrator:
         # "confident / not atypical"), which is the safe default.
         out["mean_token_entropy"] = getattr(cand, "mean_token_entropy", None)
         return out
+
+    def _stash_near_miss(
+        self, unit: ConflictUnit, mechanism: str,
+        cand: CandidateResolution, validation: VerificationResult,
+    ) -> None:
+        """Stash a validation-REJECTED deterministic draft for the LLM.
+
+        Near-miss seeding (S28-128, [mechanisms] enable_near_miss_seeding —
+        default OFF pending the paired evaluation): when the structural
+        resolver or SBCR already PRODUCED a candidate and validation
+        rejected it, the draft + its diagnostic seed the model's FIRST
+        resolution instead of being discarded — CEGIS starting one stage
+        earlier, at zero extra model calls. The seed is EPHEMERAL in
+        model-space: prompt builders include it only while no usable LLM
+        candidate exists (see build_attempt_prompt's near-miss rule), and
+        it is all-or-nothing under the token budget (never compacted).
+
+        Overwrite policy — last cascade rung wins — is a deliberate
+        CASCADE policy (the system's most advanced deterministic
+        attempt), not a quality ranking; the mechanism rides every event
+        so an A/B can justify a precedence tweak later. Validation-PASSING
+        SBCR balance-diversions are deliberately NOT captured (the guard
+        exists because SBCR loses on imbalanced conflicts; seeding a
+        known-worse merge would anchor the model).
+        """
+        if not getattr(self.config.future, "enable_near_miss_seeding", False):
+            return
+        text = cand.resolved_text or ""
+        if not text.strip():
+            return
+        from capybase.resolution_engine import _render_failure
+        hard = list(validation.hard_failures or [])
+        sha8 = hashlib.sha256(text.encode()).hexdigest()[:8]
+        prev = unit.structural_metadata.get("_deterministic_near_miss")
+        unit.structural_metadata["_deterministic_near_miss"] = {
+            "mechanism": mechanism,
+            "text": text,
+            # Same concise diagnostic representation as CEGIS feedback —
+            # one renderer, so diagnostic-handling fixes apply to both.
+            "failures": [_render_failure(f) for f in hard[:3]],
+            "sha8": sha8,
+            "step": self.step,
+        }
+        self.journal.emit(
+            "near_miss_stashed",
+            {
+                "mechanism": mechanism,
+                "failure_kinds": [f.validator for f in hard[:3]],
+                "draft_tokens": estimate_tokens(text),
+                "draft_sha8": sha8,
+                "overwrote_previous": bool(prev),
+            },
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
 
     def _record_resolution_attempt(
         self, outcome: UnitOutcome, *, mechanism: str,

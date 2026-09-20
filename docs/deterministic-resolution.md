@@ -50,6 +50,18 @@ per-unit cascade.
 The cascade runs only on a fresh resolve (no prior failures). On a CEGIS retry,
 the LLM loop is entered directly with the failure feedback.
 
+**Near-miss seeding** (`near_miss`, default off — `mechanisms.
+enable_near_miss_seeding`): when the structural resolver or SBCR *produced* a
+candidate and validation rejected it, the draft + its validator diagnostic are
+stashed on the unit and may seed the first LLM attempt (fresh resolve /
+no usable LLM candidate yet) instead of being discarded. The seed is ephemeral
+— once the model produces a usable candidate, retries carry that candidate and
+its failure, not the deterministic draft — and all-or-nothing under the token
+budget (dropped before obligations; never compacted). Only the standard LLM
+resolution path receives it (repair/two-pass/shatter/block-capture prompts do
+not). Journals: `near_miss_stashed` (available) vs `near_miss_used` (the
+post-budget prompt carried it — `#nm` in the prompt version).
+
 ---
 
 ## Classification
