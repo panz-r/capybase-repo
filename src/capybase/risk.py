@@ -131,6 +131,7 @@ class RiskEngine:
         critic_retry_count: int = 0,
         recovery_retry_count: int = 0,
         suspected_validator_error: bool = False,
+        samples_ceiling_retries: int | None = None,
     ) -> RiskDecision:
         """Apply MVP rules in priority order.
 
@@ -151,6 +152,12 @@ class RiskEngine:
         # Used for every retryable branch below; the critic budget applies the
         # same role factor on top of its coverage scaling (see _critic_budget).
         budget = self._effective_budget(feats)
+        # S28-129: the samples/samples_complex ceiling (N - 1 retries) RAISES
+        # the change-type-scaled budget — it is an upper limit on iterations,
+        # never a reduction of it. None (default samples=1) keeps the
+        # change-type scaling exactly as before.
+        if samples_ceiling_retries is not None:
+            budget = max(budget, samples_ceiling_retries)
         # Effective total retries: the orchestrator routes verifier_model
         # warnings to critic_retry_count and content-loss warnings to
         # retry_count. When BOTH co-occur, retry_count alone doesn't reflect

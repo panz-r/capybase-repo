@@ -457,6 +457,7 @@ class CalibratedRiskEngine:
         consensus_entropy: float | None = None,
         consensus_agreement: float | None = None,
         critic_retry_count: int = 0,
+        samples_ceiling_retries: int | None = None,
     ) -> RiskDecision:
         decision = self.fallback.decide(
             result,
@@ -465,6 +466,7 @@ class CalibratedRiskEngine:
             consensus_entropy=consensus_entropy,
             consensus_agreement=consensus_agreement,
             critic_retry_count=critic_retry_count,
+            samples_ceiling_retries=samples_ceiling_retries,
         )
         # Calibration only overrides the ACCEPT path: a candidate that passed
         # all hard checks but is predicted likely to fail gets escalated.

@@ -433,3 +433,72 @@ def test_fresh_dispatch_with_usable_prev_excludes_seed():
         _unit(), _ctx(), prev_candidate=_cand())
     assert _NM_MARKER not in prompt
     assert pv == PROMPT_RESOLVE, pv
+
+
+def test_two_pass_engine_draws_wide_when_asked():
+    """Engine API pin: propose_two_pass(n_samples=3) draws 3 code candidates
+    over ONE intent call (the consensus batch exception needs the full set;
+    the intent map is reused)."""
+    from tests.test_two_pass import ScriptedClient
+    engine = _engine()
+    client = ScriptedClient([
+        '{"current_side_intent": ["return 0"], "replayed_commit_intent": ["return 9"]}',
+        '{"resolved_text": "    return 0"}',
+        '{"resolved_text": "    return 0"}',
+        '{"resolved_text": "    return 0"}',
+    ])
+    engine.client = client
+    cands = engine.propose_two_pass(_unit(), _ctx(), n_samples=3)
+    assert len(cands) == 3
+    # calls records the completion kwargs; the first call is the intent pass
+    # (1 intent + 3 code = 4 requests).
+    assert len(client.calls) == 4, (
+        f"expected 1 intent + 3 code requests, got {len(client.calls)}")
+
+
+def test_two_pass_self_consistency_batch_preserved(conflicted_repo):
+    """Orchestrator wiring pin: with two_pass + self-consistency + a raised
+    ceiling, the opted-in draw is n_cap wide (the vote needs the full set) —
+    the single-draw rule must not silently strip the vote from two-pass
+    users."""
+    import json
+
+    from capybase.orchestrator import Orchestrator
+
+    class RecordingTwoPassEngine:
+        def __init__(self):
+            self.recorded: list[int] = []
+
+        def propose_two_pass(self, unit, context, *, n_samples, temperature):
+            from capybase.adapters.llm_openai import LLMResponse
+            self.recorded.append(n_samples)
+            cand = CandidateResolution(
+                candidate_id="c", unit_id=unit.unit_id, model_name="fake",
+                resolved_text="    return 'hi' + 'howdy'", explanation="m",
+                prompt_version="resolve_text_block.v6")
+            return [cand] * n_samples
+
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.model.two_pass = True
+    cfg.model.enable_self_consistency = True
+    cfg.model.samples_complex = 3
+    cfg.tests.required = False
+    # The deterministic layers must DECLINE so the two-pass branch is reached.
+    cfg.features.structural_resolution = False
+    cfg.features.combination_search = False
+    cfg.future.enable_source_portfolio = False
+    cfg.future.enable_block_capture = False
+    cfg.future.enable_docs_union = False
+    cfg.future.enable_list_union = False
+    cfg.future.enable_empty_side_rule = False
+    engine = RecordingTwoPassEngine()
+    orch = Orchestrator(
+        cfg, repo=str(conflicted_repo["repo"]), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert not result.escalated, result.reason
+    assert engine.recorded == [3], (
+        f"two-pass + self-consistency must draw the full batch (n_cap=3), "
+        f"got n_samples={engine.recorded}")

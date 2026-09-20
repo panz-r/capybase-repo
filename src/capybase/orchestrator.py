@@ -15984,14 +15984,18 @@ class Orchestrator:
                 )
             elif failures is None and self.config.model.two_pass:
                 # Two-pass prompting: extract intents once, then generate the
-                # code candidate conditioned on them. ONE draw per iteration.
-                # A FAILED two-pass iteration does NOT redraw from the intent
-                # map: the next iteration carries the validation feedback as
-                # a CEGIS retry (observed failure beats predicted intent) up
-                # to the iteration ceiling (n_cap).
+                # code candidate conditioned on them. ONE draw per iteration
+                # on the standard path. A FAILED two-pass iteration does NOT
+                # redraw from the intent map: the next iteration carries the
+                # validation feedback as a CEGIS retry (observed failure beats
+                # predicted intent) up to the iteration ceiling (n_cap).
+                # EXCEPTION — self-consistency: majority voting needs the full
+                # batch in hand, so an opted-in draw is n_cap wide (the vote
+                # is meaningless over a single candidate).
+                _two_pass_n = n_cap if self_consistency else 1
                 candidates = self.resolution_engine.propose_two_pass(
                     unit, context,
-                    n_samples=1,
+                    n_samples=_two_pass_n,
                     temperature=self.config.model.sampling_temperature,
                 )
                 if self_consistency and len(candidates) > 1:
@@ -16923,6 +16927,7 @@ class Orchestrator:
                 ),
                 critic_retry_count=critic_retry_count,
                 recovery_retry_count=recovery_retry_count,
+                samples_ceiling_retries=(n_cap - 1),
             )
             outcome.decision = decision
             self.journal.emit(
