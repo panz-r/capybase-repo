@@ -16120,9 +16120,10 @@ class Orchestrator:
             # consensus winner is first, but on a 3B model the winner frequently
             # carries a syntax error while the 2nd/3rd sample is valid — trying
             # them before regenerating is free reliability (the tokens were
-            # already spent). These are local parser/splice checks, not
-            # LLM calls, so validating all N is cheap. If none pass, the winner
-            # (and its failures) feeds the CEGIS repair loop below.
+            # already spent). CONSENSUS BATCH ONLY: the standard path draws one
+            # candidate per iteration (S28-129), so len(candidates) == 1 here
+            # and this loop is a no-op outside self-consistency. If none pass,
+            # the winner (and its failures) feeds the CEGIS repair loop below.
             cand = winner
             # Deterministic closure: run all applicable Tier-A structural
             # primitives in sequence (import-union → deletion-application →

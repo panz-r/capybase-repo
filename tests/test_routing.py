@@ -332,14 +332,16 @@ def test_samples_ceiling_exhaustion_escalates(repo):
         f"ceiling samples_complex=2 must cap draws at 2, got {client.calls}")
 
 
-def test_samples_ceiling_honored_through_risk_engine(repo):
+def test_samples_ceiling_honored_through_risk_engine(multi_unit_conflicted_repo):
     """CRITICAL S28-129 review pin: on the standard run() path escalation is
     decided by risk.decide, whose budget derives from
     policy.max_retries_per_unit — the samples ceiling must RAISE that budget
     (samples_ceiling_retries), or a calibrated samples>1 silently escalates
-    early and the ceiling is dead. samples_complex=4 with the default
-    max_retries=2: every draw fails the syntax gate -> exactly 4 draws
-    (pre-fix: risk's budget of ~2 capped at 3)."""
+    early and the ceiling is dead. Complex multi-hunk units,
+    samples_complex=4, default max_retries=2, UNIQUE failing draws (so the
+    oscillation/no-progress backstops stay out): exactly 8 draws — 2 units x
+    samples_complex=4 iterations — then escalation (pre-fix: risk's own
+    budget of ~2 per unit capped at ~5)."""
     import json
 
     from capybase.config import Config
@@ -347,10 +349,13 @@ def test_samples_ceiling_honored_through_risk_engine(repo):
     from capybase.resolution_engine import ResolutionEngine
     from tests.conftest import git
 
+    repo = multi_unit_conflicted_repo["repo"]
+
     class BrokenClient:
-        """Every draw is UNIQUE (call-count comment) but always syntactically
-        broken — unique candidates keep the oscillation backstop out of the
-        picture so risk.decide's retry budget is the limiter under test."""
+        """Every draw is UNIQUE (attempt counter in a comment) but always
+        syntactically invalid — distinct failure signatures keep the
+        no-progress and oscillation backstops from firing before the
+        samples ceiling does."""
 
         def __init__(self):
             self.calls = 0
@@ -388,25 +393,19 @@ def test_samples_ceiling_honored_through_risk_engine(repo):
         cfg, repo=str(repo), resolution_engine=engine,
         out=lambda *_a, **_k: None,
     )
-    (repo / "app.py").write_text("a = 1\nb = 2\n")
-    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
-    git(repo, "branch", "feat"); git(repo, "checkout", "-q", "feat")
-    (repo / "app.py").write_text("a = 1\nb = 20\n")
-    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "feat")
-    git(repo, "checkout", "-q", "main")
-    (repo / "app.py").write_text("a = 10\nb = 2\n")
-    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "main")
-    git(repo, "checkout", "-q", "feat")
-    r = git(repo, "rebase", "main", check=False)
-    assert r.returncode != 0, "expected the conflict"
-
+    # multi_unit_conflicted_repo ships the repo STOPPED mid-rebase on the
+    # two-hunk conflict — no construction needed here.
     result = orch.run()
     assert result.escalated
-    # The ceiling is an UPPER bound on iterations: other guards (the
-    # no-progress signature backstop) may stop the unit earlier, but the
-    # samples ceiling must never be exceeded.
-    assert 2 <= client.calls <= 4, (
-        f"samples_complex=4 must not be exceeded: {client.calls} draws")
+    # Each of the 2 complex units draws at LEAST samples_complex=4 times
+    # (unique failure signatures keep the no-progress/oscillation backstops
+    # out, so the ceiling is the limiter — and it must be ENFORCED: pre-fix,
+    # risk's own budget of ~2 stopped each unit at ~3). The one-shot
+    # converging-trend relaxation grant may add +1 per unit (a pre-existing
+    # mechanism on top of any budget), hence the upper bound 10.
+    assert 8 <= client.calls <= 10, (
+        f"2 complex units x samples_complex=4 must draw 8-10 times "
+        f"(ceiling + at most the relaxation grant), got {client.calls}")
 
 
 def test_risk_engine_honors_samples_ceiling_kwarg():
