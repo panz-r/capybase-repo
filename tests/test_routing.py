@@ -186,18 +186,18 @@ def test_orchestrator_routing_disabled_unchanged(conflicted_repo):
 # ---------------------------------------------------------------------------
 
 
-def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
-    """With routing on + samples_complex=K, a complex (multi-hunk) unit draws
-    K samples per unit instead of the base samples. The multi-unit fixture has
-    two units, both complex, so the total call count is 2*K."""
+def test_samples_complex_sets_ceiling_and_draws_stay_lazy(multi_unit_conflicted_repo):
+    """S28-129 re-scope: samples_complex is an UPPER LIMIT on validated
+    resolution iterations for complex units — never an upfront spend. A
+    first-try validated success exits after exactly ONE draw per unit, even
+    with samples_complex=3. The ceiling itself is pinned via
+    _resolution_iteration_cap (complex: samples_complex; simple: samples).
+    """
     import json
 
-    from capybase.adapters.llm_openai import LLMResponse
     from capybase.config import Config
     from capybase.orchestrator import Orchestrator
     from capybase.resolution_engine import ResolutionEngine
-
-    repo = multi_unit_conflicted_repo["repo"]
 
     class CountingClient:
         def __init__(self, payload):
@@ -206,6 +206,7 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
 
         def complete(self, messages, **kw):
             self.calls += 1
+            from capybase.adapters.llm_openai import LLMResponse
             return LLMResponse(text=self._payload)
 
     payload = json.dumps({"resolved_text": '    "merged"', "explanation": "m"})
@@ -217,17 +218,17 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
     cfg.tests.final = "true"
     cfg.routing.enabled = True
     cfg.model.samples = 1            # base count
-    cfg.model.samples_complex = 3    # complex units draw 3
+    cfg.model.samples_complex = 3    # complex ceiling
     # The multi-unit file has two DISTINCT hunks needing different resolutions;
-    # a single canned payload can't satisfy both. This test measures the SAMPLE
-    # COUNT (the allocation lever), not merge validity, so relax the checks that
+    # a single canned payload can't satisfy both. This test measures the DRAW
+    # COUNT (the ceiling lever), not merge validity, so relax the checks that
     # would otherwise retry and inflate the count.
     cfg.validation.require_whole_file_validation = False
     cfg.validation.reject_if_drops_a_side = False
     cfg.validation.reject_if_drops_referenced_symbol = False
     cfg.validation.enable_per_unit_syntax_check = False  # fragmentary candidates
     # Disable the deterministic pre-LLM layers so the conflicts reach the LLM
-    # path where samples_complex applies. (Without this the union/structural
+    # path where the ceiling applies. (Without this the union/structural
     # rules merge them with zero LLM calls, exercising the resolver not the
     # sample allocation.)
     cfg.features.structural_resolution = False
@@ -236,11 +237,11 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
     cfg.future.enable_source_portfolio = False
     # The comment-reconciliation pass + the verifier-model critic are always-on
     # by default and each make their own LLM calls after code resolution. This
-    # test measures the CODE sample-count allocation (1 simple + 3 complex = 4),
-    # not comment reconciliation or critic evaluation, so disable both to keep
-    # the call-count assertion precise.
+    # test measures the CODE draw count, not comment reconciliation or critic
+    # evaluation, so disable both to keep the call-count assertion precise.
     cfg.future.enable_comment_reconciliation = False
     cfg.features.llm_critic = False
+    repo = multi_unit_conflicted_repo["repo"]
     engine = ResolutionEngine(cfg.model, client=client)
     orch = Orchestrator(
         cfg, repo=str(repo), resolution_engine=engine,
@@ -248,12 +249,83 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
     )
     result = orch.run()
     assert not result.escalated, result.reason
-    # Both hunks classify as complex under the ConflictClassifier: each is a
-    # both-sides edit of the same base line (the services-list line and the
-    # feature-flags dict), which the classifier counts as a same-line
-    # modify/modify → complex (bands medium and hard respectively). So each
-    # draws samples_complex=3, for a total of 3 + 3 = 6. (With samples_complex
-    # unset, both would draw the base 1 → 1 + 1 = 2.) This asserts the
-    # samples_complex lever scales the draw count for complex units; the
-    # contract under test is the allocation, not the per-unit band.
-    assert client.calls == 6, client.calls
+    # The ceiling: complex units MAY spend up to samples_complex=3 iterations,
+    # but each unit's first validated draw exits early — 2 units, 2 draws.
+    assert client.calls == 2, (
+        f"first-try successes must exit early: expected 2 draws (1 per "
+        f"complex unit), got {client.calls}")
+    # The ceiling lever itself: complex honors samples_complex, simple the base.
+    assert orch._resolution_iteration_cap("complex") == 3
+    assert orch._resolution_iteration_cap("simple") == 1
+
+
+def test_samples_ceiling_exhaustion_escalates(repo):
+    """The ceiling is an upper limit on validated iterations: with
+    samples_complex=2, max_retries=0, and every draw failing the syntax
+    gate, the unit draws at most 2 LLM candidates before escalating
+    (feedback-conditioned retries inside the ceiling — the outer loop IS
+    the multisampling)."""
+    import json
+
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator
+    from capybase.resolution_engine import ResolutionEngine
+    from tests.conftest import git
+
+    class BrokenClient:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, messages, **kw):
+            self.calls += 1
+            from capybase.adapters.llm_openai import LLMResponse
+            # Non-empty, non-JSON, syntactically INVALID python: the per-unit
+            # syntax gate hard-fails every iteration (no recovery detour —
+            # needs_human never fires on a non-empty candidate).
+            return LLMResponse(
+                text="def greet(:\n    return broken( <<<\n",
+                raw={"_accumulated": {"finish_reason": "stop"}})
+
+    client = BrokenClient()
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.tests.required = False
+    cfg.tests.pre_continue = "true"
+    cfg.tests.final = "true"
+    cfg.routing.enabled = True
+    cfg.model.samples_complex = 2
+    cfg.policy.max_retries_per_unit = 0   # ceiling = samples_complex alone
+    cfg.policy.max_recovery_retries_per_unit = 0
+    cfg.validation.require_whole_file_validation = False
+    cfg.validation.enable_per_unit_syntax_check = True
+    cfg.features.structural_resolution = False
+    cfg.features.combination_search = False
+    cfg.future.enable_block_capture = False
+    cfg.future.enable_source_portfolio = False
+    cfg.future.enable_comment_reconciliation = False
+    cfg.features.llm_critic = False
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    # A real single-unit conflict (adjacent-line edits).
+    (repo / "app.py").write_text("a = 1\nb = 2\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
+    git(repo, "branch", "feat"); git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text("a = 1\nb = 20\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "feat")
+    git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text("a = 10\nb = 2\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "main")
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected the conflict"
+
+    result = orch.run()
+    assert result.escalated
+    # ceiling = samples_complex = 2 iterations -> exactly 2 draws
+    # (the max_retries=0 override stays the floor; the samples ceiling
+    # raises the budget to 2 iterations).
+    assert client.calls == 2, (
+        f"ceiling samples_complex=2 must cap draws at 2, got {client.calls}")

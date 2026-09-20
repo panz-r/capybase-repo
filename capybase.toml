@@ -36,16 +36,17 @@ schema_version = 2
 # `capybase calibrate` keys the stored profile off this name, so keep it stable.
 # model = "chat"
 temperature = 0.2
-# Samples per fresh resolve. Default 1 (single draw): best-of-N + self-
-# consistency is OPT-IN (raise samples AND set enable_self_consistency=true).
-# The live eval showed samples=3 with this model trades 5× latency for no
-# convergence gain — the per-draw success rate is too low for best-of-3 to help.
+# UPPER LIMIT on resolution iterations for a unit: each iteration draws ONE
+# candidate and validates it; the first pass exits the loop and later
+# iterations are feedback-conditioned (CEGIS repair). Default 1 = one draw,
+# then CEGIS. Raise it for models where diversity beats repair — it sets the
+# ceiling only, never an upfront spend.
 samples = 1
-# Difficulty-aware sample allocation (survey §4 UAB-lite): when [routing] is
-# enabled and a unit classifies as "complex", draw this many samples instead of
-# the base `samples`. Concentrates test-time compute on multi-hunk files and
-# large enclosing nodes where a small model struggles. 0 = disabled (complex
-# units use `samples`); only consulted on fresh resolves, not CEGIS retries.
+# UPPER LIMIT on resolution iterations for COMPLEX units (when [routing] is
+# enabled and the classifier calls the conflict complex): same semantics as
+# `samples`, raised for multi-hunk files and large enclosing nodes where a
+# repaired retry more often needs the extra attempt. 0 = disabled (complex
+# units use `samples`). Sets the ceiling only — never an upfront spend.
 samples_complex = 0
 # Agreement fraction below which a best-of-N merge is flagged low-confidence
 # (only consulted when enable_self_consistency is on — it is OFF by default).
@@ -57,7 +58,9 @@ two_pass = false
 # Raised temperature for the diverse multi-sampling pass (distinct from the low
 # `temperature` used for focused retries).
 sampling_temperature = 0.7
-# Draw samples concurrently in a thread pool (safe: adapter is stateless/call).
+# Retained for the self-consistency batch path only (majority voting needs
+# all N candidates in hand). The standard resolution path draws ONE candidate
+# per validated iteration by design — there is nothing to parallelize.
 parallel_samples = true
 # Reasoning models (e.g. VibeThinker/DeepSeek-R1 style) emit long <think> chains
 # before answering. If this is too low, the model runs out of tokens mid-thought

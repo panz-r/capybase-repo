@@ -50,6 +50,14 @@ per-unit cascade.
 The cascade runs only on a fresh resolve (no prior failures). On a CEGIS retry,
 the LLM loop is entered directly with the failure feedback.
 
+**Sampling is an upper limit, not an upfront spend** (S28-129): every
+LLM iteration draws exactly ONE candidate and validates it; the first pass
+exits the loop. `samples` / `samples_complex` set the iteration CEILING
+per unit (predicted difficulty raises the ceiling for complex units — it
+never pre-spends); after a validated failure the next iteration is
+feedback-conditioned (CEGIS repair). Self-consistency is the explicit
+batch exception (majority voting needs all N candidates in hand).
+
 **Near-miss seeding** (`near_miss`, default on — `mechanisms.
 enable_near_miss_seeding`): when the structural resolver or SBCR *produced* a
 candidate and validation rejected it, the draft + its validator diagnostic are

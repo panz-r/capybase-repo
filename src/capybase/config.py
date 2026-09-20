@@ -56,22 +56,19 @@ class ModelConfig(BaseModel):
     api_key: str = "sk-local"
     model: str = "vibethink"
     temperature: float = 0.2
-    # Samples per fresh resolve. Default 1 (single draw): best-of-N + self-
-    # consistency is OPT-IN (raise samples AND set enable_self_consistency=true).
-    # The live eval showed samples=3 with VibeThinker-3B trades 5× latency for no
-    # convergence benefit on these conflicts — the model's per-draw success rate
-    # is too low for best-of-3 to reliably include a correct candidate, so
-    # consensus voting just picks the most-common wrong answer. Best-of-N helps
-    # when a model has a higher per-draw success rate; default to 1 here.
+    # UPPER LIMIT on resolution iterations for a unit (S28-129): each
+    # iteration draws ONE candidate and validates it; the first pass exits
+    # the loop, later iterations are feedback-conditioned (CEGIS repair).
+    # Multisampling is never an upfront spend — predicted difficulty only
+    # raises the ceiling, observed validation drives the actual cost.
+    # Default 1: one draw, then CEGIS. Profiles may raise it for models with
+    # high per-draw success rates (diversity beats repair).
     samples: int = 1
-    # Difficulty-aware sample allocation (UAB-lite): when routing is
-    # enabled and a unit classifies as "complex", draw this many samples instead
-    # of the base ``samples``. Concentrates test-time compute where a 3B model
-    # genuinely struggles (multi-hunk files, large enclosing AST nodes) without a
-    # cross-unit scheduler. 0 (default) = disabled: complex units use ``samples``
-    # as today, so behavior is unchanged. Difficulty is the viable signal here
-    # because it is computed BEFORE any LLM call (unlike mean_token_entropy, which
-    # is post-generation and can't drive the first sample count).
+    # UPPER LIMIT on resolution iterations for COMPLEX units (routing/
+    # classifier difficulty): same semantics as ``samples``, raised for
+    # multi-hunk / large-node conflicts where a repaired retry is more
+    # likely to need extra attempts. 0 (default) = complex units use
+    # ``samples``. Sets only the ceiling — never an upfront spend.
     samples_complex: int = 0
     # Self-consistency: when samples > 1 and enable_self_consistency is on,
     # candidates are clustered by normalized text and the majority wins.

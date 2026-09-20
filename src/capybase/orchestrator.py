@@ -5937,6 +5937,25 @@ class Orchestrator:
             step_index=self.step, path=unit.path, unit_id=unit.unit_id,
         )
 
+    def _resolution_iteration_cap(self, difficulty: str) -> int:
+        """The samples-derived iteration count N for this unit (S28-129).
+
+        Multisampling is an UPPER LIMIT, not an upfront spend: every outer
+        CEGIS iteration draws exactly one candidate and validates it; the
+        first pass exits the loop. Predicted difficulty (routing/classifier)
+        only raises the ceiling for complex units — it never pre-spends.
+
+        Returns N = samples_complex (complex units, when set) else
+        ``samples``. The effective retry budget is max(_unit_budget, N - 1)
+        — the override-aware per-unit budget stays the floor, so an explicit
+        max_retries=0 (many-unit files) still caps to one call, and a
+        calibrated samples=3 raises the ceiling to 3 iterations.
+        """
+        if difficulty == "complex":
+            return max(1, int(self.config.model.samples_complex
+                              or self.config.model.samples or 1))
+        return max(1, int(self.config.model.samples or 1))
+
     def _llm_oversized_for_window(self, unit: ConflictUnit) -> tuple[bool, int, int]:
         """Whether the conflict's essential content exceeds the model's window.
 
@@ -15929,21 +15948,18 @@ class Orchestrator:
             outcome.difficulty = difficulty
             outcome.classification = classification
 
-            # Difficulty-aware sample allocation (UAB-lite): complex
-            # units draw samples_complex (falling back to the base samples when
-            # unset/0). Difficulty is known before any LLM call, so this is the
-            # viable pre-generation allocation lever. Only affects fresh
-            # resolution (failures is None) — retries stay single-sample for
-            # reproducible CEGIS counterexample feedback.
-            if failures is None:
-                n_complex = (
-                    self.config.model.samples_complex or self.config.model.samples
-                )
-            else:
-                n_complex = self.config.model.samples
+            # Difficulty-aware ITERATION CEILING (UAB-lite re-scoped,
+            # S28-129): complex units get a higher ceiling on resolution
+            # iterations — each iteration is ONE validated LLM draw (fresh on
+            # the first, feedback-conditioned repair afterwards), with early
+            # exit on the first passing candidate. Predicted difficulty sets
+            # only the CEILING; the actual spend follows observed validation.
+            n_cap = self._resolution_iteration_cap(difficulty)
 
             # Self-consistency: read from ModelConfig so the calibrated
-            # profile overlay flows through.
+            # profile overlay flows through. It is the explicit BATCH
+            # exception: majority voting needs all N candidates in hand, so
+            # this branch pre-draws the full set (unchanged semantics).
             self_consistency = self.config.model.enable_self_consistency
 
             # Recovery retry (CEGIS loop hardening): a model that self-reported
@@ -15967,14 +15983,14 @@ class Orchestrator:
                     n_samples=1, attempt=retry_count,
                 )
             elif failures is None and self.config.model.two_pass:
-                # Two-pass prompting: extract intents, then sample N code
-                # candidates conditioned on them, then majority-vote when
-                # N > 1. Intent extraction is useful even for the single
-                # candidate (N = 1) — the old n_complex > 1 gate made a
-                # calibrated two_pass silently inert at samples = 1.
+                # Two-pass prompting: extract intents once, then generate the
+                # code candidate conditioned on them. ONE draw per iteration —
+                # the outer loop re-enters with validation feedback up to the
+                # iteration ceiling (n_cap); the intent map is reused across
+                # iterations at no extra intent cost.
                 candidates = self.resolution_engine.propose_two_pass(
                     unit, context,
-                    n_samples=n_complex,
+                    n_samples=1,
                     temperature=self.config.model.sampling_temperature,
                 )
                 if self_consistency and len(candidates) > 1:
@@ -15985,16 +16001,34 @@ class Orchestrator:
                 candidates, consensus_report = (
                     self.resolution_engine.propose_with_consensus(
                         unit, context, failures=failures,
-                        prev_candidate=prev_candidate, n_samples=n_complex,
+                        prev_candidate=prev_candidate, n_samples=n_cap,
                         attempt=retry_count,
                     )
                 )
             else:
+                # Standard path: ONE validated draw per iteration. The outer
+                # while-loop (with the repair/retry ladder + this ceiling) is
+                # the multisampling — an upper limit, not an upfront spend.
+                # diverse_sampling re-scoped (S28-129): the temperature
+                # portfolio schedules ACROSS iterations (exploratory high temp
+                # on later draws) instead of inside an upfront parallel burst.
+                _iter_temp = None
+                if (self.config.model.diverse_sampling and retry_count > 0):
+                    _sched = [self.config.model.temperature,
+                              self.config.model.sampling_temperature]
+                    _iter_temp = _sched[(retry_count - 1) % len(_sched)]
                 candidates = self.resolution_engine.propose(
                     unit, context, failures=failures, prev_candidate=prev_candidate,
-                    n_samples=n_complex, attempt=retry_count,
+                    n_samples=1, attempt=retry_count,
+                    temperature_override=_iter_temp,
                 )
             outcome.consensus = consensus_report
+            # The iteration ceiling raises the CEGIS budget when a calibrated
+            # samples/samples_complex demands more outer iterations than
+            # max_retries_per_unit grants (S28-129): the ceiling is an upper
+            # limit on validated iterations, never a reason to draw more than
+            # one candidate per iteration.
+            _eff_budget = max(_unit_budget, n_cap - 1)
             # Prompt-assembly instrumentation (s23): one event per prompt
             # build makes any prompt-size issue diagnosable instantly.
             # The prompt was built inside propose() (or its variants);
@@ -16641,7 +16675,7 @@ class Orchestrator:
             # unit the full config retry budget, overflowing the wall-time.
             if (
                 max_retries is not None
-                and retry_count >= _unit_budget
+                and retry_count >= _eff_budget
                 and retry_count > 0
             ):
                 # Sprint-22 P2: adaptive relaxation — when the candidate
@@ -16671,7 +16705,7 @@ class Orchestrator:
                 )
                 if _progress:
                     outcome._progress_grant_used = True
-                if (_close or _progress) and retry_count == _unit_budget:
+                if (_close or _progress) and retry_count == _eff_budget:
                     self.journal.emit(
                         "retry_relaxation",
                         {"unit_id": unit.unit_id,
@@ -16688,7 +16722,7 @@ class Orchestrator:
                     outcome.escalated = True
                     outcome.retry_count = retry_count
                     outcome.reason = (
-                        f"unit-count-aware retry cap reached ({_unit_budget} "
+                        f"unit-count-aware retry cap reached ({_eff_budget} "
                         f"retries; file has many units)"
                     )
                     self._record_resolution_attempt(
@@ -16710,7 +16744,7 @@ class Orchestrator:
             # (losing all units' resolutions).
             if (
                 max_retries is not None
-                and _unit_budget == 0
+                and _eff_budget == 0
                 and retry_count == 0
                 and cand.resolved_text
                 and not validation.hard_failures
@@ -17303,7 +17337,7 @@ class Orchestrator:
             # use it as the oscillation budget too (the risk engine's budget
             # reads the unmodified config value, which may be higher).
             osc_budget = (
-                _unit_budget if max_retries is not None
+                _eff_budget if max_retries is not None
                 else self.risk._effective_budget(validation.features)
             )
             if osc_count > osc_budget:
