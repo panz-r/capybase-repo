@@ -2842,6 +2842,44 @@ def _try_deterministic_pystring_repair(
     return [(wf_unit, wf_cand)], "repaired"
 
 
+def _try_deterministic_dead_code_repair(
+    failures: list,
+    accepted: list[tuple[ConflictUnit, CandidateResolution]],
+    fault_idx: int,
+) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+    """Attempt a deterministic dead-statement deletion before the LLM.
+
+    A stacked-return merge hard-fails the whole-file ``unreachable_code``
+    validator: the model emitted both sides' return statements back to
+    back, and the second is dead. The repair deletes the flagged
+    statements (whole spans, multi-line included) from the fault
+    candidate's resolved text — zero model calls — and the beam
+    re-validates the file before landing. Returns the replacement
+    ``accepted`` list, or ``None`` to defer to the LLM path.
+    """
+    from capybase.verification import whole_file_dead_code_repair
+
+    if fault_idx >= len(accepted):
+        return None
+    unit, cand = accepted[fault_idx]
+    repaired = whole_file_dead_code_repair(cand.resolved_text or "", failures)
+    if repaired is None:
+        return None
+    text, _deleted = repaired
+    new_cand = cand.model_copy(update={
+        "resolved_text": text,
+        "candidate_id": cand.candidate_id + ":dead-code-repair",
+        "provenance": "deterministic_dead_code_repair",
+        "self_reported_confidence": 0.8,
+        "explanation": (
+            "S28-133: unreachable statements after the unconditional "
+            "terminator deleted"),
+    })
+    new_accepted = list(accepted)
+    new_accepted[fault_idx] = (unit, new_cand)
+    return new_accepted
+
+
 def _try_deterministic_preprocessor_repair(
     failures: list,
     original: str,
@@ -14262,6 +14300,27 @@ class Orchestrator:
                     unit_id=unit_new.unit_id,
                 )
                 return det
+            # Deterministic dead-statement deletion (S28-133): stacked-return
+            # merges hard-fail the unreachable_code validator; the flagged
+            # dead statements are deleted mechanically — zero model calls.
+            _dead = _try_deterministic_dead_code_repair(
+                failures, accepted, fault_idx
+            )
+            if _dead is not None:
+                unit_new, cand_new = _dead[0]
+                self.journal.emit(
+                    "candidate_validated",
+                    {
+                        "candidate_id": cand_new.candidate_id,
+                        "passed": True,
+                        "whole_file_repair_for": unit_new.unit_id,
+                        "deterministic_dead_code_repair": True,
+                    },
+                    step_index=self.step,
+                    path=path,
+                    unit_id=unit_new.unit_id,
+                )
+                return _dead
             # Deterministic prefix/suffix dedup repair (Phase 10): when the cargo
             # error is "expected identifier, found keyword `use`" (or similar), the
             # marker span excluded the enclosing wrapper (e.g. ``use crate::{``) and

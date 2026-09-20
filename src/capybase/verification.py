@@ -3106,6 +3106,48 @@ def _try_balance_braces_iterated(
     return None
 
 
+def whole_file_dead_code_repair(
+    resolved_text: str, failures: list,
+) -> tuple[str, int] | None:
+    """Deterministic repair for the whole-file ``unreachable_code`` gate
+    (S28-102 TASK 3, built S28-133): a stacked-return merge — a small model
+    emits both sides' return statements one after the other — hard-fails
+    the validator; the second statement is dead.
+
+    Deletes the flagged unreachable statements (whole spans, multi-line
+    included) from the merged file and re-checks with the same detector:
+    the repair must clear it completely. Refuses a deletion that would
+    empty the file. Returns ``(repaired_text, deleted_line_count)`` or
+    None when the failures aren't this shape / the repair doesn't clear /
+    there is nothing unreachable.
+    """
+    if not failures or not resolved_text.strip():
+        return None
+    if not any(getattr(f, "validator", "") == "unreachable_code"
+               for f in failures):
+        return None
+    spans = _py_unreachable_spans(resolved_text)
+    if not spans:
+        return None
+    lines = resolved_text.split("\n")
+    delete: set[int] = set()
+    for _func, _kind, start1, end1 in spans:
+        start0 = start1 - 1
+        end0 = end1  # exclusive
+        if start0 < 0 or end0 > len(lines):
+            return None
+        delete.update(range(start0, end0))
+    if not delete:
+        return None
+    kept = [line for i, line in enumerate(lines) if i not in delete]
+    if not any(line.strip() for line in kept):
+        return None  # the deletion would empty the file — refuse
+    repaired = "\n".join(kept)
+    if _py_unreachable_spans(repaired) != []:
+        return None  # must clear the detector completely
+    return repaired, len(delete)
+
+
 def delimiter_failure_shape(messages: list[str]) -> str | None:
     """Classify failure messages into P6b's splice-repair shapes.
 
@@ -4632,17 +4674,21 @@ _PY_TERMINATORS = (ast.Return, ast.Raise, ast.Break, ast.Continue)
 _PY_TRIVIAL_AFTER_TERMINATOR = (ast.Pass,)
 
 
-def _py_unreachable_code(source: str) -> list[tuple[str, str, int]] | None:
-    """Statements unreachable due to an earlier unconditional terminator.
+def _py_unreachable_spans(
+    source: str,
+) -> list[tuple[str, str, int, int]] | None:
+    """The spans core behind :func:`_py_unreachable_code`.
 
-    Returns ``(funcname, terminator_kind, line)`` triples — one per
-    non-trivial statement that follows a ``return``/``raise``/``break``/
-    ``continue`` at the same block level inside a function/method body.
-    Module-level code is not scanned (a top-level ``return`` is itself a
-    SyntaxError). Recurses into nested functions and the bodies of
-    compound statements (if/for/while/with/try) so a terminator buried in a
-    branch is still detected, but only flags SIBLINGS after the terminator,
-    not the terminator's own nested block.
+    Returns ``(funcname, terminator_kind, start_line, end_line)`` — 1-based
+    INCLUSIVE line spans, one per non-trivial statement that follows a
+    ``return``/``raise``/``break``/``continue`` at the same block level
+    inside a function/method body. The end line lets a repair delete the
+    WHOLE statement (multi-line calls/expressions included) instead of
+    leaving dangling fragments. Module-level code is not scanned (a
+    top-level ``return`` is itself a SyntaxError). Recurses into nested
+    functions and the bodies of compound statements (if/for/while/with/try)
+    so a terminator buried in a branch is still detected, but only flags
+    SIBLINGS after the terminator, not the terminator's own nested block.
 
     Skips trivial trailing nodes (``pass``, docstrings, ``...``) to avoid
     false positives on idiomatic ``return`` then ``pass`` stubs. Returns
@@ -4654,7 +4700,7 @@ def _py_unreachable_code(source: str) -> list[tuple[str, str, int]] | None:
     except (SyntaxError, ValueError):
         return None
 
-    findings: list[tuple[str, str, int]] = []
+    findings: list[tuple[str, str, int, int]] = []
 
     def _check_body(body: list[ast.stmt], owner: str):
         terminated = False
@@ -4663,7 +4709,10 @@ def _py_unreachable_code(source: str) -> list[tuple[str, str, int]] | None:
             if terminated:
                 if _is_trivial_after_terminator(stmt):
                     continue
-                findings.append((owner, term_kind, stmt.lineno))
+                findings.append((
+                    owner, term_kind,
+                    stmt.lineno, getattr(stmt, "end_lineno", stmt.lineno),
+                ))
                 continue
             if isinstance(stmt, _PY_TERMINATORS):
                 terminated = True
@@ -4701,6 +4750,18 @@ def _py_unreachable_code(source: str) -> list[tuple[str, str, int]] | None:
             _check_body(node.body, node.name)
 
     return findings
+
+
+def _py_unreachable_code(source: str) -> list[tuple[str, str, int]] | None:
+    """Statements unreachable due to an earlier unconditional terminator.
+
+    Returns ``(funcname, terminator_kind, line)`` triples (the spans core's
+    start lines) — the shape the unreachable_code validator consumes.
+    """
+    spans = _py_unreachable_spans(source)
+    if spans is None:
+        return None
+    return [(funcname, kind, line) for funcname, kind, line, _end in spans]
 
 
 def _rustc_metadata_compile(
