@@ -421,3 +421,15 @@ def test_nm_suffix_composes_with_profile_tag():
     finally:
         from capybase.prompt_profile import set_active_profile
         set_active_profile(None)
+
+
+def test_fresh_dispatch_with_usable_prev_excludes_seed():
+    """Rule completeness pin: propose(failures=None, prev_candidate=<with
+    text>) falls to the FRESH branch of the dispatch — the seed must still
+    be excluded (the ephemeral rule is about candidate existence, not about
+    which prompt class runs). Latent gap caught in review: the fresh path
+    originally defaulted near_miss=True unconditionally."""
+    prompt, pv, _ = _engine().build_attempt_prompt(
+        _unit(), _ctx(), prev_candidate=_cand())
+    assert _NM_MARKER not in prompt
+    assert pv == PROMPT_RESOLVE, pv

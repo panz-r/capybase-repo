@@ -2052,6 +2052,7 @@ def build_outline_resolve_prompt(
     budget: "TokenBudget | None" = None,
     *,
     profile: PromptProfile | None = None,
+    near_miss: bool = True,
 ) -> tuple[str, str]:
     """Build the resolve prompt under the active outline variant.
 
@@ -2069,7 +2070,8 @@ def build_outline_resolve_prompt(
     """
     if profile is None:
         profile = active_profile()
-    p = _resolve_prompt_parts(unit, context, budget=budget, profile=profile)
+    p = _resolve_prompt_parts(unit, context, budget=budget, profile=profile,
+                              near_miss=near_miss)
     intro, data, contract, rules = p["intro"], p["data"], p["contract"], p["rules"]
     if profile.outline is OutlineMode.NONE:
         prompt = _compose_resolve_prompt(
@@ -3517,7 +3519,7 @@ class ResolutionEngine:
         # the outline axis is active. The profile tag is folded into the
         # version for offline attribution.
         outline_prompt, outline_tag = build_outline_resolve_prompt(
-            unit, context, budget=_budget)
+            unit, context, budget=_budget, near_miss=_seed_ok)
         prof_tag = active_profile().tag()
         # Version composition: the "#nm" suffix rides the POST-BUDGET
         # prompt (marker check), before the profile/outline tag —
