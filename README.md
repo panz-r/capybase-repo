@@ -273,9 +273,10 @@ runs the full validation pipeline before it's applied.
    keep/delete/escalate decision and splices the chosen side verbatim.
 6. **LLM resolution** — the model resolves conflicts the pre-LLM layers
    declined, grounded in base + both sides + structural context + RAG few-shot.
-   On the standard LLM resolution path, a rejected structural/SBCR draft may
-   seed the first model attempt together with its validation failure
-   (near-miss seeding; default off, `mechanisms.enable_near_miss_seeding`).
+   On the standard LLM resolution path, a rejected structural/SBCR draft
+   seeds the first model attempt together with its validation failure
+   (near-miss seeding, default on; the seed is ephemeral — it drops out
+   once the model has its own candidate).
    For oversized files, a lightweight file skeleton (extracted entity names)
    gives the model global awareness the windowed conflict region can't provide.
    An empty first response fast-fails to verified single-side candidates

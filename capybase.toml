@@ -363,12 +363,14 @@ llm_critic = true
 # import is missing or a safety precondition fails; cargo/rustc remains
 # authoritative after the edit. Default ON.
 enable_import_union = true
-# Near-miss seeding (default OFF pending the paired targeted evaluation):
-# on the standard LLM resolution path, a rejected structural/SBCR draft may
-# seed the first model attempt together with its validation failure — the
-# seed is ephemeral (gone once the model has produced a usable candidate)
-# and all-or-nothing under the token budget. Flip via the paired A/B.
-enable_near_miss_seeding = false
+# Near-miss seeding (default ON — the paired targeted A/B won: 12/13
+# slice cases identical-or-better, no attributable regression, seeded
+# cases resolved in fewer LLM attempts): on the standard LLM resolution
+# path, a rejected structural/SBCR draft seeds the first model attempt
+# together with its validation failure — the seed is ephemeral (gone once
+# the model has produced a usable candidate) and all-or-nothing under the
+# token budget.
+enable_near_miss_seeding = true
 # SBCR tuning (arXiv:2605.16646 §4.1). Fitness is char-level Gestalt, mean-
 # aggregated over both parents; the search is union-constrained (every candidate
 # keeps all lines from both sides). These knobs expose the research-tuned params.

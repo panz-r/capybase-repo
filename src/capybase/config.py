@@ -733,16 +733,19 @@ class FutureConfig(BaseModel):
     # ON (always-on integral part), but the skip-when-empty gate means files
     # with no affected comments pay no cost.
     enable_comment_reconciliation: bool = True
-    # Near-miss seeding (S28-128, default OFF pending the paired evaluation):
-    # when the structural resolver or SBCR already produced a candidate and
-    # validation REJECTED it, the draft + its validator diagnostic seed the
-    # model's FIRST resolution instead of being discarded (CEGIS one stage
-    # earlier, zero extra model calls). EPHEMERAL: the seed drops out of
-    # prompts once the model has produced a usable candidate of its own;
-    # all-or-nothing under the token budget (below obligations in priority).
-    # Scope: the standard LLM resolution path only (repair/two-pass/shatter/
-    # block-capture prompts do not receive it).
-    enable_near_miss_seeding: bool = False
+    # Near-miss seeding (S28-128; default ON after the paired targeted A/B
+    # won: 12/13 slice cases identical-or-better, no attributable regression,
+    # seeded cases resolved in fewer LLM attempts with 27-51% less wall time
+    # — ledger S28-128 for the table): when the structural resolver or SBCR
+    # already produced a candidate and validation REJECTED it, the draft +
+    # its validator diagnostic seed the model's FIRST resolution instead of
+    # being discarded (CEGIS one stage earlier, zero extra model calls).
+    # EPHEMERAL: the seed drops out of prompts once the model has produced a
+    # usable candidate of its own; all-or-nothing under the token budget
+    # (below obligations in priority). Scope: the standard LLM resolution
+    # path only (repair/two-pass/shatter/block-capture prompts do not
+    # receive it).
+    enable_near_miss_seeding: bool = True
     # Deterministic import-union editor (Rust): after the model produces a
     # candidate, if change-accounting detects it copied one side verbatim and
     # thereby dropped an additive ``use`` import leaf from the other side,
