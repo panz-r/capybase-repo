@@ -499,3 +499,90 @@ def test_orchestrator_passes_samples_ceiling_to_risk(multi_unit_conflicted_repo)
         assert kw.get("samples_ceiling_retries") == 2, (
             f"orchestrator must pass samples_complex - 1 as the ceiling "
             f"(got {kw.get('samples_ceiling_retries')!r})")
+
+
+def test_samples_ceiling_runs_feedback_conditioned_retries(repo):
+    """The middle of the outer loop: the ceiling raises the CEGIS budget, so
+    with samples_complex=3 and max_retries=0 a unit gets up to 3 validated
+    iterations — draw 1 fails the syntax gate, iteration 2 is
+    feedback-conditioned (the repair prompt carries the validator failure)
+    and its passing candidate is accepted. Observed failure drives the
+    spend; the first-try case would have stopped at 1 call."""
+    import json
+
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator
+    from capybase.resolution_engine import ResolutionEngine
+    from tests.conftest import git
+
+    class ScriptedClient:
+        """Draw 1: broken python (fails validation). Draw 2: valid JSON
+        resolution. Records every prompt."""
+
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        def complete(self, messages, **kw):
+            prompt = (messages[-1]["content"]
+                      if isinstance(messages[-1], dict) else str(messages[-1]))
+            self.prompts.append(prompt)
+            from capybase.adapters.llm_openai import LLMResponse
+            if len(self.prompts) == 1:
+                # Draw 1: syntactically invalid python (hard-fails the gate).
+                text = "def greet(:\n    return broken( <<<\n"
+            else:
+                # Iteration 2: a valid feedback-conditioned merge.
+                text = json.dumps({
+                    "resolved_text": "a = 10\nb = 20",
+                    "explanation": "combine both edits",
+                })
+            return LLMResponse(text=text,
+                               raw={"_accumulated": {"finish_reason": "stop"}})
+
+    client = ScriptedClient()
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.model.samples_complex = 3
+    cfg.policy.max_retries_per_unit = 0   # budget = the samples ceiling alone
+    cfg.policy.max_recovery_retries_per_unit = 0
+    cfg.tests.required = False
+    cfg.tests.pre_continue = "true"
+    cfg.tests.final = "true"
+    cfg.routing.enabled = True
+    cfg.validation.require_whole_file_validation = False
+    cfg.validation.enable_per_unit_syntax_check = True
+    cfg.features.structural_resolution = False
+    cfg.features.combination_search = False
+    cfg.future.enable_block_capture = False
+    cfg.future.enable_source_portfolio = False
+    cfg.future.enable_comment_reconciliation = False
+    cfg.features.llm_critic = False
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    # A real single-unit conflict (adjacent-line edits).
+    (repo / "app.py").write_text("a = 1\nb = 2\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
+    git(repo, "branch", "feat"); git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text("a = 1\nb = 20\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "feat")
+    git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text("a = 10\nb = 2\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "main")
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected the conflict"
+
+    result = orch.run()
+    assert not result.escalated, result.reason
+    # Iteration 1: fresh draw fails the syntax gate. Iteration 2:
+    # feedback-conditioned repair passes. The ceiling (3) was not exhausted.
+    assert len(client.prompts) == 2, (
+        f"expected 2 validated iterations, got {len(client.prompts)}")
+    # Iteration 1 is the fresh resolve (no failure feedback); iteration 2
+    # carries the validator failure (observed failure drives the spend).
+    assert "rejected" not in client.prompts[0].lower() or \
+        "previous" not in client.prompts[0].lower()
+    assert "previous merge attempt" in client.prompts[1]
