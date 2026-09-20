@@ -15960,6 +15960,10 @@ class Orchestrator:
             # exit on the first passing candidate. Predicted difficulty sets
             # only the CEILING; the actual spend follows observed validation.
             n_cap = self._resolution_iteration_cap(difficulty)
+            # S28-130 audit follow-up: synthetic mechanism units journal
+            # their deterministic provenance under their OWN unit_id, so
+            # per-unit audits never read them as LLM-without-evidence.
+            self._emit_synthetic_provenance(unit)
 
             # Self-consistency: read from ModelConfig so the calibrated
             # profile overlay flows through. It is the explicit BATCH
@@ -17685,6 +17689,41 @@ class Orchestrator:
         out["mean_token_entropy"] = getattr(cand, "mean_token_entropy", None)
         return out
 
+    def _synthetic_unit_mechanism(self, unit: ConflictUnit) -> str | None:
+        """The deterministic mechanism that BUILT this unit, when the unit is
+        a synthetic mechanism unit (S28-130): `:true_side_stage` (the
+        true-side portfolio's whole-file stage), `:wholesale_winner_floor`
+        (the wholesale floor's winner-side unit), `:core` (a deferred-core
+        split fragment). These units enter _resolve_unit with the
+        mechanism's deterministic decision ALREADY made — their LLM loop,
+        when it runs, is the mechanism's own validation/repair stage, and
+        audits must not read them as "LLM without deterministic
+        evidence"."""
+        for suffix, mechanism in (
+            (":true_side_stage", "true_side_portfolio"),
+            (":wholesale_winner_floor", "wholesale_winner_floor"),
+            (":core", "deferred_core_split"),
+        ):
+            if unit.unit_id.endswith(suffix):
+                return mechanism
+        return None
+
+    def _emit_synthetic_provenance(self, unit: ConflictUnit) -> None:
+        """Journal the deterministic provenance of a synthetic mechanism
+        unit under ITS OWN unit_id (S28-130 audit follow-up: per-unit
+        analyses read deterministic evidence by unit_id, and synthetic
+        units previously looked like 'LLM without deterministic
+        evidence')."""
+        mechanism = self._synthetic_unit_mechanism(unit)
+        if mechanism is None:
+            return
+        self.journal.emit(
+            "synthetic_unit_provenance",
+            {"mechanism": mechanism,
+             "parent_unit_id": unit.unit_id.rsplit(":", 1)[0]},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+
     def _stash_near_miss(
         self, unit: ConflictUnit, mechanism: str,
         cand: CandidateResolution, validation: VerificationResult,
@@ -18245,13 +18284,6 @@ class Orchestrator:
             pres = _side_preservation(base_text, wtext, buffer)
             if pres is not None and pres >= 0.5:
                 return None  # the output weaves the winner — not degenerate
-        self.journal.emit(
-            "wholesale_winner_floor",
-            {"winner": winner,
-             "winner_preservation": pres if pres is not None else "n/a",
-             "had_buffer": bool(buffer)},
-            step_index=self.step, path=path,
-        )
         from capybase.conflict_model import (
             CandidateResolution as _FL_CR,
             ConflictSide as _FL_CS,
@@ -18268,6 +18300,13 @@ class Orchestrator:
             replayed=_FL_CS(label="REPLAYED_COMMIT_SIDE", text=rep),
             original_worktree_text=units[0].original_worktree_text,
             marker_span=None,
+        )
+        self.journal.emit(
+            "wholesale_winner_floor",
+            {"winner": winner,
+             "winner_preservation": pres if pres is not None else "n/a",
+             "had_buffer": bool(buffer)},
+            step_index=self.step, path=path, unit_id=unit.unit_id,
         )
         cand = _FL_CR(
             candidate_id=f"{unit.unit_id}:{winner}",

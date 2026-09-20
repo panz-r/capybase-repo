@@ -502,3 +502,76 @@ def test_two_pass_self_consistency_batch_preserved(conflicted_repo):
     assert engine.recorded == [3], (
         f"two-pass + self-consistency must draw the full batch (n_cap=3), "
         f"got n_samples={engine.recorded}")
+
+
+# ---------------------------------------------------------------------------
+# S28-130 audit follow-up: synthetic mechanism units journal their
+# deterministic provenance under their OWN unit id
+# ---------------------------------------------------------------------------
+
+
+def test_synthetic_unit_mechanism_mapping():
+    from capybase.orchestrator import Orchestrator
+
+    cfg = Config()
+    orch = Orchestrator(cfg, repo=".", resolution_engine=None,
+                        out=lambda *_a, **_k: None)
+
+    def unit(uid):
+        return ConflictUnit(
+            session_id="s", step_index=1, path="f.py", language="python",
+            conflict_type="UU", unit_id=uid, unit_kind="whole_file",
+            base=ConflictSide(label="BASE", text="b"),
+            current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="c"),
+            replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="r"),
+            original_worktree_text="x", marker_span=None,
+        )
+
+    assert orch._synthetic_unit_mechanism(
+        unit("app.py:true_side_stage")) == "true_side_portfolio"
+    assert orch._synthetic_unit_mechanism(
+        unit("conflict_0084.py:wholesale_winner_floor")
+    ) == "wholesale_winner_floor"
+    assert orch._synthetic_unit_mechanism(
+        unit("app.py:1:0:core")) == "deferred_core_split"
+    # regular cascade units are NOT synthetic
+    assert orch._synthetic_unit_mechanism(unit("app.py:1:0")) is None
+
+
+def test_emit_synthetic_provenance_records_under_own_unit_id(repo):
+    from capybase.orchestrator import Orchestrator
+
+    cfg = Config()
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=None,
+                        out=lambda *_a, **_k: None)
+    unit = _unit(False)
+    unit.unit_id = "app.py:wholesale_winner_floor"
+    unit.path = "app.py"
+    orch._emit_synthetic_provenance(unit)
+    events = [json.loads(l) for l in
+              orch.paths.journal.read_text(encoding="utf-8").splitlines()
+              if l.strip()]
+    prov = [e for e in events
+            if e["event_type"] == "synthetic_unit_provenance"]
+    assert len(prov) == 1
+    assert prov[0]["unit_id"] == "app.py:wholesale_winner_floor"
+    assert prov[0]["payload"]["mechanism"] == "wholesale_winner_floor"
+    # regular units emit nothing
+    orch._emit_synthetic_provenance(_unit(False))
+    events = [json.loads(l) for l in
+              orch.paths.journal.read_text(encoding="utf-8").splitlines()
+              if l.strip()]
+    assert len([e for e in events
+                if e["event_type"] == "synthetic_unit_provenance"]) == 1
+
+
+def test_wholesale_floor_event_carries_unit_id():
+    """The floor's gate evidence (winner + preservation) must be journaled
+    under the synthetic unit's unit_id — pre-fix it carried only the path,
+    so per-unit audits read the floor unit as LLM-without-evidence."""
+    import inspect
+    from capybase.orchestrator import Orchestrator
+    src = inspect.getsource(Orchestrator._wholesale_winner_floor)
+    assert "unit_id=unit.unit_id" in src, (
+        "the wholesale_winner_floor journal event must carry the synthetic "
+        "unit's unit_id (S28-130)")
