@@ -1155,3 +1155,97 @@ def test_safety_profile_missing_is_default():
     assert mp.safety.is_default is True
     with _pytest.raises(ValueError, match="no 'prompt' section"):
         ModelProfile.from_dict({"model": "x", "max_tokens": 4096})
+
+
+# ---------------------------------------------------------------------------
+# S28-129/132: the calibration mirror draws lazily — samples is an upper
+# limit with early exit on the first CORRECT draw; self-consistency keeps
+# its batch (the vote needs the full set).
+# ---------------------------------------------------------------------------
+
+
+def _mirror_fixtures():
+    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
+    from capybase.conflict_model import ContextBundle
+
+    conflict = CALIBRATION_CONFLICTS[0]
+    context = ContextBundle(primary_text="")
+    return conflict, ContextBundle
+
+
+def _scripted_client(responses):
+    import json as _json
+
+    from capybase.adapters.llm_openai import LLMResponse
+
+    class Client:
+        def __init__(self):
+            self._responses = list(responses)
+            self.calls = 0
+
+        def complete(self, messages, **kw):
+            self.calls += 1
+            i = min(self.calls - 1, len(self._responses) - 1)
+            # Every response is the DESIRED resolved_text, wrapped in the
+            # resolve-prompt's JSON contract (a raw non-JSON response would
+            # parse-fail to an empty candidate and never score correct).
+            payload = _json.dumps({"resolved_text": self._responses[i],
+                                   "explanation": "m"})
+            return LLMResponse(text=payload,
+                               raw={"_accumulated": {"finish_reason": "stop"}})
+
+    return Client()
+
+
+def test_mirror_early_exits_on_first_correct_draw():
+    """samples=3 with a correct SECOND draw: exactly 2 completion requests
+    (the third draw is never made — the ceiling is an upper limit), and the
+    winner is the correct one."""
+    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
+    from capybase.config import ModelConfig
+    from capybase.probes import _resolve_under_config
+
+    conflict = CALIBRATION_CONFLICTS[0]
+    correct = conflict.expected_text
+    client = _scripted_client(["def wrong(:\n", correct])
+    winner, _lat = _resolve_under_config(
+        client, ModelConfig(samples=3), conflict,
+        __import__("capybase.conflict_model", fromlist=["ContextBundle"])
+        .ContextBundle(primary_text=""))
+    assert winner is not None and winner.resolved_text == correct
+    assert client.calls == 2, (
+        f"early exit expected 2 requests, got {client.calls}")
+
+
+def test_mirror_all_wrong_returns_last_draw_at_ceiling():
+    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
+    from capybase.config import ModelConfig
+    from capybase.probes import _resolve_under_config
+
+    conflict = CALIBRATION_CONFLICTS[0]
+    client = _scripted_client(["def wrong(:\n"])
+    winner, _lat = _resolve_under_config(
+        client, ModelConfig(samples=3), conflict,
+        __import__("capybase.conflict_model", fromlist=["ContextBundle"])
+        .ContextBundle(primary_text=""))
+    assert winner is not None  # the last draw is returned, scored as a miss
+    assert client.calls == 3, "the ceiling must bound the requests"
+
+
+def test_mirror_self_consistency_keeps_batch():
+    """The batch exception: enable_self_consistency draws the FULL set (the
+    vote needs it) even though the standard path is single-draw."""
+    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
+    from capybase.config import ModelConfig
+    from capybase.probes import _resolve_under_config
+
+    conflict = CALIBRATION_CONFLICTS[0]
+    client = _scripted_client(["    return 0\n"])
+    winner, _lat = _resolve_under_config(
+        client, ModelConfig(samples=3, enable_self_consistency=True),
+        conflict, __import__("capybase.conflict_model",
+                             fromlist=["ContextBundle"])
+        .ContextBundle(primary_text=""))
+    assert client.calls == 3, (
+        f"self-consistency must draw the full batch, got {client.calls}")
+    assert winner is not None

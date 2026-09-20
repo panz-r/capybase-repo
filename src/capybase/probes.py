@@ -775,35 +775,54 @@ def _resolve_under_config(
 ) -> tuple[Any, float]:
     """Resolve one conflict under ``model_cfg`` and return (winner_candidate, latency_ms).
 
-    Mirrors the orchestrator's ``_resolve_unit`` branch: two_pass vs consensus vs
-    plain propose, gated on the config flags. Calibration thus evaluates each
-    setting through the SAME resolution path the orchestrator uses at runtime, so
-    the A/B result reflects real behavior. The winner is ``candidates[0]`` (the
-    engine already ranks by consensus when applicable).
+    Mirrors the orchestrator's OUTER VALIDATED LOOP (S28-129): ``samples``
+    is an upper limit — the mirror draws ONE candidate per iteration and
+    scores it against the conflict's blessed expected text; the first
+    correct draw exits early (a wrong draw costs one request, not N), and
+    the ceiling bounds the spend. Self-consistency is the explicit batch
+    exception: majority voting needs the full set, so that path draws all
+    N upfront and returns the vote winner (unchanged semantics). Known
+    approximation: production iterations 2+ are repair-framed (validator
+    feedback), the mirror redraws the same prompt — same candidates and
+    cost model, different framing.
     """
+    from capybase.quality import score_candidate
     from capybase.resolution_engine import ResolutionEngine
 
     engine = ResolutionEngine(model_cfg, client=client)
     t0 = time.monotonic()
-    n = max(1, model_cfg.samples)
-    if model_cfg.two_pass:
-        candidates = engine.propose_two_pass(
-            conflict.unit, context, n_samples=n,
-            temperature=model_cfg.sampling_temperature,
-        )
-    elif model_cfg.enable_self_consistency:
-        # propose_with_consensus returns (candidates, report); the other paths
-        # return just candidates. Unpack here so the winner extraction below is
-        # uniform — otherwise candidates[0] is the whole list, not the winner,
-        # and .resolved_text raises AttributeError (the "eval error" that
-        # silently disabled the self-consistency A/B on every prior calibrate).
+
+    if model_cfg.enable_self_consistency:
+        # Batch exception (vote needs the full set). propose_with_consensus
+        # returns (candidates, report) — unpack so the winner extraction is
+        # uniform (the "eval error" that once silenced the A/B).
+        n = max(1, model_cfg.samples)
         candidates, _report = engine.propose_with_consensus(
             conflict.unit, context, n_samples=n,
         )
-    else:
-        candidates = engine.propose(conflict.unit, context, n_samples=n)
+        latency_ms = (time.monotonic() - t0) * 1000.0
+        winner = candidates[0] if candidates else None
+        return winner, latency_ms
+
+    # Lazy validated draws: early exit on the first CORRECT candidate; the
+    # last non-empty draw is returned when none correct (scored as a miss,
+    # matching production's escalation-with-candidate).
+    winner = None
+    for _ in range(max(1, model_cfg.samples)):
+        if model_cfg.two_pass:
+            candidates = engine.propose_two_pass(
+                conflict.unit, context, n_samples=1,
+                temperature=model_cfg.sampling_temperature,
+            )
+        else:
+            candidates = engine.propose(
+                conflict.unit, context, n_samples=1)
+        if not candidates:
+            continue
+        winner = candidates[0]
+        if score_candidate(winner, conflict).correct:
+            break
     latency_ms = (time.monotonic() - t0) * 1000.0
-    winner = candidates[0] if candidates else None
     return winner, latency_ms
 
 
