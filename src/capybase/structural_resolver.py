@@ -4597,3 +4597,94 @@ def _container_trailer(
         return enc_lines[trailer_start:]
     # Trailer = everything after the last base entity's last line, through close.
     return enc_lines[end_idx + 1:]
+
+
+# ---------------------------------------------------------------------------
+# S28-150: rename-family engagement telemetry
+# ---------------------------------------------------------------------------
+
+import re as _re_s150
+
+_IDENT_TOKEN_RE = _re_s150.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _line_identifier_only(a: str, b: str) -> bool:
+    """True when two lines differ ONLY in identifier tokens.
+
+    Blanking every identifier must make the lines equal (same keywords,
+    punctuation, literals, layout) while the raw lines differ — the
+    conservative core of the rename-shape census heuristic. ``foo(bar)``
+    vs ``foo()`` does NOT count (an identifier disappeared, changing the
+    blanked forms).
+    """
+    return (a != b
+            and _IDENT_TOKEN_RE.sub("X", a) == _IDENT_TOKEN_RE.sub("X", b))
+
+
+def _identifier_only_pair_count(base_text: str, side_text: str) -> int:
+    """Changed line pairs (base vs one side) that differ only in identifiers."""
+    b = (base_text or "").split("\n")
+    s = (side_text or "").split("\n")
+    n = 0
+    for tag, i1, i2, j1, j2 in line_matcher(b, s).get_opcodes():
+        if tag != "replace" or (i2 - i1) != (j2 - j1):
+            continue
+        for k in range(i2 - i1):
+            if _line_identifier_only(b[i1 + k], s[j1 + k]):
+                n += 1
+    return n
+
+
+def _rename_engagement_probe(unit: ConflictUnit) -> dict | None:
+    """Classify WHY the rename family did not engage on a rename-shaped unit.
+
+    S28-150 (the clickhouse-0018/cython-0147 class): rename-shaped cases
+    whose journals show structural skipping with "no rule applied" — the
+    S28-135-activated family never attempted, and the decline was silent,
+    leaving the fuzzy-rename extension decision blind. Returns None when
+    the unit is NOT rename-shaped (fewer than 3 identifier-only changed
+    line pairs on both sides — the census heuristic); otherwise a compact
+    report mirroring ``_prepare_entity_merge``'s precondition prefix:
+    language support, per-side parse success, entity counts, duplicate
+    identities, and detected rename counts. Journal-only — no behavior.
+    """
+    lang = unit.language
+    meta = getattr(unit, "structural_metadata", {}) or {}
+    base_t = unit.base.text or ""
+    cur_t = unit.current.text or ""
+    rep_t = unit.replayed.text or ""
+    cur_pairs = _identifier_only_pair_count(base_t, cur_t)
+    rep_pairs = _identifier_only_pair_count(base_t, rep_t)
+    if max(cur_pairs, rep_pairs) < 3:
+        return None
+    out: dict = {
+        "identifier_only_pairs": {"current": cur_pairs, "replayed": rep_pairs},
+        "language": lang,
+        "language_supported": lang in ("python", "rust", "c", "cpp", "c++"),
+        "enclosing_metadata": bool(meta.get("enclosing_node_text")),
+    }
+    if not out["language_supported"]:
+        out["stage"] = "language_unsupported"
+        return out
+    try:
+        from capybase.adapters import structural
+        base_ents = structural.enumerate_entities(base_t, lang)
+        cur_ents = structural.enumerate_entities(cur_t, lang)
+        rep_ents = structural.enumerate_entities(rep_t, lang)
+    except Exception:  # noqa: BLE001 — probe is advisory
+        out["stage"] = "enumeration_error"
+        return out
+    if base_ents is None or cur_ents is None or rep_ents is None:
+        out["stage"] = "parse_failed"
+        return out
+    out["base_entities"] = len(base_ents)
+    out["current_entities"] = len(cur_ents)
+    out["replayed_entities"] = len(rep_ents)
+    ctx = _prepare_entity_merge(unit)
+    if ctx is None:
+        out["stage"] = "enumeration_precondition_failed"
+        return out
+    out["stage"] = "enumerated"
+    out["current_renames"] = len(ctx.cur_renames)
+    out["replayed_renames"] = len(ctx.rep_renames)
+    return out

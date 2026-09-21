@@ -6374,6 +6374,27 @@ class Orchestrator:
                 UnitOutcome(unit=unit), mechanism="structural",
                 decision="skip", reason="no rule applied",
             )
+            # S28-150: rename-family engagement telemetry — when a
+            # rename-shaped unit (>=3 identifier-only changed line pairs,
+            # the census heuristic) skips structural, journal WHY the
+            # rename family never engaged (language? parse? entity counts?
+            # duplicates? enumerated-but-declined). Journal-only: the
+            # fuzzy-rename extension decision rests on this distribution.
+            try:
+                from capybase.structural_resolver import (
+                    _rename_engagement_probe as _s150_probe,
+                )
+                _s150 = _s150_probe(unit)
+                if _s150 is not None:
+                    self.journal.emit(
+                        "structural_rename_probe",
+                        _s150,
+                        step_index=self.step,
+                        path=unit.path,
+                        unit_id=unit.unit_id,
+                    )
+            except Exception:  # noqa: BLE001 — probe is advisory
+                pass
             return None
         cand = CandidateResolution(
             candidate_id=f"{unit.unit_id}:structural",
