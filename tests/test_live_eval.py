@@ -315,3 +315,78 @@ def test_infra_lost_ignores_low_content_and_other_classes():
     r2.terminal_reason = ""
     assert mod._recover_infra_lost(r2) is False
     assert r2.terminal_reason == ""
+
+
+# ---------------------------------------------------------------------------
+# S28-140 part 1: oracle-calibrated validation (the harness-side gate)
+# ---------------------------------------------------------------------------
+
+def _wrapper(exempt, result):
+    mod = _load_module()
+    w = mod._OracleCalibratedVerification(
+        object(), exempt, case_id="t")
+    return w._calibrate(result)
+
+
+def _fail_result(msg):
+    from types import SimpleNamespace
+    return SimpleNamespace(passed=False, hard_failures=[
+        SimpleNamespace(validator="syntax", message=msg),
+        SimpleNamespace(validator="syntax", message="error: other defect"),
+    ], warnings=[])
+
+
+def test_oracle_calibrated_downgrades_matching_failure():
+    """The nlohmann-0038 shape: the oracle's own 'stray @' text cannot
+    implicate the resolution — that hard failure downgrades to a warning
+    while the unrelated one keeps the result failed."""
+    from capybase.verification import VerificationWarning
+    r = _wrapper(["error: stray '@' in program"],
+                 _fail_result("error: stray '@' in program"))
+    assert len(r.hard_failures) == 1
+    assert "other defect" in r.hard_failures[0].message
+    assert r.passed is False
+    assert any(isinstance(w, VerificationWarning) and
+               "[oracle-calibrated]" in w.message
+               for w in r.warnings)
+
+
+def test_oracle_calibrated_passes_when_only_oracle_defects_remain():
+    from types import SimpleNamespace
+    r = _wrapper(
+        ["error: stray '@' in program"],
+        SimpleNamespace(passed=False, hard_failures=[
+            SimpleNamespace(validator="syntax",
+                            message="/p/g.cpp:9:5: error: stray "
+                                    "'@' in program"),
+        ], warnings=[]))
+    assert r.passed is True
+    assert r.hard_failures == []
+    assert len(r.warnings) == 1
+
+
+def test_oracle_calibrated_untouched_without_match_or_exempt():
+    mod = _load_module()
+    # no matching text: result untouched (identity of fields)
+    r = _wrapper(["error: totally different"], _fail_result("error: stray '@'"))
+    assert len(r.hard_failures) == 2 and r.passed is False
+    # empty exemption set: nothing to do
+    w = mod._OracleCalibratedVerification(object(), [], case_id="t")
+    rr = _fail_result("error: stray '@' in program")
+    assert w._calibrate(rr) is rr
+
+
+def test_oracle_exempt_errors_extraction():
+    mod = _load_module()
+    probe = {"toolchain_dead": False,
+             "probes": {"oracle": {"rc": 1,
+                                   "sig": ["error: stray '@' in program"]},
+                        "current": {"rc": 1, "sig": ["error: other"]}}}
+    assert mod._oracle_exempt_errors(probe) == ["error: stray '@' in program"]
+    # toolchain-dead cases belong to the era class, not the exemption
+    assert mod._oracle_exempt_errors(
+        {**probe, "toolchain_dead": True}) == []
+    # oracle passed / probe missing: no exemptions
+    assert mod._oracle_exempt_errors(
+        {"probes": {"oracle": {"rc": 0, "sig": []}}}) == []
+    assert mod._oracle_exempt_errors(None) == []

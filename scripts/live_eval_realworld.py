@@ -2060,6 +2060,86 @@ def _recover_infra_lost(r: "CaseResult") -> bool:
     return True
 
 
+class _OracleCalibratedVerification:
+    """S28-140 part 1: the oracle-calibration gate (eval-harness side).
+
+    The toolchain-era preflight already compiled the ORACLE in the
+    materialized tree; when it fails with real compile errors, those
+    error texts are the oracle's OWN defects — a candidate hard failure
+    carrying the same text is the validator rejecting against an
+    impossible bar (nlohmann-json-0038: three candidates rejected on
+    "stray '@' in program" while the case scored sim 1.00). This wrapper
+    downgrades matching hard failures to warnings and recomputes the
+    verdict. Contamination guard: only the oracle's normalized error
+    TEXTS cross into the gate — never the oracle source; the engine and
+    its verification pipeline are unmodified.
+    """
+
+    def __init__(self, inner, exempt_errors, case_id: str = ""):
+        self._inner = inner
+        self._exempt = [e for e in (exempt_errors or []) if e]
+        self._case_id = case_id
+        self.exemptions_applied: list[dict] = []
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def _calibrate(self, r):
+        if r.passed or not self._exempt:
+            return r
+        from capybase.verification import VerificationWarning
+        kept, moved = [], []
+        for f in (r.hard_failures or []):
+            msg = getattr(f, "message", "") or ""
+            matched = next(
+                (e for e in self._exempt if e and e in msg), None)
+            if matched is not None:
+                moved.append((f, matched))
+            else:
+                kept.append(f)
+        if not moved:
+            return r
+        r.hard_failures = kept
+        r.passed = not kept
+        for f, matched in moved:
+            r.warnings = list(getattr(r, "warnings", []) or []) + [
+                VerificationWarning(
+                    validator=getattr(f, "validator", "") or "oracle_calibrated",
+                    message=f"[oracle-calibrated] {msg}")]
+        self.exemptions_applied.append({
+            "matched": moved[0][1],
+            "downgraded": len(moved),
+            "remaining_hard": len(kept),
+        })
+        return r
+
+    def verify(self, *a, **kw):
+        return self._calibrate(self._inner.verify(*a, **kw))
+
+    def verify_file(self, *a, **kw):
+        return self._calibrate(self._inner.verify_file(*a, **kw))
+
+
+def _oracle_exempt_errors(probe: dict | None) -> list[str]:
+    """The oracle's own compile-error texts from the preflight probe.
+
+    Non-empty only when the oracle probe RAN and failed with a real
+    error signature (rc != 0, non-empty sig) while the case was NOT
+    toolchain-dead (the sides did not fail identically — the era class
+    already owns that shape)."""
+    if not probe or probe.get("toolchain_dead"):
+        return []
+    o = (probe.get("probes") or {}).get("oracle") or {}
+    if o.get("rc") in (0, None):
+        return []
+    return [s for s in (o.get("sig") or []) if s]
+
+
+# S28-140 part 1: opt-in via --oracle-calibrate (measurement-semantics
+# change; the targeted rerun measures it before any default flip).
+_ORACLE_CALIBRATE = False
+
+
 def run_case(case: Case, client: OpenAICompatibleClient, *,
              flights_dir: Path | None = None,
              td: str | None = None,
@@ -2136,6 +2216,14 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         engine = ResolutionEngine(cfg.model, client=client)
         orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
                             out=lambda *_a, **_k: None)
+        # S28-140 part 1: oracle-calibrated validation (opt-in). The
+        # preflight's oracle probe ran above; its error texts become the
+        # exemption set the gate downgrades to warnings.
+        if _ORACLE_CALIBRATE:
+            _ex = _oracle_exempt_errors(_cached_probe)
+            if _ex:
+                orch.verification = _OracleCalibratedVerification(
+                    orch.verification, _ex, case_id=case.id)
         try:
             step = orch.run()
             res.escalated = bool(step.escalated)
@@ -2161,6 +2249,16 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         # FR2a flight recorder: copy the per-case session artifacts out of the
         # temp repo. The session root contains the full §1 artifact list.
         res.session_id = getattr(orch, "session_id", "")
+        # S28-140 part 1: journal the calibration outcomes for the census.
+        _cal = getattr(orch.verification, "exemptions_applied", None)
+        if _cal:
+            try:
+                orch.journal.emit(
+                    "oracle_calibrated_exemption",
+                    {"applied": len(_cal), "detail": _cal[:5]},
+                    step_index=getattr(orch, "step", 0))
+            except Exception:  # noqa: BLE001 — journaling is advisory
+                pass
         if flights_dir is not None and res.session_id:
             try:
                 import shutil
@@ -2487,7 +2585,14 @@ def main():
                     help="Print a failure census report from an existing results JSON and exit. "
                          "Classifies each escalated case by root diagnostic category. Example: "
                          "--census /tmp/capybase-live/c-live-full-corpus.json")
+    ap.add_argument("--oracle-calibrate", action="store_true",
+                    help="S28-140 part 1: when the toolchain-era preflight's oracle probe "
+                         "fails with real compile errors, downgrade candidate hard failures "
+                         "carrying the same error text to warnings (the oracle's own defects "
+                         "cannot implicate the resolution). Eval-only; changes measurement "
+                         "semantics.")
     args = ap.parse_args()
+    globals()["_ORACLE_CALIBRATE"] = bool(args.oracle_calibrate)
 
     # Startup sweep: remove stale capy-rw-* temp dirs from prior runs that
     # were killed (SIGTERM/SIGKILL) before their atexit handler could run.
