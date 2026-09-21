@@ -480,14 +480,33 @@ FULL_FILE_MIDBAND_RATIO_MIN = 0.55
 FULL_FILE_MIDBAND_DOMINANCE_MULT = 2.5
 
 
+#: Side_churn's histogram matching is super-linear in input size and the C
+#: seam OOMs on the corpus's monster generated files (php-0089/0122's
+#: zend_vm_execute.h: 123K lines killed the whole orchestrator with a
+#: MemoryError mid-take, S28-164). Past this many lines the churn falls
+#: back to an O(n) multiset diff — semantically near-identical for
+#: gating (a moved line cancels in both), and only ever consulted on
+#: huge generated files where "which side changed more" is not subtle.
+_SIDE_CHURN_MULTISETH_LINES = 30_000
+
+
 def side_churn(base_text: str, side_text: str) -> int:
     """Absolute changed-line count of one side vs the base (both directions).
 
     The full-file analogue of the fragment diffs in structural_resolver —
     same histogram-diff seam (``line_matcher``), applied to whole files.
+    Files beyond ``_SIDE_CHURN_MULTISETH_LINES`` lines use an O(n) multiset
+    diff instead: the histogram seam's memory is unbounded there (the
+    php-0089 MemoryError), and on such files the churn only feeds
+    winner-selection gates where the multiset answer is equally decisive.
     """
     b = base_text.splitlines()
     s = side_text.splitlines()
+    if max(len(b), len(s)) > _SIDE_CHURN_MULTISETH_LINES:
+        from collections import Counter
+
+        cb, cs = Counter(b), Counter(s)
+        return sum((cb - cs).values()) + sum((cs - cb).values())
     n = 0
     for tag, i1, i2, j1, j2 in line_matcher(b, s).get_opcodes():
         if tag != "equal":

@@ -122,3 +122,21 @@ def test_symmetric_midband_never_floors():
     out = orch._wholesale_winner_floor(
         "f.c", None, [_mk_unit(_BASE)], buffer="totally other text\n")
     assert out is None
+
+
+def test_side_churn_multiset_fallback_on_huge_files():
+    """S28-164: past the line threshold the churn uses the O(n) multiset
+    diff — the histogram seam OOMs on the 123K-line php VM-executor
+    files and killed the whole orchestrator mid-take."""
+    from capybase.merge_intent import side_churn
+    base = "\n".join(f"int fn{i}(void) {{ return {i}; }}" for i in range(40000))
+    side = "\n".join(
+        (f"int new{i}(void) {{ return {i}; }}" if i < 100
+         else f"int fn{i}(void) {{ return {i}; }}")
+        for i in range(40000))
+    n = side_churn(base, side)
+    assert n == 200  # 100 removed + 100 added — the multiset answer
+    # small files keep the histogram path: same substitution, same count
+    small_b = "int a;\nint b;\nint c;\n"
+    small_s = "int a;\nint B;\nint c;\n"
+    assert side_churn(small_b, small_s) == 2
