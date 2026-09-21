@@ -7561,7 +7561,11 @@ class Orchestrator:
             # The search declined (modification conflict, below floor, shrinkage
             # guard, …). Journal the reason + fitness so a skip isn't silent and
             # the fitness that was computed isn't thrown away (matches how
-            # _try_exact_reuse instruments its declines).
+            # _try_exact_reuse instruments its declines). The fitness is ALSO
+            # stashed on the unit: the ordered-splice stage (S28-139) gates on
+            # the ambiguity band — plausible composition, similarity can't
+            # discriminate.
+            unit.structural_metadata["_sbcr_fitness"] = result.fitness
             reason = result.skip_reason or "no candidate found"
             self._record_resolution_attempt(
                 UnitOutcome(unit=unit), mechanism="sbcr",
@@ -7581,6 +7585,7 @@ class Orchestrator:
         bal = balance(unit)
         threshold = self.config.routing.min_balance_for_sbcr_accept
         if self.config.routing.enabled and bal < threshold:
+            unit.structural_metadata["_sbcr_fitness"] = result.fitness
             self._record_resolution_attempt(
                 UnitOutcome(unit=unit), mechanism="sbcr",
                 decision="skip",
@@ -7891,6 +7896,110 @@ class Orchestrator:
             "candidate_accepted",
             {"candidate_id": cand.candidate_id, "via": "test_gated_side",
              "side": side_label},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        return outcome
+
+    def _try_ordered_splice(self, unit: ConflictUnit) -> UnitOutcome | None:
+        """S28-139: ordered splice selection for additive conflicts.
+
+        When SBCR declined with fitness in the ambiguity band, the conflict's
+        sides are additive blocks and the open question is their ORDER. The
+        model returns a tiny selection/order answer over the blocks; capybase
+        materializes verbatim (copied code byte-identical, tens of tokens per
+        attempt instead of a full regeneration). Protocol violations latch
+        ``_splice_protocol_failed`` and the unit falls to normal generation;
+        a spliced candidate that fails validation also falls through — the
+        full LLM loop stays the backstop, exactly like block capture.
+        """
+        from capybase.splice_selection import (
+            PROMPT_SPLICE_SELECTION,
+            build_splice_prompt,
+            decompose_chunks,
+            materialize,
+            parse_splice_answer,
+        )
+
+        fut = self.config.future
+        if unit.structural_metadata.get("_splice_protocol_failed"):
+            return None
+        # Gate 1: SBCR's fitness in the ambiguity band — a plausible
+        # composition exists but similarity couldn't discriminate the order.
+        fitness = unit.structural_metadata.get("_sbcr_fitness")
+        if (fitness is None
+                or not fut.splice_fitness_low <= fitness < fut.sbcr_floor):
+            return None
+        # Gate 2: the sides decompose into an orderable block set.
+        chunks = decompose_chunks(
+            unit.current.text or "", unit.replayed.text or "",
+            max_chunks=fut.splice_max_chunks)
+        if chunks is None:
+            return None
+
+        prompt = build_splice_prompt("CURRENT_UPSTREAM", "REPLAYED_COMMIT",
+                                     chunks)
+        if self.config.journal.enabled and self.config.journal.store_prompts:
+            self.journal.store_prompt(unit.unit_id, 0, prompt)
+        try:
+            # Low temperature: ordering is a decision, not generation.
+            resp = self.resolution_engine.raw_complete(
+                prompt, json_mode=False, temperature=0.2)
+        except Exception as exc:  # noqa: BLE001 - request failed → fall through
+            self.journal.emit(
+                "splice_selection_request_failed",
+                {"error": str(exc)[:200]},
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            return None
+        parsed = parse_splice_answer(
+            resp.text, chunks,
+            max_glue_insertions=fut.splice_max_glue_insertions,
+            max_glue_lines=fut.splice_max_glue_lines,
+        )
+        if parsed is None:
+            unit.structural_metadata["_splice_protocol_failed"] = True
+            self.journal.emit(
+                "splice_selection_protocol_failed",
+                {"fitness": round(fitness, 4)},
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            return None
+        order, glue = parsed
+        resolved_text = materialize(chunks, order, glue)
+        self.journal.emit(
+            "splice_selection_decision",
+            {"order": order, "glue_count": len(glue),
+             "fitness": round(fitness, 4)},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:ordered_splice",
+            unit_id=unit.unit_id,
+            model_name=self.config.model.model,
+            prompt_version=PROMPT_SPLICE_SELECTION,
+            resolved_text=resolved_text,
+            explanation=f"ordered splice: {' > '.join(order)}"
+                        f" (+{len(glue)} glue)",
+            provenance="ordered_splice",
+        )
+        validation = self.verification.verify(unit, cand)
+        if not validation.passed:
+            self.journal.emit(
+                "splice_selection_failed_validation",
+                {"order": order,
+                 "failures": [f.message for f in validation.hard_failures]},
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            return None
+        if self._strictness_blocks_pre_llm(unit, cand, validation,
+                                           "ordered_splice"):
+            return None  # strict mode declines to auto-accept; fall through
+        outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+        outcome.accepted = cand
+        self.journal.emit(
+            "candidate_accepted",
+            {"candidate_id": cand.candidate_id, "via": "ordered_splice",
+             "order": order},
             step_index=self.step, path=unit.path, unit_id=unit.unit_id,
         )
         return outcome
@@ -15748,6 +15857,22 @@ class Orchestrator:
             # neither side verbatim works.
             if self._last_side_probe_failures:
                 failures = list(self._last_side_probe_failures)
+
+        # Ordered splice selection (S28-139): block-capture generalized from
+        # a binary decision to an ordered splice. For ADDITIVE conflicts that
+        # SBCR declined with fitness in the ambiguity band (a plausible
+        # composition exists but similarity can't discriminate the ordering),
+        # the model returns a tiny selection/order answer over the sides'
+        # blocks and capybase materializes verbatim — copied code is byte-
+        # identical and the answer costs tens of tokens. AFTER test-gated
+        # side, BEFORE block capture; fresh resolve only; protocol violations
+        # latch the unit to normal generation (factoring pattern).
+        if failures is None and getattr(
+                self.config.future, "enable_ordered_splice", False):
+            early = self._cascade_mechanism(
+                "ordered_splice", self._try_ordered_splice, unit)
+            if early is not None:
+                return early  # accepted via ordered splice; LLM loop skipped
 
         # Block-capture resolution (large modify/delete): when one side deleted a
         # large block and the structural rule declined (the keeper modified it),

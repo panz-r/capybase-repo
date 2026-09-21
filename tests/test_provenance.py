@@ -71,6 +71,7 @@ def test_provenance_values_match_spec():
         "combination_search",
         "test_gated_side",
         "block_capture",
+        "ordered_splice",
         "history_augmented_llm",
         "plain_llm",
         "micro_patch_repair",

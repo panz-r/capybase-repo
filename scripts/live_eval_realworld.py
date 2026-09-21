@@ -1149,6 +1149,12 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     if os.environ.get("CAPYBASE_COMMIT_INTENT_CONTEXT", "").strip().lower() in (
             "1", "true", "yes"):
         cfg.future.enable_commit_intent_context = True
+    # Ordered-splice A/B arm (S28-139): the treatment run flips the
+    # default-off mechanism on without code edits; conversions of
+    # ambiguity-band SBCR declines into validated splices are the headline.
+    if os.environ.get("CAPYBASE_ORDERED_SPLICE", "").strip().lower() in (
+            "1", "true", "yes"):
+        cfg.future.enable_ordered_splice = True
     # Output token cap proportional to conflict size: a 3-line conflict doesn't
     # need 8K tokens of generation headroom (the model would hallucinate
     # boilerplate, wasting time on the slow endpoint). Cap at 16× the conflict's

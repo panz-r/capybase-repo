@@ -153,6 +153,9 @@ _PROVENANCE_SAFETY: dict[str, SafetyClass] = {
     "deterministic_wholesale_floor_current": SafetyClass.POLICY,
     "deterministic_wholesale_floor_replayed": SafetyClass.POLICY,
     "test_gated_side": SafetyClass.POLICY,
+    # S28-139: the model chooses the ORDER among valid arrangements of
+    # verbatim side blocks — a policy choice, not a transplant.
+    "ordered_splice": SafetyClass.POLICY,
     # D3 — reproducible search/repair (s27-71: the compiler-repair family
     # is acceptance's own textbook D3 example — the abstract keys below
     # never matched the produced deterministic_{gcc,cc}_fixit strings)

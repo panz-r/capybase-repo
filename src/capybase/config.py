@@ -754,6 +754,19 @@ class FutureConfig(BaseModel):
     # 0.99→1.00 on protobuf-0057 (treatment), block present in 3/12 cases'
     # prompts (the multi-hunk population it serves).
     enable_commit_intent_context: bool = True
+    # Ordered splice selection (S28-139): for additive conflicts SBCR declined
+    # with fitness in the ambiguity band, the model returns a tiny
+    # selection/order answer over the sides' blocks and capybase materializes
+    # verbatim. Default OFF pending the shape-positive A/B.
+    enable_ordered_splice: bool = False
+    # Lower edge of the ambiguity band: below this the composition itself is
+    # implausible (SBCR's decline is a capability signal, not an ordering
+    # signal) — defer to normal generation.
+    splice_fitness_low: float = 0.40
+    # Upper edge is sbcr_floor (0.60): at/above it SBCR already accepted.
+    splice_max_chunks: int = 16
+    splice_max_glue_insertions: int = 4
+    splice_max_glue_lines: int = 3
     # Near-miss seeding (S28-128; default ON after the paired targeted A/B
     # won: 12/13 slice cases identical-or-better, no attributable regression,
     # seeded cases resolved in fewer LLM attempts with 27-51% less wall time

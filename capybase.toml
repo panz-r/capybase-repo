@@ -394,6 +394,16 @@ enable_common_span_factoring = false
 # near-miss draft. Default ON after the 12-case A/B (verdict parity, block
 # present in 3/12 cases' prompts, sim 0.99->1.00 on protobuf-0057).
 enable_commit_intent_context = true
+# Ordered splice selection (S28-139): for additive conflicts SBCR declined
+# with fitness in the ambiguity band [splice_fitness_low, sbcr_floor), the
+# model returns a tiny selection/order answer over the sides' blocks and
+# capybase materializes verbatim (byte-identical copied code, tens of tokens
+# per attempt). Protocol violations latch the unit to normal generation.
+enable_ordered_splice = false
+splice_fitness_low = 0.40         # below: composition implausible, generate
+splice_max_chunks = 16            # more blocks = too fragmented to order
+splice_max_glue_insertions = 4
+splice_max_glue_lines = 3
 # SBCR tuning (arXiv:2605.16646 §4.1). Fitness is char-level Gestalt, mean-
 # aggregated over both parents; the search is union-constrained (every candidate
 # keeps all lines from both sides). These knobs expose the research-tuned params.
