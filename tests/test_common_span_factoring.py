@@ -15,6 +15,9 @@ from __future__ import annotations
 from capybase.common_spans import (
     expand_factored_resolution, factor_common_spans, ref_index,
 )
+from capybase.conflict_model import (
+    ConflictSide, ConflictUnit, estimate_tokens,
+)
 
 
 def _reviewer_example():
@@ -189,3 +192,79 @@ def test_expansion_of_rendered_base_by_spans_equals_base():
     assert f is not None
     expanded = expand_factored_resolution(f["rendered_base"], f["spans"])
     assert expanded == base
+
+
+# ---------------------------------------------------------------------------
+# S28-136 integration: the oversize pre-guard measures the FACTORED
+# essential, and the factoring stash computes BEFORE that guard (ordering
+# regression: the stash originally lived after the guard, so oversized
+# units were skipped before factoring ever engaged).
+# ---------------------------------------------------------------------------
+
+
+def test_oversize_guard_measures_factored_essential(repo):
+    """With the factoring stash active, the pre-guard's essential is the
+    FACTORED sides' size — not the raw windowed marker text."""
+    import json
+
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator
+    from capybase.resolution_engine import ResolutionEngine
+    from capybase.conflict_model import estimate_tokens
+
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.model.context_window = 300
+    # reserve=100 (not 0): the guard's `or 1024` fallback treats 0 as unset
+    cfg.model.completion_reserve = 100
+    cfg.tests.required = False
+    cfg.tests.pre_continue = "true"
+    cfg.tests.final = "true"
+    engine = ResolutionEngine(cfg.model, client=object())
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="b"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="c"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="r"),
+        original_worktree_text="def f():\n    x = 1\n",
+        marker_span=(1, 1),
+    )
+    rendered = {
+        "rendered_cur": "cur delta lines\n" * 10,
+        "rendered_base": "base delta lines\n" * 10,
+        "rendered_rep": "rep delta lines\n" * 10,
+    }
+    unit.structural_metadata["_common_span_factoring"] = rendered
+
+    oversized, essential, available = orch._llm_oversized_for_window(unit)
+    expected = estimate_tokens(
+        rendered["rendered_cur"] + "\n" + rendered["rendered_base"]
+        + "\n" + rendered["rendered_rep"])
+    assert essential == expected, (
+        f"the guard must measure the FACTORED sides ({expected}), "
+        f"got {essential}")
+    assert not oversized  # 10x3 delta lines fit comfortably in 300 tokens
+
+
+def test_factoring_stash_computes_before_oversize_guard():
+    """Ordering regression: the factoring stash must compute BEFORE the
+    oversize pre-guard in _resolve_unit — the pre-guard reads the stash to
+    measure the factored essential; a stash computed after the guard made
+    the whole mechanism dead for fresh oversized units (the exact cases
+    the pilot targets)."""
+    src = (repo_root() / "src" / "capybase" / "orchestrator.py").read_text()
+    stash_at = src.find("S28-136 common-span factoring (MUST run before")
+    guard_at = src.find("# LLM size guard: if the essential conflict content")
+    assert stash_at != -1 and guard_at != -1
+    assert stash_at < guard_at, (
+        "the factoring stash must be computed before the oversize pre-guard")
+
+
+def repo_root():
+    from pathlib import Path
+    return Path(__file__).resolve().parent.parent

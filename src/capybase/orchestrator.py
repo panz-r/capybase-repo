@@ -15771,6 +15771,34 @@ class Orchestrator:
             if early is not None:
                 return early
 
+            # S28-136 common-span factoring (MUST run before the oversize
+            # pre-guard below): when enabled, the stash computes here and
+            # the guard measures the FACTORED essential — oversized units
+            # that would fit after factoring get their LLM chance instead
+            # of a zero-attempt skip.
+                # S28-136 common-span factoring: when enabled (and not a
+                # two-pass resolve — its hand-rolled intent/code prompts are
+                # not wired for the protocol), factor runs identical across
+                # the three sides into shared spans; the sides render as
+                # deltas + @An references and the parse re-expands them.
+                if (getattr(self.config.future, "enable_common_span_factoring",
+                            False)
+                        and not self.config.model.two_pass
+                        and "_common_span_factoring" not in unit.structural_metadata
+                        and "_common_span_protocol_failed"
+                        not in unit.structural_metadata):
+                    from capybase.resolution_engine import _prompt_sides
+                    from capybase.common_spans import factor_common_spans
+                    cur_t, base_t, rep_t = _prompt_sides(unit)
+                    _factored = factor_common_spans(base_t, cur_t, rep_t)
+                    if _factored is not None:
+                        unit.structural_metadata["_common_span_factoring"] = {
+                            "spans": _factored["spans"],
+                            "rendered_cur": _factored["rendered_cur"],
+                            "rendered_base": _factored["rendered_base"],
+                            "rendered_rep": _factored["rendered_rep"],
+                        }
+
         # LLM size guard: if the essential conflict content
         # alone exceeds the model's context window, the LLM call is doomed (the
         # server truncates, the model fails). Skip it and escalate rather than
@@ -16036,29 +16064,6 @@ class Orchestrator:
             # their deterministic provenance under their OWN unit_id, so
             # per-unit audits never read them as LLM-without-evidence.
             self._emit_synthetic_provenance(unit)
-            # S28-136 common-span factoring: when enabled (and not a
-            # two-pass resolve — its hand-rolled intent/code prompts are
-            # not wired for the protocol), factor runs identical across
-            # the three sides into shared spans; the sides render as
-            # deltas + @An references and the parse re-expands them.
-            if (getattr(self.config.future, "enable_common_span_factoring",
-                        False)
-                    and not self.config.model.two_pass
-                    and "_common_span_factoring" not in unit.structural_metadata
-                    and "_common_span_protocol_failed"
-                    not in unit.structural_metadata):
-                from capybase.resolution_engine import _prompt_sides
-                from capybase.common_spans import factor_common_spans
-                cur_t, base_t, rep_t = _prompt_sides(unit)
-                _factored = factor_common_spans(base_t, cur_t, rep_t)
-                if _factored is not None:
-                    unit.structural_metadata["_common_span_factoring"] = {
-                        "spans": _factored["spans"],
-                        "rendered_cur": _factored["rendered_cur"],
-                        "rendered_base": _factored["rendered_base"],
-                        "rendered_rep": _factored["rendered_rep"],
-                    }
-
             # Self-consistency: read from ModelConfig so the calibrated
             # profile overlay flows through. It is the explicit BATCH
             # exception: majority voting needs all N candidates in hand, so
