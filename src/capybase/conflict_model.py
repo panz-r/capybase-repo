@@ -236,6 +236,12 @@ class ContextBundle(BaseModel):
     # by the context builder from its future_obligations_block + branch_intent_block.
     # Empty when neither applies.
     obligations_context: str = ""
+    # S28-138 Fix B: the replaying commit's non-conflicting hunks for this file
+    # ("what was this edit trying to accomplish", from the commit's own diff).
+    # Budget-trimmed between the structural anchor and the near-miss draft —
+    # conflict-specific content outranks generic context. Empty when the flag
+    # is off, no replayed commit, or the commit's only hunks ARE the conflict.
+    commit_intent_block: str = ""
     # High-trust deferred comments (Part J2, design §4): invariant-bearing
     # comments (MUST/NEVER/atomic/thread-safe/...) that were masked from the
     # code-resolution model on the first attempt. Revealed as a structured

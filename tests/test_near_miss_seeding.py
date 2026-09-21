@@ -201,7 +201,7 @@ def test_obligations_outlive_the_near_miss_in_trim_order():
         few_shot="", primary_text="", unit=_unit(False),
         history="", obligations=obligations, near_miss_block=draft,
     )
-    (_a, _s, _d, _f, _p, _h, obls_t, nm_t, trims, _sk) = result
+    (_a, _s, _d, _f, _p, _h, obls_t, _intent, nm_t, trims, _sk) = result
     assert obls_t != "" and "OBLIGATION-MARKER" in obls_t
     assert nm_t == ""
     assert any(t["section"] == "near_miss" for t in trims)

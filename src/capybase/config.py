@@ -745,6 +745,13 @@ class FutureConfig(BaseModel):
     # pipeline gates the reconstruction. Oversized units (sides alone
     # exceeding the window) get an LLM chance they otherwise never had.
     enable_common_span_factoring: bool = False
+    # Commit-intent context (S28-138 Fix B): surface the replaying commit's
+    # non-conflicting hunks for the conflict's file in the prompt — the
+    # commit's own diff is the cheapest evidence of what the edit was trying
+    # to accomplish (deterministic, zero model calls). Budget-trimmed between
+    # the structural anchor and the near-miss draft. Default OFF pending the
+    # multi-hunk A/B.
+    enable_commit_intent_context: bool = False
     # Near-miss seeding (S28-128; default ON after the paired targeted A/B
     # won: 12/13 slice cases identical-or-better, no attributable regression,
     # seeded cases resolved in fewer LLM attempts with 27-51% less wall time

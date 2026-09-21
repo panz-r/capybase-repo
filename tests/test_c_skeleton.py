@@ -286,8 +286,9 @@ def test_skeleton_appears_in_prompt_for_oversized_c_file():
         primary_text="",
         unit=_FakeUnit(),  # type: ignore[arg-type]
     )
-    # 10-tuple: last element is the skeleton block (near-miss slot 8th).
-    assert len(out) == 10
+    # 11-tuple (S28-138 added the commit_intent slot): the skeleton block
+    # is still last.
+    assert len(out) == 11
     skeleton_block = out[-1]
     assert "File skeleton" in skeleton_block
     assert "SQLITE_OK" in skeleton_block

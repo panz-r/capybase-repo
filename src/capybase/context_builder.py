@@ -38,6 +38,7 @@ class ContextBuilder:
         history_service: "HistoryQueryService | None" = None,
         repair_retriever: "Retriever | None" = None,
         repair_retriever_k: int = 1,
+        commit_intent_enabled: bool = False,
     ) -> None:
         self.context_lines = context_lines
         self.retriever = retriever
@@ -88,6 +89,12 @@ class ContextBuilder:
         # orchestrator (which has a journal) can emit an advisory. The context
         # builder has no journal access, so this is the seam for surfacing it.
         self.last_retrieval_error: str = ""
+        # S28-138 Fix B: the replaying commit's non-conflicting hunks for the
+        # conflict's file (its actual edit content, the intent signal). Off by
+        # default; the A/B env gate flips it. Cached per (oid, path) — the
+        # sides are iteration-invariant, so the diff is fetched once.
+        self.commit_intent_enabled = commit_intent_enabled
+        self._commit_intent_cache: dict[tuple[str, str], str] = {}
 
     def build(self, unit: ConflictUnit, budget: TokenBudget | None = None) -> ContextBundle:
         budget = budget or TokenBudget()
@@ -282,6 +289,7 @@ class ContextBuilder:
         if self.future_obligations_block:
             obl_parts.append(self.future_obligations_block)
         obligations_text = "\n".join(obl_parts)
+        commit_intent_text = self._build_commit_intent_block(unit)
         return ContextBundle(
             primary_text=primary,
             side_summaries=side_summaries,
@@ -294,9 +302,40 @@ class ContextBuilder:
             structural_view=structural_view,
             history_context=history_text,
             obligations_context=obligations_text,
+            commit_intent_block=commit_intent_text,
             high_trust_constraints=high_trust_constraints,
             masked_primary=masked_primary,
         )
+
+    def _build_commit_intent_block(self, unit: ConflictUnit) -> str:
+        """S28-138 Fix B: the replaying commit's non-conflicting hunks for this
+        file, or ''. Requires the flag, a history service (for git), and the
+        unit's replayed commit oid (recorded in structural_metadata by the
+        orchestrator). Cached per (oid, path) — sides are iteration-invariant.
+        """
+        if not self.commit_intent_enabled or self.history_service is None:
+            return ""
+        oid = unit.structural_metadata.get("replayed_commit_oid") or ""
+        if not oid:
+            return ""
+        parent = ""
+        try:
+            plan = getattr(self.history_service, "_plan", None)
+            for c in (getattr(plan, "source_commits", None) or []):
+                if getattr(c, "oid", "") == oid:
+                    parent = getattr(c, "parent_oid", "")
+                    break
+        except Exception:  # noqa: BLE001 - advisory
+            return ""
+        if not parent:
+            return ""
+        key = (oid, unit.path)
+        if key not in self._commit_intent_cache:
+            from capybase.history import nonconflicting_commit_hunks
+            self._commit_intent_cache[key] = nonconflicting_commit_hunks(
+                getattr(self.history_service, "_git", None),
+                oid, parent, unit.path, unit.marker_span)
+        return self._commit_intent_cache[key]
 
     def _build_history_context(self, unit: ConflictUnit) -> str:
         """Render a compact history-context block for the prompt, or ''.

@@ -711,3 +711,98 @@ def future_apply_probe(
             # the directory stayed). Always rmtree the path last.
             import shutil
             shutil.rmtree(worktree_path, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# S28-138 Fix B: the replaying commit's non-conflicting hunks as prompt
+# context — "what was this edit trying to accomplish", answered from the
+# commit's own diff at zero model cost.
+# ---------------------------------------------------------------------------
+
+def nonconflicting_commit_hunks(
+    git: Any,
+    commit_oid: str,
+    parent_oid: str,
+    path: str,
+    conflict_span: tuple[int, int] | None,
+    *,
+    max_tokens: int = 300,
+) -> str:
+    """Render the commit's changes to ``path`` OUTSIDE the conflict region.
+
+    For a conflict unit replayed from ``commit_oid``, the commit's OTHER hunks
+    in the same file are the cheapest evidence of the edit's intent (e.g. a
+    seconds→milliseconds conversion shows up as ``ttl_ms = ttl * 1000``
+    elsewhere in the file) — deterministic, free, and no extra model call.
+
+    Hunks overlapping ``conflict_span`` (the unit's marker_span, 0-based
+    inclusive) are dropped — that content is already in the conflict sides.
+    Remaining hunks are ordered by proximity to the conflict and rendered as
+    compact ``@@ line`` sections of changed lines, truncated at whole-hunk
+    boundaries under ``max_tokens``. Advisory: any failure (git unavailable,
+    fetch error, empty/binary diff, parse failure) returns "".
+    """
+    if git is None or not commit_oid or not parent_oid:
+        return ""
+    try:
+        patch = git._run_raw(  # noqa: SLF001 — same accessor the service uses
+            ["diff", "--no-color", "--unified=0",
+             f"{parent_oid}..{commit_oid}", "--", path]
+        ).decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - advisory
+        return ""
+    if not patch or not patch.strip():
+        return ""
+
+    # Parse unified=0 hunks: new-side start/count + the changed-line body.
+    hunks: list[dict[str, Any]] = []
+    cur: dict[str, Any] | None = None
+    for line in patch.split("\n"):
+        if line.startswith("@@"):
+            import re as _re
+            m = _re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)
+            if not m:
+                cur = None
+                continue
+            start = int(m.group(1))
+            count = int(m.group(2)) if m.group(2) else 1
+            cur = {"start": start - 1, "count": count, "lines": []}
+            hunks.append(cur)
+        elif cur is not None and line[:1] in ("+", "-"):
+            cur["lines"].append(line)
+    hunks = [h for h in hunks if h["lines"]]
+    if not hunks:
+        return ""
+
+    # Drop hunks overlapping the conflict span (0-based inclusive; the same
+    # 1-based→0-based conversion _diff_touches_span uses).
+    def _overlaps(h: dict[str, Any]) -> bool:
+        if conflict_span is None:
+            return False
+        lo, hi = conflict_span
+        h_lo = h["start"]
+        h_hi = h["start"] + max(h["count"] - 1, 0)
+        return h_lo <= hi and h_hi >= lo
+
+    others = [h for h in hunks if not _overlaps(h)]
+    if not others:
+        return ""
+    if conflict_span is not None:
+        others.sort(key=lambda h: abs(h["start"] - conflict_span[0]))
+
+    from capybase.conflict_model import estimate_tokens
+    parts: list[str] = [
+        "The commit being replayed also changed this file OUTSIDE the "
+        "conflict (context for its intent):"
+    ]
+    used = estimate_tokens(parts[0])
+    for h in others:
+        section = f"@@ line {h['start']} @@\n" + "\n".join(h["lines"])
+        t = estimate_tokens(section)
+        if used + t > max_tokens:
+            break
+        parts.append(section)
+        used += t
+    if len(parts) == 1:
+        return ""
+    return "\n".join(parts)

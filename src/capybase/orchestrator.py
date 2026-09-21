@@ -5150,6 +5150,8 @@ class Orchestrator:
             slice_search_globs=config.structural.slice_search_globs,
             slice_repo_root=str(self.git.repo),
             repair_retriever=repair_retriever,
+            commit_intent_enabled=getattr(
+                config.future, "enable_commit_intent_context", False),
         )
         # Semantic entity matching : install a shared
         # embeddings client on the structural adapter so match_entities can run

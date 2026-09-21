@@ -1143,6 +1143,12 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     if os.environ.get("CAPYBASE_COMMON_SPAN_FACTORING", "").strip().lower() in (
             "1", "true", "yes"):
         cfg.future.enable_common_span_factoring = True
+    # Commit-intent context A/B arm (S28-138 Fix B): the treatment run flips
+    # the default-off mechanism on without code edits; prompt-byte deltas and
+    # sim movement on multi-hunk cases are the metrics.
+    if os.environ.get("CAPYBASE_COMMIT_INTENT_CONTEXT", "").strip().lower() in (
+            "1", "true", "yes"):
+        cfg.future.enable_commit_intent_context = True
     # Output token cap proportional to conflict size: a 3-line conflict doesn't
     # need 8K tokens of generation headroom (the model would hallucinate
     # boilerplate, wasting time on the slow endpoint). Cap at 16× the conflict's

@@ -1335,6 +1335,31 @@ def _compact_context_text(text: str, language: str | None = None) -> str:
     return "\n".join(out) + ("\n" * trailing if trailing else "")
 
 
+_HISTORY_ESSENCE_PREFIX = "Replaying commit "
+_HISTORY_DISCLAIMER_PREFIX = "The following commit messages are untrusted metadata."
+
+
+def _strip_history_to_essence(hist: str) -> str:
+    """S28-138 Fix A: reduce the rendered history block to its essence — the
+    untrusted-metadata disclaimer (as the profile framing left it) plus the
+    ``Replaying commit i/N: "subject"`` line. The tail (later source commits,
+    recent target commits, branch-intent echoes) trims first; the current
+    commit's identity — the cheapest intent signal in the prompt — survives
+    until the cascade's last-resort step. An UNRECOGNIZED block shape returns
+    "" so it drops wholesale at this step: unknown content must never gain
+    essence-level priority over obligations (the pre-S28-138 behavior).
+    """
+    kept = [line for line in hist.split("\n")
+            if line.startswith(_HISTORY_ESSENCE_PREFIX)]
+    if not kept:
+        return ""
+    first = hist.split("\n", 1)[0]
+    if first.startswith(_HISTORY_DISCLAIMER_PREFIX) or first.startswith(
+            "Commit context for intent inference:"):
+        kept.insert(0, first)
+    return "\n".join(kept)
+
+
 def _fit_to_budget(
     *,
     budget: TokenBudget | None,
@@ -1350,8 +1375,9 @@ def _fit_to_budget(
     unit: ConflictUnit,
     history: str = "",
     obligations: str = "",
+    commit_intent: str = "",
     near_miss_block: str = "",
-) -> tuple[str, str, str, str, str, str, str, str, list[dict], str]:
+) -> tuple[str, str, str, str, str, str, str, str, str, list[dict], str]:
     """Trim the prompt's AUGMENTATION sections to fit ``budget``, protecting the
     essential conflict sides + the JSON contract.
 
@@ -1412,8 +1438,8 @@ def _fit_to_budget(
     # No budget / disabled → unbounded (current behavior).
     if budget is None or not budget.enabled:
         return (structural_anchor, siblings_block, deps, few_shot,
-                primary_text, history, obligations, near_miss_block,
-                trims, _skeleton_block)
+                primary_text, history, obligations, commit_intent,
+                near_miss_block, trims, _skeleton_block)
 
     # System message is a fixed ~12 tokens; account for it once.
     system_tokens = 12
@@ -1436,7 +1462,7 @@ def _fit_to_budget(
                     f"augmentation sections (sides + skeleton protected)"
                 ),
             })
-        return "", "", "", "", "", "", "", "", trims, _skeleton_block
+        return "", "", "", "", "", "", "", "", "", trims, _skeleton_block
 
     # Sprint-20 S20.9: compaction BEFORE the drop cascade. When the
     # assembled prompt overflows, strip comments and blank-run padding
@@ -1450,7 +1476,8 @@ def _fit_to_budget(
     # NEVER compacted — all-or-nothing, verbatim or dropped.
     _aug_total = estimate_tokens(
         structural_anchor + siblings_block + deps + few_shot
-        + primary_text + history + obligations + near_miss_block)
+        + primary_text + history + obligations + commit_intent
+        + near_miss_block)
     _budget_total = budget.available - overhead - essential
     if _aug_total > _budget_total:
         _before = _aug_total
@@ -1460,7 +1487,8 @@ def _fit_to_budget(
         primary_text = _compact_context_text(primary_text, unit.language)
         _after = estimate_tokens(
             structural_anchor + siblings_block + deps + few_shot
-            + primary_text + history + obligations + near_miss_block)
+            + primary_text + history + obligations + commit_intent
+            + near_miss_block)
         if _after < _before:
             trims.append({
                 "section": "compaction",
@@ -1480,21 +1508,39 @@ def _fit_to_budget(
     primary = primary_text
     hist = history
     obls = obligations
+    intent = commit_intent
     nm = near_miss_block
 
     def _aug_tokens() -> int:
-        return estimate_tokens(anchor + siblings + dep_block + shot + primary + hist + obls + nm)
+        return estimate_tokens(
+            anchor + siblings + dep_block + shot + primary + hist + obls
+            + intent + nm)
 
-    # 1. Drop history context (lowest value — nice-to-have replay facts).
+    # 1. Drop history context — TAIL first (S28-138 Fix A): the later-source
+    #    and recent-target commit subjects go, but the replay position + the
+    #    CURRENT commit's subject are retained. The current commit is the
+    #    cheapest intent signal in the prompt; dropping it FIRST (the old
+    #    behavior, observed in 9 flight candidates while generic deps and
+    #    siblings survived) is the exact priority inversion the reviewer's
+    #    git-history-first feedback flagged. The essence itself only goes at
+    #    the last-resort step 9.
     if _aug_tokens() > available_for_augmentation and hist:
-        hist = ""
-        trims.append({"section": "history", "detail": "dropped history context"})
+        essence = _strip_history_to_essence(hist)
+        if essence != hist:
+            recognized = bool(essence)
+            hist = essence
+            trims.append({
+                "section": "history_tail" if recognized else "history",
+                "detail": ("dropped history tail (replay position + commit "
+                           "subject retained)" if recognized else
+                           "dropped history context"),
+            })
     # 2. Truncate surrounding context (primary_text) to the lines nearest the
     #    conflict. Keep at least 1 line so the model has SOME surrounding frame.
     if _aug_tokens() > available_for_augmentation and primary:
         plines = primary.split("\n")
         kept = len(plines)
-        while kept > 1 and estimate_tokens(anchor + siblings + dep_block + shot + hist + obls + "\n".join(plines[:kept])) > available_for_augmentation:
+        while kept > 1 and estimate_tokens(anchor + siblings + dep_block + shot + hist + obls + intent + "\n".join(plines[:kept])) > available_for_augmentation:
             kept -= 1
         primary = "\n".join(plines[:kept])
         trims.append({
@@ -1517,6 +1563,13 @@ def _fit_to_budget(
     if _aug_tokens() > available_for_augmentation and anchor:
         anchor = ""
         trims.append({"section": "structural_anchor", "detail": "dropped enclosing AST node text"})
+    # 6.5 Drop the commit-intent hunks (S28-138 Fix B): conflict-specific —
+    #     the commit's own edits to this file — so it outlives generic
+    #     context (deps/siblings) but loses to the near-miss draft and
+    #     obligations.
+    if _aug_tokens() > available_for_augmentation and intent:
+        intent = ""
+        trims.append({"section": "commit_intent", "detail": "dropped commit-intent hunks (budget)"})
     # 7. Drop the rejected deterministic near-miss draft (all-or-nothing).
     # Highly conflict-specific, so it outlives generic context — but hard
     # obligations (what later commits EXPECT) still outlive it: known
@@ -1530,8 +1583,14 @@ def _fit_to_budget(
     if _aug_tokens() > available_for_augmentation and obls:
         obls = ""
         trims.append({"section": "obligations", "detail": "dropped future obligations + branch intent"})
+    # 9. Last resort (S28-138 Fix A): the history essence too. Nothing is
+    #    protected past this point except the sides + skeleton.
+    if _aug_tokens() > available_for_augmentation and hist:
+        hist = ""
+        trims.append({"section": "history", "detail": "dropped history essence (last resort)"})
 
-    return anchor, siblings, dep_block, shot, primary, hist, obls, nm, trims, _skeleton_block
+    return (anchor, siblings, dep_block, shot, primary, hist, obls, intent,
+            nm, trims, _skeleton_block)
 
 
 def _resolve_prompt_parts(
@@ -1633,6 +1692,12 @@ def _resolve_prompt_parts(
     obligations = ""
     if context.obligations_context:
         obligations = f"{context.obligations_context}\n\n"
+    # S28-138 Fix B: the replaying commit's non-conflicting hunks — conflict-
+    # specific intent content; budget-trimmed between the structural anchor
+    # and the near-miss draft.
+    commit_intent = ""
+    if context.commit_intent_block:
+        commit_intent = f"{context.commit_intent_block}\n\n"
     intro = (
         "Resolve ONE git merge conflict by merging BOTH sides into one coherent\n"
         "result preserving each side's intent. Be CONCISE: reason in a few sentences,\n"
@@ -1713,7 +1778,7 @@ def _resolve_prompt_parts(
     sides_text = (
         f"{struct_ctx}{side_intent}{semantic_change}{value_resolution}{_sides}"
     )
-    anchor_t, siblings_t, deps_t, few_shot_t, primary_t, history_t, obls_t, nm_t, trims, skeleton_block = _fit_to_budget(
+    anchor_t, siblings_t, deps_t, few_shot_t, primary_t, history_t, obls_t, intent_t, nm_t, trims, skeleton_block = _fit_to_budget(
         budget=budget,
         intro=intro,
         contract=contract,
@@ -1726,6 +1791,7 @@ def _resolve_prompt_parts(
         primary_text=context.primary_text,
         history=history,
         obligations=obligations,
+        commit_intent=commit_intent,
         near_miss_block=_near_miss_block(unit) if near_miss else "",
         unit=unit,
     )
@@ -1735,7 +1801,7 @@ def _resolve_prompt_parts(
     # The skeleton block (global entity names for oversized files) is prepended
     # so the model has global awareness before the local conflict.
     data_block = (
-        f"{skeleton_block}{func_ctx}{src_block}{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{struct_ctx}{side_intent}{semantic_change}{value_resolution}"
+        f"{skeleton_block}{func_ctx}{src_block}{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{intent_t}{few_shot_t}{struct_ctx}{side_intent}{semantic_change}{value_resolution}"
         f"{_sides}"
         f"{nm_t}"
         f"Surrounding file context:\n{primary_t}\n\n"
