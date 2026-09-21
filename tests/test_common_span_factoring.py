@@ -263,6 +263,86 @@ def test_factoring_stash_computes_before_oversize_guard():
     assert stash_at != -1 and guard_at != -1
     assert stash_at < guard_at, (
         "the factoring stash must be computed before the oversize pre-guard")
+    # And it must be a SIBLING cascade stage (8-space indent). Regression:
+    # the block once shipped nested inside the source-portfolio branch at a
+    # deeper indent, AFTER that branch's `return early` — syntactically
+    # valid, unreachable dead code, and every pilot prompt went out
+    # unfactored while the guard measured raw essentials.
+    stage = src[stash_at:guard_at]
+    ifs = [ln for ln in stage.split("\n") if ln.strip().startswith("if (")]
+    assert ifs, "factoring stage entry `if (` not found before the guard"
+    assert ifs[0].startswith("        if ("), (
+        "the factoring stage must sit at cascade-stage indent (8 spaces), "
+        f"not nested: found indent {len(ifs[0]) - len(ifs[0].lstrip())}")
+
+
+def test_resolve_unit_attaches_stash_and_llm_prompt_is_factored(repo):
+    """End-to-end pin for the same regression: a fresh _resolve_unit on an
+    oversized-but-factorable unit must attach the stash ITSELF (not rely on
+    a pre-seeded one), pass the oversize guard on the FACTORED essential,
+    and send a factored prompt (@A1, shared run elided) to the client."""
+    from capybase.adapters.llm_openai import LLMResponse
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator
+    from capybase.resolution_engine import ResolutionEngine
+
+    common = "".join(f"shared_line_{i:03d} = {i}\n" for i in range(80))
+    cur_t = "cur_top = 'd1'\n" + common + "cur_bottom = 'd2'\n"
+    rep_t = "rep_top = 'd3'\n" + common + "rep_bottom = 'd4'\n"
+
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.model.samples = 1
+    cfg.model.enable_self_consistency = False
+    # Window small enough that the raw side-sum is oversized (~1160t > 200t)
+    # but the factored sides (2 deltas + one @A1 ref per side) fit.
+    cfg.model.context_window = 300
+    cfg.model.completion_reserve = 100
+    cfg.tests.required = False
+    cfg.tests.pre_continue = "true"
+    cfg.tests.final = "true"
+    cfg.validation.enable_per_unit_syntax_check = False
+    cfg.features.structural_resolution = False
+    cfg.features.combination_search = False
+    cfg.future.enable_block_capture = False
+    cfg.future.enable_source_portfolio = False
+    cfg.future.enable_common_span_factoring = True
+
+    captured: list = []
+
+    class _Capture:
+        def complete(self, messages, *, model, temperature, max_tokens,
+                     json_mode):
+            captured.append(messages)
+            return LLMResponse(text="garbage — parse must fail, that is fine")
+
+    engine = ResolutionEngine(cfg.model, client=_Capture())
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    orch.step = 1
+
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=common),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=cur_t),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=rep_t),
+        original_worktree_text=cur_t,  # windowed block is oversized unfactored
+        marker_span=(0, cur_t.count("\n") - 1),
+    )
+    outcome = orch._resolve_unit(unit, max_retries=0)
+
+    assert unit.structural_metadata.get("_common_span_factoring") is not None, (
+        "the orchestrator must attach the factoring stash on a fresh resolve "
+        "(dead-code regression: the stage once sat behind a `return early`)")
+    assert captured, (
+        "the unit must reach the LLM — the guard must measure the FACTORED "
+        "essential, not skip it as oversized")
+    assert "@A1 (" in str(captured[0]), "the prompt must be factored"
+    assert "shared_line_040" not in str(captured[0]), (
+        "the shared run must be elided from the prompt")
+    assert "too large for model window" not in (outcome.reason or "")
 
 
 def repo_root():
