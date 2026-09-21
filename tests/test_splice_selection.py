@@ -201,8 +201,9 @@ def _splice_answer(messages, **_kw):
 
 
 def test_resolve_unit_accepts_ordered_splice(repo):
-    """Fitness in the band + valid order answer → the unit is accepted via
-    ordered_splice, and the resolved text is the materialized blocks."""
+    """Generation fails (the fake answer parses as neither candidate nor
+    repair), then the post-failure rescue engages: the unit is accepted via
+    ordered_splice with the materialized blocks."""
     class _Fake:
         def complete(self, messages, *, model, temperature, max_tokens,
                      json_mode):
@@ -217,40 +218,44 @@ def test_resolve_unit_accepts_ordered_splice(repo):
 
 
 def test_resolve_unit_out_of_band_fitness_skips_stage(repo):
-    """Below the ambiguity band the stage declines without a model call —
-    the fake client would explode if consulted."""
-    class _Boom:
-        def complete(self, *_a, **_k):
-            raise AssertionError("model must not be called out of band")
+    """Below the ambiguity band the splice stage never sends its prompt —
+    the LLM loop runs normally and the ADDITIVE prompt is never seen."""
+    seen_prompts: list[str] = []
 
-    orch = _config(repo, _Boom())
+    class _Normal:
+        def complete(self, messages, *, model, temperature, max_tokens,
+                     json_mode):
+            seen_prompts.append(str(messages))
+            from capybase.adapters.llm_openai import LLMResponse
+            return LLMResponse(text=json.dumps(
+                {"resolved_text": "z", "explanation": "gen",
+                 "self_reported_confidence": 0.0}))
+
+    orch = _config(repo, _Normal())
     unit = _unit(fitness=0.2)
-    outcome = orch._resolve_unit(unit, max_retries=0)
-    assert outcome.accepted is None  # fell through to the (empty) LLM loop
+    orch._resolve_unit(unit, max_retries=0)
+    assert not any("ADDITIVE" in p for p in seen_prompts), (
+        "the splice prompt must not be sent out of band")
 
 
 def test_protocol_violation_latches_unit_to_generation(repo):
-    """A garbage answer latches _splice_protocol_failed; a SECOND resolve of
-    the same unit skips the stage entirely (one SPLICE call total — the LLM
-    loop's own fallback calls don't count)."""
-    splice_calls = []
+    """Generation fails, the rescue's garbage answer latches
+    _splice_protocol_failed; a SECOND resolve skips the stage entirely (one
+    SPLICE call total — the LLM loop's own fallback calls don't count)."""
+    splice_calls: list = []
 
     class _Garbage:
         def complete(self, messages, *, model, temperature, max_tokens,
                      json_mode):
-            if b"ADDITIVE" in str(messages).encode() or "ADDITIVE" in str(
-                    messages):
-                splice_calls.append(messages)
-                from capybase.adapters.llm_openai import LLMResponse
-                return LLMResponse(text="I cannot answer in JSON, sorry!")
             from capybase.adapters.llm_openai import LLMResponse
-            return LLMResponse(text=json.dumps(
-                {"resolved_text": "x", "explanation": "fallback",
-                 "self_reported_confidence": 0.0}))
+            if "ADDITIVE" in str(messages):
+                splice_calls.append(messages)
+                return LLMResponse(text="I cannot answer in JSON, sorry!")
+            return LLMResponse(text="definitely not the candidate schema")
 
     orch = _config(repo, _Garbage())
     unit = _unit(fitness=0.5)
-    orch._resolve_unit(unit, max_retries=0)  # fallback may accept; irrelevant
+    orch._resolve_unit(unit, max_retries=0)
     assert len(splice_calls) == 1
     assert unit.structural_metadata.get("_splice_protocol_failed") is True
     orch._resolve_unit(unit, max_retries=0)

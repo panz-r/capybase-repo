@@ -7901,16 +7901,19 @@ class Orchestrator:
         return outcome
 
     def _try_ordered_splice(self, unit: ConflictUnit) -> UnitOutcome | None:
-        """S28-139: ordered splice selection for additive conflicts.
+        """S28-139: ordered splice selection for additive conflicts — a
+        POST-failure rescue, not a pre-LLM preemptor.
 
         When SBCR declined with fitness in the ambiguity band, the conflict's
         sides are additive blocks and the open question is their ORDER. The
         model returns a tiny selection/order answer over the blocks; capybase
         materializes verbatim (copied code byte-identical, tens of tokens per
-        attempt instead of a full regeneration). Protocol violations latch
-        ``_splice_protocol_failed`` and the unit falls to normal generation;
-        a spliced candidate that fails validation also falls through — the
-        full LLM loop stays the backstop, exactly like block capture.
+        attempt). Called from the _resolve_unit wrapper only when the full
+        LLM loop already ended without an accepted candidate — generation
+        keeps priority where it works; the splice converts the
+        generation-failure class. Protocol violations latch
+        ``_splice_protocol_failed``; a spliced candidate that fails
+        validation falls through to escalation, exactly like block capture.
         """
         from capybase.splice_selection import (
             PROMPT_SPLICE_SELECTION,
@@ -15461,6 +15464,20 @@ class Orchestrator:
             seed_candidate=seed_candidate,
             wall_deadline=wall_deadline, max_retries=max_retries,
         )
+        # S28-139 ordered-splice RESCUE (post-failure placement is evidence-
+        # based, s139 A/B): when the full LLM loop ended WITHOUT an accepted
+        # candidate and the conflict is an additive shape in SBCR's ambiguity
+        # band, the model's ordering over verbatim blocks is a cheap second
+        # chance before escalation. Generation keeps priority where it
+        # succeeds (libuv-0089: its 0.92 generation beat a validated 0.65
+        # splice when the stage ran pre-LLM); the splice converts the
+        # generation-failure class (libuv-0056 0.42→0.85, duckdb-0046
+        # 0.85→0.92 in the same A/B).
+        if outcome.accepted is None and getattr(
+                self.config.future, "enable_ordered_splice", False):
+            rescue = self._try_ordered_splice(unit)
+            if rescue is not None and rescue.accepted is not None:
+                return rescue
         if outcome.accepted is not None:
             return outcome
         if not getattr(self.config.future, "enable_preservation_bestof_n",
@@ -15857,22 +15874,6 @@ class Orchestrator:
             # neither side verbatim works.
             if self._last_side_probe_failures:
                 failures = list(self._last_side_probe_failures)
-
-        # Ordered splice selection (S28-139): block-capture generalized from
-        # a binary decision to an ordered splice. For ADDITIVE conflicts that
-        # SBCR declined with fitness in the ambiguity band (a plausible
-        # composition exists but similarity can't discriminate the ordering),
-        # the model returns a tiny selection/order answer over the sides'
-        # blocks and capybase materializes verbatim — copied code is byte-
-        # identical and the answer costs tens of tokens. AFTER test-gated
-        # side, BEFORE block capture; fresh resolve only; protocol violations
-        # latch the unit to normal generation (factoring pattern).
-        if failures is None and getattr(
-                self.config.future, "enable_ordered_splice", False):
-            early = self._cascade_mechanism(
-                "ordered_splice", self._try_ordered_splice, unit)
-            if early is not None:
-                return early  # accepted via ordered splice; LLM loop skipped
 
         # Block-capture resolution (large modify/delete): when one side deleted a
         # large block and the structural rule declined (the keeper modified it),
