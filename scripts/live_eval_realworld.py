@@ -567,6 +567,35 @@ class CaseResult:
     toolchain_probe: dict = None
 
 
+def _engine_session_completed(flights_dir, case_id) -> bool:
+    """S28-137: did the newest flight session for this case RESOLVE?
+
+    True when the newest journal.jsonl under flights/<case_id>/ records both
+    candidate_accepted and session_completed — the engine finished resolving
+    and the worker thread (if still running) is in post-resolution SCORING
+    (c build / oracle build / output tests), not an endless CEGIS loop.
+    The flight copy runs immediately after orch.run(), so the journal is on
+    disk while the scoring builds are still going. Best-effort: any missing
+    or unreadable artifact returns False (the caller then treats the timeout
+    exactly as before).
+    """
+    if flights_dir is None:
+        return False
+    journals = sorted(
+        Path(flights_dir).glob(f"flights/{case_id}/*/journal.jsonl"),
+        key=lambda p: p.stat().st_mtime)
+    if not journals:
+        return False
+    try:
+        events = [json.loads(line)
+                  for line in journals[-1].read_text().splitlines()
+                  if line.strip()]
+    except (OSError, json.JSONDecodeError):
+        return False
+    seen = {e.get("event_type") for e in events}
+    return "candidate_accepted" in seen and "session_completed" in seen
+
+
 def _classify_terminal_reason(reason: str) -> str:
     """Classify an escalation reason into a disjoint terminal category.
 
@@ -581,6 +610,8 @@ def _classify_terminal_reason(reason: str) -> str:
         validation (capability/repair, not budget)
       TIMEOUT_THROUGHPUT  — per-case timeout on a many-region file (>20 units)
       TIMEOUT_CAPABILITY  — per-case timeout on a small file (model can't solve it)
+      TIMEOUT_AFTER_ACCEPT — per-case timeout AFTER the engine accepted and
+        completed its session (scoring builds blew the wall; S28-137)
       REPAIR_FAILURE      — whole-file repair couldn't resolve a unit
       TOOLCHAIN_ERA       — preflight: sides+oracle all fail the gate identically
       SETUP_FAILED        — infrastructure/setup failure (not a resolver outcome)
@@ -611,6 +642,12 @@ def _classify_terminal_reason(reason: str) -> str:
         return "SETUP_FAILED"
     if "too large" in r or "oversized" in r:
         return "OVERSIZED"
+    # S28-137: the engine ACCEPTED and completed its session — the wall died
+    # in post-resolution scoring (cold c/oracle builds), not in the CEGIS
+    # loop. A completed resolution mislabeled as a capability timeout
+    # overstated regressions (duckdb-0062/0106 vs s28).
+    if "post-resolution scoring exceeded the wall" in r:
+        return "TIMEOUT_AFTER_ACCEPT"
     if "case timeout" in r:
         return "TIMEOUT_CASE"
     if "wall-time" in r or "wall_time" in r:
@@ -2623,17 +2660,32 @@ def main():
             # thread tries to access .rebase-agent/sessions/ or run git, and
             # crashes with GitError/FileNotFoundError because the directory is
             # gone. Defer cleanup to the end of the run for timed-out cases.
+            if _th.is_alive() and _engine_session_completed(flights_dir, case.id):
+                # S28-137: the engine ACCEPTED and completed its session — the
+                # thread is in post-resolution scoring (cold c/oracle builds on
+                # duckdb-scale trees take ~300s each), which is deterministic
+                # work, not an endless CEGIS loop. Extend the wall once by a
+                # scoring grace (half the case budget) so a finished resolution
+                # gets scored instead of being abandoned and mislabeled.
+                _th.join(timeout=max(300, (args.case_timeout or 0) // 2))
             if _th.is_alive():
-                # The worker is still in an LLM/CEGIS loop — abandon it (daemon)
-                # and record an escalate. The next case starts fresh. DON'T
-                # destroy the temp dir yet — the daemon thread may still write.
+                # The worker is still running — abandon it (daemon) and record
+                # an escalate. The next case starts fresh. DON'T destroy the
+                # temp dir yet — the daemon thread may still write.
                 deferred_cleanup.append(_td)
                 print(f"\n      [TIMEOUT after {args.case_timeout}s — moving on]", end="")
+                _timeout_reason = "case timeout after " \
+                    f"{args.case_timeout}s (endless CEGIS retries)"
+                if _engine_session_completed(flights_dir, case.id):
+                    _timeout_reason = (
+                        f"case timeout after {args.case_timeout}s "
+                        "(engine accepted; post-resolution scoring exceeded "
+                        "the wall)")
                 return CaseResult(
                     id=case.id, language=case.language, dataset=case.dataset,
                     escalated=True,
                     conflict_region_count=case.marker_original.count("<<<<<<<"),
-                    reason=f"case timeout after {args.case_timeout}s (endless CEGIS retries)")
+                    reason=_timeout_reason)
             # Worker finished — safe to clean up the temp dir now.
             shutil.rmtree(_td, ignore_errors=True)
             return _holder[0] if _holder else CaseResult(
