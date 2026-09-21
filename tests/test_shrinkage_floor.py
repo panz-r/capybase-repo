@@ -140,3 +140,15 @@ def test_side_churn_multiset_fallback_on_huge_files():
     small_b = "int a;\nint b;\nint c;\n"
     small_s = "int a;\nint B;\nint c;\n"
     assert side_churn(small_b, small_s) == 2
+
+
+def test_side_preservation_declines_monster_files():
+    """S28-164: difflib(autojunk=False) is quadratic — past the shared
+    threshold preservation returns None (callers read n/a) instead of
+    hanging on the 123K-line generated sides."""
+    from capybase.merge_intent import side_preservation
+    big = "\n".join(f"line {i}" for i in range(31000))
+    assert side_preservation(big, big + "\nextra\n", big) is None
+    small = "a\nb\nc\n"
+    assert side_preservation(small, small, small) is None  # no changes
+    assert side_preservation("a\nb\n", "a\nB\n", "a\nB\n") == 1.0

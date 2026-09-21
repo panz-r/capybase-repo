@@ -18875,7 +18875,6 @@ class Orchestrator:
           merge carrying real replayed-side features fails this and is left
           alone (the end-of-rebase scan decides);
         - the upstream side verbatim verifies clean whole-file.
-
         Returns the whole-file acceptance list, or None (the scan remains the
         backstop — SAFE_STOP is still the honest outcome for anything this
         declines).
@@ -18885,6 +18884,20 @@ class Orchestrator:
         if not getattr(self.config.validation, "enable_resurrection_detection",
                        True):
             return None  # user disabled resurrection detection: not our call
+        # S28-164: detect_resurrection's histogram seam is super-linear and
+        # OOMs on monster generated files (php-0089/0122: 123K-line stage
+        # sides killed the orchestrator at the staging tail). Past the
+        # shared full-file threshold the swap declines — the banner/
+        # generated-file take is those files' designed resolution anyway.
+        _big = max(
+            len((units[0].original_worktree_text or "").splitlines()),
+            len(buffer.splitlines()))
+        if _big > 30_000:
+            self.journal.emit(
+                "deletion_respect_skipped",
+                {"reason": "monster_file", "lines": _big},
+                step_index=self.step, path=path)
+            return None
         try:
             _staged = _true_stage_sides(self.git, path)
         except Exception:  # noqa: BLE001 - stages already gone (rebase moved on)

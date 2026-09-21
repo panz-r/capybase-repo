@@ -539,6 +539,13 @@ def side_preservation(
     import difflib as _dl
 
     b, s = base_text.splitlines(), side_text.splitlines()
+    # S28-164: difflib with autojunk=False is quadratic past monster-file
+    # sizes (the php 123K-line generated sides) — the same class that OOMs
+    # the histogram seam. No preservation verdict is worth the wall there;
+    # None reads as "n/a" to every caller (the floor's degeneracy check
+    # simply declines, the shrinkage arm's measured-output guard declines).
+    if max(len(b), len(s)) > _SIDE_CHURN_MULTISETH_LINES:
+        return None
     added: list[str] = []
     deleted: list[str] = []
     for tag, i1, i2, j1, j2 in _dl.SequenceMatcher(
