@@ -988,6 +988,16 @@ class FutureConfig(BaseModel):
     # model re-resolve it precedes has not been given its chance yet.
     # Journaled as same_signature_stop.
     enable_same_signature_stop: bool = True
+    # No-clear-progress stop (S28-158, the REPAIR_FAILURE class — 21
+    # harvest rows, 13 at sim >= 0.89, php-0148 at 0.998): N model-drawn
+    # repair rounds that only REDUCE (or leave UNCHANGED) the failure set
+    # without ever CLEARING it end the loop into the exhaustion endgame —
+    # the whack-a-mole tail is not converging and the drift rescue can
+    # still land a validating side. CLEARED resets the counter;
+    # deterministic-only rounds never count (the model keeps its chance).
+    # Journaled as no_clear_progress_stop.
+    enable_no_clear_progress_stop: bool = True
+    no_clear_stop_rounds: int = 3
     # Best-of-N preservation recovery (sprint-19 P2): when the
     # preservation heuristic rejects an otherwise-validation-passing
     # candidate and EVERY heuristic-forced retry then validates strictly

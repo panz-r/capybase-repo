@@ -133,28 +133,45 @@ def test_rescue_declines_when_no_side_verifies_and_restores():
     assert orch._writes[-1] == _SPLICED
 
 
-def test_rescue_both_validate_churn_tiebreak():
-    """Both sides file-validate — the churn winner breaks the tie
-    (deterministic; no adjudication, no model call)."""
+def test_rescue_nearest_side_preferred_on_divergent_buffer():
+    """S28-158: with a drifted buffer that is clearly nearer one side,
+    THAT side wins (the near-oracle-buffer prior) — via nearest_side,
+    not the churn policy."""
     orch = _orch(_PassVer(ok_texts={_CUR, _REP_HEAVY}),
                  stages={1: _BASE, 2: _CUR, 3: _REP_HEAVY})
     out = orch._try_side_takeover_rescue(*_args(orch))
     assert out is not None
     _acc, buffer, _val = out
-    assert buffer == _REP_HEAVY  # replayed rewrote far more of the base
+    assert buffer == _CUR  # the buffer is base-shaped; current is nearest
+    swap = [p for e, p in orch.journal.events if e == "side_takeover_rescue"]
+    assert swap[0]["side"] == "current"
+    assert swap[0]["via"] == "nearest_side"
+
+
+def test_rescue_churn_fallback_on_near_tie():
+    """No usable buffer (empty) → both similarities 0 → the churn policy
+    decides: replayed rewrote far more of the base, so replayed wins."""
+    orch = _orch(_PassVer(ok_texts={_CUR, _REP_HEAVY}),
+                 stages={1: _BASE, 2: _CUR, 3: _REP_HEAVY})
+    out = orch._try_side_takeover_rescue(
+        "f.c", "c", _SPLICED, _units(), "", wall_deadline=None)
+    assert out is not None
+    _acc, buffer, _val = out
+    assert buffer == _REP_HEAVY
     swap = [p for e, p in orch.journal.events if e == "side_takeover_rescue"]
     assert swap[0]["side"] == "replayed"
     assert swap[0]["via"] == "churn_tiebreak"
-    assert swap[0]["both_validated"] is True
 
 
 def test_rescue_symmetric_churn_prefers_replayed():
-    """Near-symmetric churn (the _whole_side_heuristic <0.35 band) →
-    replayed — the commit being applied, not silently dropped."""
+    """Near-symmetric churn (the _whole_side_heuristic <0.35 band) with a
+    near-tie buffer → replayed — the commit being applied, not silently
+    dropped."""
     _REP_SYM = _BASE.replace("base line 7\n", "rep line 7\n")  # churn == current's
     orch = _orch(_PassVer(ok_texts={_CUR, _REP_SYM}),
                  stages={1: _BASE, 2: _CUR, 3: _REP_SYM})
-    out = orch._try_side_takeover_rescue(*_args(orch))
+    out = orch._try_side_takeover_rescue(
+        "f.c", "c", _SPLICED, _units(), "", wall_deadline=None)
     assert out is not None
     _acc, buffer, _val = out
     assert buffer == _REP_SYM

@@ -11005,6 +11005,7 @@ class Orchestrator:
                 _osc = RepairOscillationTracker()
                 _ss_sigs: list = []  # S28-140 same-signature stop window
                 _ss_round_model: list = []
+                _ss_no_clear = 0  # S28-158 no-clear-progress counter
                 # S28-54: pristine whole-file sides for signature injection —
                 # full stage texts when readable (declarations can sit far
                 # outside a unit's fragment), else the union of the units'
@@ -11224,6 +11225,7 @@ class Orchestrator:
                     # the misattribution-prone case). Lets post-hoc analysis
                     # count a fix as causal only when it CLEARED or REDUCED.
                     cur_sig = _hard_failure_signature(file_validation.hard_failures)
+                    _mech_effect = None
                     if prev_failure_sig is not None:
                         if file_validation.passed:
                             effect = "CLEARED"
@@ -11231,6 +11233,7 @@ class Orchestrator:
                             effect = "UNCHANGED"
                         else:
                             effect = "REDUCED"
+                        _mech_effect = effect
                         self.journal.emit(
                             "mechanism_effect",
                             {"effect": effect, "wf_retry": wf_retries},
@@ -11272,6 +11275,34 @@ class Orchestrator:
                              "model_in_window": any(_ss_round_model[-_ss_t:]),
                              "signature_head": next(
                                  iter(sorted(cur_sig)))[0][1][:80]},
+                            step_index=self.step, path=path,
+                        )
+                        break
+                    # S28-158 no-clear-progress stop: the whack-a-mole tail
+                    # — rounds that REDUCE the failure set but never CLEAR
+                    # it (the REPAIR_FAILURE rows ended near-oracle after
+                    # 100-1100s of exactly this). N model-drawn rounds
+                    # without a CLEARED round ends the loop into the
+                    # exhaustion endgame, where the drift rescue can still
+                    # land a validating side. CLEARED resets the counter;
+                    # deterministic-only rounds don't count (the model
+                    # re-resolve keeps its chance, same contract as the
+                    # signature stop).
+                    if _mech_effect == "CLEARED":
+                        _ss_no_clear = 0
+                    elif _mech_effect in ("REDUCED", "UNCHANGED"):
+                        _ss_no_clear += 1 if _ss_round_model[-1] else 0
+                    _no_clear_n = max(
+                        2, getattr(self.config.future,
+                                   "no_clear_stop_rounds", 3) or 3)
+                    if (getattr(self.config.future,
+                                "enable_no_clear_progress_stop", True)
+                            and _ss_no_clear >= _no_clear_n):
+                        self.journal.emit(
+                            "no_clear_progress_stop",
+                            {"rounds": _ss_no_clear,
+                             "wf_retry": wf_retries,
+                             "last_effect": _mech_effect},
                             step_index=self.step, path=path,
                         )
                         break
@@ -19941,23 +19972,47 @@ class Orchestrator:
             _restore_spliced()
             return None
         if len(ok_sides) == 2:
-            # Both sides file-validate — the churn heuristic breaks the
-            # tie (_whole_side_heuristic's exact policy, corpus-validated:
-            # massive asymmetry → the higher-churn side carries the merge
-            # intent; near-symmetric or both ≈ base → replayed, the commit
-            # being applied). Journaled so post-hoc analysis can audit
-            # every tie-break.
+            # Both sides file-validate. When the drifted buffer is known,
+            # the side NEAREST to it wins (S28-158: the REPAIR_FAILURE
+            # rows ended with near-oracle buffers — the nearest side is
+            # the intended content; the churn policy is blind to that).
+            # Near-tie (|Δratio| < 0.02) or no usable buffer → the churn
+            # heuristic decides (_whole_side_heuristic's exact policy,
+            # corpus-validated: massive asymmetry → the higher-churn side
+            # carries the merge intent; near-symmetric → replayed, the
+            # commit being applied). Journaled for post-hoc audit.
             from capybase.merge_intent import side_churn as _str_churn
 
-            cur_churn = _str_churn(base_text, sides.get("current", ""))
-            rep_churn = _str_churn(base_text, sides.get("replayed", ""))
-            if (max(cur_churn, rep_churn) == 0
-                    or (abs(cur_churn - rep_churn) / max(cur_churn, rep_churn))
-                    < 0.35):
-                choice = "replayed"
+            cur_ratio = rep_ratio = None
+            if buffer:
+                import difflib as _str_difflib
+
+                def _norm_sim(a: str, b: str) -> float:
+                    al = [ln.rstrip() for ln in a.split("\n") if ln.strip()]
+                    bl = [ln.rstrip() for ln in b.split("\n") if ln.strip()]
+                    if not al and not bl:
+                        return 1.0
+                    return _str_difflib.SequenceMatcher(
+                        None, al, bl, autojunk=False).ratio()
+
+                cur_ratio = _norm_sim(buffer, sides.get("current", ""))
+                rep_ratio = _norm_sim(buffer, sides.get("replayed", ""))
+            if (cur_ratio is not None
+                    and abs(cur_ratio - rep_ratio) >= 0.02):
+                choice = ("current" if cur_ratio > rep_ratio
+                          else "replayed")
+                via = "nearest_side"
             else:
-                choice = "current" if cur_churn > rep_churn else "replayed"
-            via = "churn_tiebreak"
+                cur_churn = _str_churn(base_text, sides.get("current", ""))
+                rep_churn = _str_churn(base_text, sides.get("replayed", ""))
+                if (max(cur_churn, rep_churn) == 0
+                        or (abs(cur_churn - rep_churn)
+                            / max(cur_churn, rep_churn)) < 0.35):
+                    choice = "replayed"
+                else:
+                    choice = ("current" if cur_churn > rep_churn
+                              else "replayed")
+                via = "churn_tiebreak"
         else:
             choice = ok_sides[0]
             via = "single_validating_side"

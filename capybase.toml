@@ -419,6 +419,12 @@ enable_side_takeover_rescue = true
 # exhaustion endgame (wholesale floor, F1 arms, drift rescue) immediately
 # (nlohmann-json-0038: three candidates rejected with the same "stray '@'").
 enable_same_signature_stop = true
+# No-clear-progress stop (S28-158): N model-drawn repair rounds that only
+# reduce (or leave unchanged) the failure set without ever clearing it end
+# the loop into the exhaustion endgame — the whack-a-mole tail (21
+# REPAIR_FAILURE harvest rows, 13 at sim >= 0.89) is not converging.
+enable_no_clear_progress_stop = true
+no_clear_stop_rounds = 3
 # Churn-asymmetry decline for block capture (S28-143): when the deleting
 # side's churn exceeds this multiple of the keeper's (scikit-learn-0002:
 # 747 vs 42 lines), the deletion is a wholesale rewrite — capture declines
