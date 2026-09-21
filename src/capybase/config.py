@@ -693,6 +693,16 @@ class FutureConfig(BaseModel):
     # whose kept block exceeds block_capture_min_lines, so small conflicts still
     # use the full-LLM path.
     enable_block_capture: bool = True
+    # Codegen-banner takeover (S28-147 engine half): extends the
+    # generated-file take's signature beyond the php arginfo BLOCK
+    # pattern to any codegen BANNER in the file's first 40 lines
+    # ("GENERATED", "@generated", "DO NOT EDIT", "automatically generated
+    # by"). Class census: 50/1,502 corpus cases; measured conversions
+    # php-0094/0033 (WORKING 0.69 -> churn-winner presence 1.000) and
+    # duckdb-0107 (ESCALATE 0.0 -> 0.998). Lockfile paths are excluded
+    # (their dedicated arm owns them). Side-take of the churn winner,
+    # validator-gated like every whole-file resolution.
+    enable_generated_banner_takeover: bool = True
     # Source-derived candidate portfolio: before calling the LLM, try a small
     # set of candidates assembled from exact source lines (current-only,
     # replayed-only, both concatenated). Research shows 87% of resolutions
