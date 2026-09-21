@@ -567,33 +567,48 @@ class CaseResult:
     toolchain_probe: dict = None
 
 
-def _engine_session_completed(flights_dir, case_id) -> bool:
-    """S28-137: did the newest flight session for this case RESOLVE?
+def _engine_session_completed(flights_dir, case_id, live_root=None) -> bool:
+    """S28-137: has this case's newest session ACCEPTED a candidate?
 
-    True when the newest journal.jsonl under flights/<case_id>/ records both
-    candidate_accepted and session_completed — the engine finished resolving
-    and the worker thread (if still running) is in post-resolution SCORING
-    (c build / oracle build / output tests), not an endless CEGIS loop.
-    The flight copy runs immediately after orch.run(), so the journal is on
-    disk while the scoring builds are still going. Best-effort: any missing
-    or unreadable artifact returns False (the caller then treats the timeout
-    exactly as before).
+    Checks two locations (True on either): the flight copy under
+    ``flights_dir`` (written after orch.run() returns — the post-run shape)
+    and, when ``live_root`` is given, the LIVE session journal under the
+    case's temp repo (``<repo>/.rebase-agent/sessions/<sid>/journal.jsonl``,
+    incrementally appended during the run — the mid-run shape). The live
+    journal is what makes the grace fire on the dominant measured shape:
+    acceptance lands early (0062: 48s into the session) and the wall dies
+    during the engine's own build-probe/test phases, minutes before
+    session_completed. A session still mid-CEGIS has no acceptance and
+    returns False (legacy timeout, unchanged). Best-effort: any missing or
+    unreadable artifact is skipped.
     """
-    if flights_dir is None:
-        return False
-    journals = sorted(
-        Path(flights_dir).glob(f"flights/{case_id}/*/journal.jsonl"),
-        key=lambda p: p.stat().st_mtime)
-    if not journals:
-        return False
-    try:
-        events = [json.loads(line)
-                  for line in journals[-1].read_text().splitlines()
-                  if line.strip()]
-    except (OSError, json.JSONDecodeError):
-        return False
-    seen = {e.get("event_type") for e in events}
-    return "candidate_accepted" in seen and "session_completed" in seen
+    journal_paths = []
+    if flights_dir is not None:
+        # Newest flight journal ONLY: --preserve-flights accumulates session
+        # dirs across repeats, and an older session's acceptance must not
+        # vouch for a current run that is still looping.
+        flights = sorted(
+            Path(flights_dir).glob(f"flights/{case_id}/*/journal.jsonl"),
+            key=lambda p: p.stat().st_mtime)
+        if flights:
+            journal_paths.append(flights[-1])
+    if live_root is not None:
+        # Live journals are per-attempt (each attempt gets its own temp repo),
+        # so scanning them all is safe; first acceptance wins.
+        journal_paths.extend(
+            sorted(Path(live_root).glob(
+                "*/.rebase-agent/sessions/*/journal.jsonl"),
+                key=lambda p: p.stat().st_mtime))
+    for jp in journal_paths:
+        try:
+            events = [json.loads(line)
+                      for line in jp.read_text().splitlines()
+                      if line.strip()]
+        except (OSError, json.JSONDecodeError):
+            continue
+        if any(e.get("event_type") == "candidate_accepted" for e in events):
+            return True
+    return False
 
 
 def _classify_terminal_reason(reason: str) -> str:
@@ -2660,13 +2675,17 @@ def main():
             # thread tries to access .rebase-agent/sessions/ or run git, and
             # crashes with GitError/FileNotFoundError because the directory is
             # gone. Defer cleanup to the end of the run for timed-out cases.
-            if _th.is_alive() and _engine_session_completed(flights_dir, case.id):
-                # S28-137: the engine ACCEPTED and completed its session — the
-                # thread is in post-resolution scoring (cold c/oracle builds on
-                # duckdb-scale trees take ~300s each), which is deterministic
-                # work, not an endless CEGIS loop. Extend the wall once by a
-                # scoring grace (half the case budget) so a finished resolution
-                # gets scored instead of being abandoned and mislabeled.
+            if _th.is_alive() and _engine_session_completed(
+                    flights_dir, case.id, live_root=_td):
+                # S28-137: the engine has ACCEPTED a candidate — the thread is
+                # in post-resolution work (its own build probes/tests, then the
+                # scoring builds; cold cmake runs ~300s each), which is
+                # deterministic, not an endless CEGIS loop. Extend the wall
+                # once by a scoring grace (half the case budget) so a finished
+                # resolution gets scored instead of being abandoned and
+                # mislabeled. The LIVE journal under _td is the decisive
+                # source here: the flight copy only lands after orch.run()
+                # returns, which is exactly the phase the wall dies in.
                 _th.join(timeout=max(300, (args.case_timeout or 0) // 2))
             if _th.is_alive():
                 # The worker is still running — abandon it (daemon) and record
@@ -2676,7 +2695,7 @@ def main():
                 print(f"\n      [TIMEOUT after {args.case_timeout}s — moving on]", end="")
                 _timeout_reason = "case timeout after " \
                     f"{args.case_timeout}s (endless CEGIS retries)"
-                if _engine_session_completed(flights_dir, case.id):
+                if _engine_session_completed(flights_dir, case.id, live_root=_td):
                     _timeout_reason = (
                         f"case timeout after {args.case_timeout}s "
                         "(engine accepted; post-resolution scoring exceeded "

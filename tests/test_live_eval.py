@@ -199,13 +199,45 @@ def test_engine_session_completed_detects_accepted_session(tmp_path):
 
 
 def test_engine_session_completed_false_when_resolution_incomplete(tmp_path):
-    """A journal WITHOUT session_completed means the engine is still resolving
+    """A journal WITHOUT candidate_accepted means the engine is still mid-CEGIS
     — the watchdog must not grant the scoring grace (old behavior)."""
     mod = _load_runner_module()
     j = tmp_path / "flights" / "c1" / "sessA" / "journal.jsonl"
     _write_journal(j, ["session_started", "resolution_attempt",
                        "candidate_rejected"])
     assert mod._engine_session_completed(tmp_path, "c1") is False
+
+
+def test_engine_session_completed_acceptance_alone_suffices(tmp_path):
+    """The measured dominant shape (s137 validation, duckdb-0062): the
+    candidate is accepted EARLY and the wall dies during the engine's own
+    post-acceptance validation — session_completed has not landed yet.
+    Acceptance alone must trigger the grace."""
+    mod = _load_runner_module()
+    j = tmp_path / "flights" / "c1" / "sessA" / "journal.jsonl"
+    _write_journal(j, ["session_started", "candidate_accepted",
+                       "tests_started"])
+    assert mod._engine_session_completed(tmp_path, "c1") is True
+
+
+def test_engine_session_completed_reads_live_journal(tmp_path):
+    """At wall expiry the FLIGHT COPY does not exist yet (it lands after
+    orch.run() returns — exactly the phase the wall dies in). The helper must
+    also read the LIVE session journal under the temp repo
+    (<repo>/.rebase-agent/sessions/<sid>/journal.jsonl)."""
+    mod = _load_runner_module()
+    assert mod._engine_session_completed(tmp_path, "c1") is False  # no flights
+    live = tmp_path / "r" / ".rebase-agent" / "sessions" / "abc123" / "journal.jsonl"
+    _write_journal(live, ["session_started", "conflict_detected",
+                          "candidate_accepted"])
+    # flights_dir present but empty + live_root holding an accepted session.
+    assert mod._engine_session_completed(tmp_path, "c1", live_root=tmp_path) is True
+    # A live journal without acceptance → still mid-CEGIS → False.
+    import shutil
+    shutil.move(str(live.parent.parent.parent), str(tmp_path / "r_done"))
+    live2 = tmp_path / "r" / ".rebase-agent" / "sessions" / "def456" / "journal.jsonl"
+    _write_journal(live2, ["session_started", "candidate_rejected"])
+    assert mod._engine_session_completed(tmp_path, "c1", live_root=tmp_path) is False
 
 
 def test_engine_session_completed_prefers_newest_journal(tmp_path):
