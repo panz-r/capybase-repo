@@ -702,6 +702,15 @@ class FutureConfig(BaseModel):
     # Below this the full-LLM path reproduces the block fine; above it
     # reproduction becomes unreliable and the decision-style prompt takes over.
     block_capture_min_lines: int = 50
+    # Churn-asymmetry decline for block capture (S28-143, the scikit-learn-
+    # 0002 class: replayed deleted 747 lines while current's edits were 42
+    # — 17.8x — and capture's keep_block verdict resurrected the block the
+    # oracle deleted). When the DELETING side's fragment churn exceeds this
+    # multiple of the keeper's, the deletion is a wholesale rewrite and the
+    # decision exceeds a binary keep/delete: capture declines (no model
+    # call) and the churn-aware whole-file machinery (wholesale-winner
+    # floor) owns the choice. 0 disables the gate.
+    block_capture_max_churn_asym: float = 5.0
     # Entity-boundary sub-conflict splitting (C/C++): when a single marker block
     # on an oversized file spans multiple top-level entities (functions, structs,
     # globals), split it into one sub-conflict per entity. Each sub-unit becomes

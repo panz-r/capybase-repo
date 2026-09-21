@@ -8065,6 +8065,40 @@ class Orchestrator:
         keeper_n = sum(1 for ln in (keeper.text or "").splitlines() if ln.strip())
         if keeper_n < self.config.future.block_capture_min_lines:
             return None
+        # Gate 3 (S28-143): churn-asymmetry decline for IN-FILE marker
+        # blocks. When the block sits inside a larger file (marker_span
+        # set) and the DELETING side's churn dwarfs the keeper's, the
+        # deletion is a wholesale rewrite and keep-vs-delete exceeds a
+        # binary decision (scikit-learn-0002: the replayed side IS the
+        # oracle verbatim, 17.8x churn, and capture's keep_block verdict
+        # resurrected the deleted block — the file-level floor's
+        # preservation signal is diluted by the rest of the file, so
+        # nothing corrects the unit-level call). Decline WITHOUT a model
+        # call; the churn-aware whole-file machinery owns the choice.
+        # WHOLE-FILE units (AU/UA: marker_span None) are exempt — there,
+        # capture is the designed file-level decision path and the
+        # modify/delete rebase tests pin its behavior.
+        _max_asym = float(getattr(self.config.future,
+                                  "block_capture_max_churn_asym", 5.0) or 0)
+        if (_max_asym > 0 and who == "replayed"
+                and unit.marker_span is not None):
+            from capybase.merge_intent import side_churn as _bc_churn
+            _base_t = unit.base.text or ""
+            _keeper_churn = _bc_churn(_base_t, keeper.text or "")
+            _deleter_churn = _bc_churn(_base_t, deleter.text or "")
+            if (_deleter_churn > _max_asym * max(_keeper_churn, 1)
+                    and _deleter_churn > _keeper_churn):
+                self.journal.emit(
+                    "block_capture_declined_churn_asymmetry",
+                    {"deleter_churn": _deleter_churn,
+                     "keeper_churn": _keeper_churn,
+                     "max_asym": _max_asym,
+                     "deleting_side": who},
+                    step_index=self.step,
+                    path=unit.path,
+                    unit_id=unit.unit_id,
+                )
+                return None
 
         # Ask the model for a decision (not a reproduction). The prompt shows a
         # summary of the keeper, never the full text.

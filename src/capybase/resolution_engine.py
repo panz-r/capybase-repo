@@ -1911,6 +1911,24 @@ def build_block_capture_prompt(unit: ConflictUnit, context: ContextBundle) -> st
             f"`{deleting_commit}`\n\n"
         )
 
+    # S28-143: the churn context. When one side's involvement dwarfs the
+    # other's, the numbers are decision signal — a deletion that rewrites
+    # 17x more than the keeper's edits reads as a wholesale rewrite, not a
+    # targeted cleanup.
+    from capybase.merge_intent import side_churn as _bc_churn
+    if who:
+        deleter_text = (unit.current if who == "current"
+                        else unit.replayed).text or ""
+        base_text = unit.base.text or ""
+        keeper_churn = _bc_churn(base_text, keeper_text)
+        deleter_churn = _bc_churn(base_text, deleter_text)
+        churn_block = (
+            f"Churn vs base: the DELETING side ({who}) changed "
+            f"{deleter_churn} lines; the keeper changed {keeper_churn}.\n\n"
+        )
+    else:
+        churn_block = ""
+
     return f"""You are resolving a git merge conflict. Do NOT rewrite or reproduce the
 code — you are making a DECISION, and capybase splices the chosen text verbatim.
 
@@ -1924,7 +1942,7 @@ This is a modify/delete: one side DELETED a block of {keeper_n} lines, the other
 side ({keeper_label}) KEPT it. You must decide which intent wins. Do not attempt
 to merge line-by-line — choose one of the three options below.
 
-{commit_block}{sig_block}Window into the KEPT block ({keeper_label}, {keeper_n} lines — first/last
+{commit_block}{churn_block}{sig_block}Window into the KEPT block ({keeper_label}, {keeper_n} lines — first/last
 non-blank lines; capybase has the full text):
 ```
 {keeper_window}

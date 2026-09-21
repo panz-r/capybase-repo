@@ -258,3 +258,75 @@ def test_block_capture_disabled_when_feature_off(repo: Path):
     )
     u = _large_modify_delete_unit()
     assert orch._try_block_capture(u) is None
+
+
+# ---------------------------------------------------------------------------
+# S28-143: churn-asymmetry decline + churn context in the prompt
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_carries_churn_context():
+    """S28-143: the decision prompt shows both sides' churn vs base."""
+    u = _large_modify_delete_unit()
+    prompt = build_block_capture_prompt(u, ContextBundle(primary_text="", token_estimate=0))
+    assert "Churn vs base" in prompt
+    assert "DELETING side (current)" in prompt
+
+
+def test_extreme_churn_asymmetry_declines_without_a_model_call(repo: Path):
+    """The scikit-learn-0002 shape: the REPLAYED (commit) side deletes the
+    whole block while upstream's edits touch 2 lines — the deletion IS the
+    commit's intent and keep-vs-delete exceeds a binary decision. Capture
+    declines with NO model call; the churn-aware whole-file machinery owns
+    the choice. Directional: the mirror shape (upstream deleted, commit
+    modified) stays engaged — the modify/delete rebase tests pin it."""
+    u = _large_modify_delete_unit()
+    # Flip the direction: the COMMIT (replayed) is the deleter, upstream
+    # (current) is the keeper with only 2 changed lines (churn 4).
+    keeper_lines = u.base.text.split("\n")
+    keeper_lines = [
+        ln.replace("assert!(true)", "assert_eq!(stats(), 0)")
+        if "assert!(true)" in ln else ln
+        for ln in keeper_lines[:4]
+    ] + keeper_lines[4:]
+    keeper = "\n".join(keeper_lines)
+    u = u.model_copy(update={
+        "current": ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=keeper),
+        "replayed": ConflictSide(label="REPLAYED_COMMIT_SIDE", text=""),
+        "structural_metadata": {
+            **u.structural_metadata,
+            "merge_direction": {
+                "kind": "modify_delete",
+                "current": "modified",
+                "replayed": "deleted",
+                "summary": "modify/delete: REPLAYED_COMMIT_SIDE DELETED "
+                           "this block; CURRENT_UPSTREAM_SIDE kept/changed it",
+                "deleting_side": "replayed",
+            },
+        },
+    })
+
+    class _Boom:
+        def complete(self, *a, **k):
+            raise AssertionError("model must not be called under churn asymmetry")
+
+    orch = _orch(_Boom(), repo)
+    outcome = orch._try_block_capture(u)
+    assert outcome is None
+    events = [e.event_type for e in orch.journal.read_events()]
+    assert "block_capture_declined_churn_asymmetry" in events
+
+
+def test_balanced_churn_still_engages_capture(repo: Path):
+    """With comparable churn (the keeper invested real work), capture
+    still asks — the decline gate is proportional, not absolute."""
+    keeper = "\n".join(
+        ln.replace("assert!(true)", "assert_eq!(stats(), 0)")
+        for ln in _large_modify_delete_unit().replayed.text.split("\n"))
+    u = _large_modify_delete_unit()
+    u = u.model_copy(update={
+        "replayed": ConflictSide(label="REPLAYED_COMMIT_SIDE", text=keeper),
+    })
+    orch = _orch(_FakeClient("accept_deletion"), repo)
+    outcome = orch._try_block_capture(u)
+    assert outcome is not None and outcome.accepted is not None

@@ -419,6 +419,12 @@ enable_side_takeover_rescue = true
 # exhaustion endgame (wholesale floor, F1 arms, drift rescue) immediately
 # (nlohmann-json-0038: three candidates rejected with the same "stray '@'").
 enable_same_signature_stop = true
+# Churn-asymmetry decline for block capture (S28-143): when the deleting
+# side's churn exceeds this multiple of the keeper's (scikit-learn-0002:
+# 747 vs 42 lines), the deletion is a wholesale rewrite — capture declines
+# without a model call and the churn-aware whole-file machinery decides.
+# 0 disables the gate.
+block_capture_max_churn_asym = 5.0
 # SBCR tuning (arXiv:2605.16646 §4.1). Fitness is char-level Gestalt, mean-
 # aggregated over both parents; the search is union-constrained (every candidate
 # keeps all lines from both sides). These knobs expose the research-tuned params.
