@@ -3500,10 +3500,17 @@ def _try_duplicate_eradication_repair(
     def _text(r: tuple[int, int]) -> str:
         return "\n".join(lines[r[0]:r[1] + 1])
 
+    def _wsnorm(t: str) -> str:
+        # Whitespace-insensitive form: two definitions that differ only in
+        # indentation/spacing/blank lines are the SAME code (S28-142: both
+        # units freshly generated the same helper and formatting drifted
+        # in one — a pure echo, not a semantic divergence).
+        return "".join(t.split())
+
     t1, t2 = _text(regions[0]), _text(regions[1])
     victim = None
     diag = ""
-    if t1.strip() == t2.strip():
+    if _wsnorm(t1) == _wsnorm(t2):
         victim = regions[1]
         diag = "identical duplicate"
     elif t1 in original and t2 not in original:
@@ -18599,8 +18606,27 @@ class Orchestrator:
         from capybase.merge_intent import full_file_context as _ffc
 
         ctx = _ffc(base_text, cur, rep)
-        if not (ctx["churn_ratio"] >= 0.90
-                and ctx["dominant_churn"] >= 0.30 * max(ctx["base_lines"], 1)):
+        wholesale = (
+            ctx["churn_ratio"] >= 0.90
+            and ctx["dominant_churn"] >= 0.30 * max(ctx["base_lines"], 1))
+        # S28-148: the mass-DELETION rewrite band (duckdb-0133: replayed
+        # deleted ~92% of the base; churn_ratio 0.8944 missed the wholesale
+        # band by 0.6pp and no file-scope mechanism ever evaluated "the
+        # target state is ~12x smaller"). Same coverage bar as the
+        # wholesale gate plus churn dominance, but the winner is
+        # identified by DELETION (winner_lines <= 0.70 * base — the
+        # deleting_side criterion) instead of the ratio band.
+        shrinkage = False
+        if not wholesale:
+            _c, _r = ctx["current_churn"], ctx["replayed_churn"]
+            _wchurn, _lchurn = max(_c, _r), min(_c, _r)
+            _wlines = (ctx["current_lines"] if _c >= _r
+                       else ctx["replayed_lines"])
+            shrinkage = (
+                _wchurn >= 0.30 * max(ctx["base_lines"], 1)
+                and _lchurn <= 0.30 * _wchurn
+                and _wlines <= 0.70 * max(ctx["base_lines"], 1))
+        if not (wholesale or shrinkage):
             return None
         winner = "current" if ctx["current_churn"] >= ctx["replayed_churn"] else "replayed"
         wtext = sides[winner]
@@ -18617,6 +18643,15 @@ class Orchestrator:
             pres = _side_preservation(base_text, wtext, buffer)
             if pres is not None and pres >= 0.5:
                 return None  # the output weaves the winner — not degenerate
+        if shrinkage and not wholesale and pres is None:
+            # The shrinkage arm NEVER fires on a missing output: numbers
+            # alone are not safe in the mid-band (the midband gate's
+            # 16/116 genuine-both-sides-merge counter-example lesson) —
+            # it requires the MEASURED degenerate output that is the
+            # floor's charter. The wholesale band keeps its original
+            # buffer-less eligibility (clap-0004's markers-unresolved
+            # escalation shape).
+            return None
         from capybase.conflict_model import (
             CandidateResolution as _FL_CR,
             ConflictSide as _FL_CS,
@@ -18638,7 +18673,12 @@ class Orchestrator:
             "wholesale_winner_floor",
             {"winner": winner,
              "winner_preservation": pres if pres is not None else "n/a",
-             "had_buffer": bool(buffer)},
+             "had_buffer": bool(buffer),
+             "trigger": "wholesale" if wholesale else "shrinkage",
+             "churn_ratio": ctx["churn_ratio"],
+             "winner_lines": ctx["current_lines" if winner == "current"
+                                 else "replayed_lines"],
+             "base_lines": ctx["base_lines"]},
             step_index=self.step, path=path, unit_id=unit.unit_id,
         )
         cand = _FL_CR(

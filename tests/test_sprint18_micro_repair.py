@@ -370,3 +370,44 @@ def test_new_provenance_values_registered():
     from capybase.provenance import PROVENANCE_VALUES
     assert "deterministic_dup_eradication" in PROVENANCE_VALUES
     assert "micro_patch_repair" in PROVENANCE_VALUES
+
+
+def test_eradication_removes_whitespace_drifted_echo_s28_142():
+    """S28-142: both units freshly generated the same helper but one
+    copy's formatting drifted (indentation/blank lines) — the copies are
+    whitespace-insensitively identical, a pure echo, not a semantic
+    divergence. The second (drifted) copy is the one deleted."""
+    from capybase.orchestrator import _try_duplicate_eradication_repair
+    base = "int helper(int x) {\n    return x + 1;\n}\n"
+    dup = (
+        "int helper(int x) {\n    return x + 1;\n}\n"
+        "int helper(int x) {\n        return x + 1;\n\n}\n"  # drifted echo
+    )
+    unit = _cpp_unit(base, "int helper(int x) {\n    return x + 1;\n}",
+                     "int helper(int x) {\n        return x + 1;\n\n}",
+                     marker_span=(0, 2))
+    out = _try_duplicate_eradication_repair(
+        [_redef_failure(4, "helper")], base, [(unit, _cand(unit, dup))], 0)
+    assert out is not None, "whitespace-drifted echo must be eradicated"
+    text = out[0][1].resolved_text
+    assert text.count("int helper(int x)") == 1
+    assert "        return x + 1;" not in text  # the drifted copy went
+
+
+def test_eradication_still_declines_genuinely_divergent_copies():
+    """Copies with DIFFERENT code (not just formatting) remain the LLM's
+    call — the whitespace normalization must not erase real divergence.
+    Both copies are FRESH (neither verbatim in the pre-merge file), so no
+    pre-merge-copy branch applies either."""
+    from capybase.orchestrator import _try_duplicate_eradication_repair
+    base = "int unrelated(void) { return 0; }\n"
+    dup = (
+        "int helper(int x) {\n    return x * 2;\n}\n"   # fresh, current's text
+        "int helper(int x) {\n    return x + 2;\n}\n"   # fresh, divergent
+    )
+    unit = _cpp_unit(base, "int helper(int x) {\n    return x * 2;\n}",
+                     "int helper(int x) {\n    return x + 2;\n}",
+                     marker_span=(0, 2))
+    out = _try_duplicate_eradication_repair(
+        [_redef_failure(4, "helper")], base, [(unit, _cand(unit, dup))], 0)
+    assert out is None
