@@ -10643,6 +10643,16 @@ class Orchestrator:
                     originals[path] = original
                     self._write_worktree_only(path, buffer, accepted=accepted)
                     continue
+            else:
+                # S28-155: the pre-cascade whole-file path (generated take
+                # + portfolio) never ran — journal which unit-coverage
+                # precondition failed instead of disappearing silently.
+                self.journal.emit(
+                    "true_side_portfolio_gate",
+                    {"attempted": False,
+                     "reason": "no_units" if not units
+                     else "whole_file_unit"},
+                    step_index=self.step, path=path)
             # Sprint-22 P2: track how many units in this file have failed
             # (not accepted) so the retry-relaxation can check "is this
             # the ONLY failing unit?" before granting an extra retry.
@@ -18981,6 +18991,14 @@ class Orchestrator:
         except Exception:
             ts = None
         if not ts:
+            # S28-155: the portfolio's first precondition, previously a
+            # silent None — the 0077-class blind spot (no journal trace at
+            # all of the portfolio even evaluating).
+            self.journal.emit(
+                "true_side_portfolio_declined",
+                {"reason": "no_stage_sides", "phase1": phase1_fast_path,
+                 "n_units": len(units)},
+                step_index=self.step, path=path)
             return None
         sides, base_text = ts
         trigger = "dup_pathology"
@@ -19204,12 +19222,14 @@ class Orchestrator:
                     step_index=self.step, path=path,
                 )
                 return None
+        _side_declines: dict[str, str] = {}
         for side, text in _candidates:
             try:
                 # Brace sanity only for code files — prose/config files have
                 # no brace semantics (markdown code fences false-fail it).
                 if (language and structural_gate_applies(path)
                         and not _braces_balanced(text, language)):
+                    _side_declines[side] = "braces_unbalanced"
                     continue
             except Exception:
                 pass
@@ -19221,14 +19241,24 @@ class Orchestrator:
                 repo_root=str(self.git.repo), whole_text=text,
                 pristine_side_texts=[text])
             if not val.passed:
+                _side_declines[side] = "verify_failed"
                 continue
             if getattr(val, "resolved_text", None) is not None:
                 # R1 (s22): the pristine-side text needed a coherence repair
                 # to pass — it is no longer the pristine side. Decline the
                 # swap rather than accept a silently modified side text.
+                _side_declines[side] = "coherence_repair_needed"
                 continue
             verified.append((side, text, val))
         if not verified:
+            # S28-155: both sides' verify outcomes, previously silent —
+            # the drift/dup cases died here with no trace of why.
+            self.journal.emit(
+                "true_side_portfolio_declined",
+                {"reason": "no_verifying_side", "trigger": trigger,
+                 "phase1": phase1_fast_path,
+                 "side_declines": _side_declines},
+                step_index=self.step, path=path)
             return None
         if asym_winner is not None:
             choice, via = asym_winner, "gate_determined"
