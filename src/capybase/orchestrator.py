@@ -2194,6 +2194,7 @@ def _classify_build_error_lines(
     """
     from capybase.verification import (
         _is_cc_werror_warning,
+        _is_missing_build_system,
         _parse_cc_error_location,
     )
 
@@ -2209,6 +2210,10 @@ def _classify_build_error_lines(
             or ln.startswith("*** ")
             or "Error 1" in ln
             or "Error 2" in ln
+            # S28-152: the unconfigured-build-dir class ("Error: not a
+            # CMake build directory (missing CMakeCache.txt)") is the
+            # gate being inapplicable — never a merge defect.
+            or _is_missing_build_system(ln)
         ):
             env_ct += 1  # build-driver summary, not a gcc diagnostic
             continue
@@ -11279,10 +11284,28 @@ class Orchestrator:
                             if _build_cmd:
                                 self._write_worktree_only(path, buffer, accepted=accepted)
                                 import time as _p2bt_time
+                                from capybase.verification import (
+                                    _is_missing_build_system as _imbs_p2,
+                                )
 
                                 _p2bt_t0 = _p2bt_time.monotonic()
                                 _build_ok, _build_output = self._run_raw_test(_build_cmd)
                                 _p2bt_dur = _p2bt_time.monotonic() - _p2bt_t0
+                                # S28-152: the gate was INAPPLICABLE (no
+                                # configured build dir / no makefile) — a
+                                # distinct class from pass or fail; the
+                                # syntax-only checks remain the authority.
+                                if _build_ok and _build_output and _imbs_p2(
+                                        _build_output):
+                                    self.journal.emit(
+                                        "build_probe_inapplicable",
+                                        {"command": _build_cmd,
+                                         "reason": "build system not "
+                                                   "configured in this tree",
+                                         "output_tail": (
+                                             _build_output or "")[-200:]},
+                                        step_index=self.step, path=path,
+                                    )
                                 # Sprint-19 P3: journal the Phase-2 build as a
                                 # probe and let a timeout degrade the session
                                 # (the ~120-300s gaps were previously silent).
@@ -19361,8 +19384,22 @@ class Orchestrator:
             if trigger in ("phase1_fast_path", "midband_subsumption"):
                 _fb_cmd = self._resolve_per_file_build(path)
                 if _fb_cmd:
+                    from capybase.verification import (
+                        _is_missing_build_system as _imbs_p1,
+                    )
                     self._write_worktree_only(path, text, accepted=None)
                     _fb_ok, _fb_out = self._run_raw_test(_fb_cmd)
+                    # S28-152: an inapplicable gate (no configured build
+                    # dir) neither declines the swap nor counts as a pass
+                    # signal — proceed, journaled for the census.
+                    if _fb_ok and _fb_out and _imbs_p1(_fb_out):
+                        self.journal.emit(
+                            "build_probe_inapplicable",
+                            {"command": _fb_cmd,
+                             "site": "phase1_fast_path_fail_fast",
+                             "output_tail": (_fb_out or "")[-200:]},
+                            step_index=self.step, path=path,
+                        )
                     if not _fb_ok:
                         _fb_errors = [
                             ln for ln in (_fb_out or "").splitlines()
@@ -20085,7 +20122,10 @@ class Orchestrator:
                 "No rule to make target" in output
                 or _is_missing_build_system(output)
             ):
-                return True, ""  # target/build system unavailable → N/A
+                # target/build system unavailable → N/A. The output rides
+                # along (S28-152) so callers can journal WHY the gate was
+                # inapplicable — the census needs the count.
+                return True, output
             return proc.returncode == 0, output
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)

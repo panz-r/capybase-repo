@@ -5479,14 +5479,20 @@ def _is_missing_build_system(output: str) -> bool:
     ``make: *** No targets specified and no makefile found. Stop.`` (and
     friends) mean the invocation couldn't even start — no Makefile in this
     context (a rebase worktree carries tracked sources, not generated
-    build artifacts). Distinct from a build that ran and reported compile
-    errors: this is "check unavailable", never a merge verdict.
+    build artifacts). ``Error: not a CMake build directory (missing
+    CMakeCache.txt)`` (S28-152, the libuv-0089/0056 class) is the same
+    shape one level deeper: the build DIR exists but was never configured
+    — the gate is inapplicable, not failed. Distinct from a build that
+    ran and reported compile errors: this is "check unavailable", never a
+    merge verdict.
     """
     low = (output or "").lower()
     return (
         "no makefile found" in low
         or "no targets specified and no makefile" in low
         or "can't find cmake cache" in low
+        or "not a cmake build directory" in low
+        or "missing cmakecache.txt" in low
     )
 
 
@@ -5999,7 +6005,15 @@ class VerificationEngine:
                             f"splice coherence: unbalanced preprocessor directives "
                             f"at line {pp_line + 1} (missing #endif or extra #endif)"
                         ),
-                        detail={"preprocessor_imbalance_line": pp_line + 1},
+                        detail={
+                            "preprocessor_imbalance_line": pp_line + 1,
+                            # S28-141: the single-edit balancer DECLINED this
+                            # shape (truncated-slice guard, shared-line
+                            # directive, multiple imbalances). Recorded so
+                            # the census can count repair-eligible vs
+                            # genuinely-ambiguous imbalance failures.
+                            "preprocessor_repair_declined": True,
+                        },
                     )
                 )
                 features["syntax_checked"] = True
@@ -6472,10 +6486,13 @@ class VerificationEngine:
                                     msg = "build: linker error (not a model defect; compile succeeded)"
                                 elif _is_missing_build_system(
                                         (proc.stderr or "") + (proc.stdout or "")):
-                                    # The build system isn't materialized in this
-                                    # context (no Makefile — e.g. a rebase worktree
-                                    # carries tracked sources but not generated
-                                    # build artifacts). The build check is
+                                    # The build system isn't materialized or
+                                    # not configured in this context (no
+                                    # Makefile — a rebase worktree carries
+                                    # tracked sources but not generated build
+                                    # artifacts; or the build dir was never
+                                    # cmake-configured — S28-152, the libuv
+                                    # class). The build check is
                                     # UNAVAILABLE, not failed: treating it as a
                                     # failure poisons every downstream candidate
                                     # and feeds garbage feedback to the repair
@@ -6488,7 +6505,7 @@ class VerificationEngine:
                                     features["build_unavailable"] = True
                                     msg = (
                                         "build: build system not materialized "
-                                        "(no Makefile) — check skipped"
+                                        "or not configured — check skipped"
                                     )
                                 else:
                                     # Error localization (research §9): classify each

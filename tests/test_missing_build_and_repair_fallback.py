@@ -28,6 +28,22 @@ def test_missing_build_system_detected():
     assert _is_missing_build_system("CMake Error: can't find cmake cache")
 
 
+def test_unconfigured_cmake_build_dir_detected_s28_152():
+    """The libuv class: the build DIR exists but was never configured —
+    ``Error: not a CMake build directory (missing CMakeCache.txt)``. The
+    gate is inapplicable, never a merge verdict."""
+    assert _is_missing_build_system(
+        "Error: not a CMake build directory (missing CMakeCache.txt)")
+    assert _is_missing_build_system(
+        "cmake: the build directory is missing CMakeCache.txt")
+    # classify: an unconfigured-dir line is environmental, never
+    # merge-relevant (it used to fall through as unparseable).
+    from capybase.orchestrator import _classify_build_error_lines
+    line = "Error: not a CMake build directory (missing CMakeCache.txt)"
+    merge, env = _classify_build_error_lines([line], "src/duv.c")
+    assert merge == [] and env == 1
+
+
 def test_real_build_failures_not_classified_as_missing():
     # A build that RAN and reported compile errors is a real signal.
     assert not _is_missing_build_system(
@@ -35,6 +51,11 @@ def test_real_build_failures_not_classified_as_missing():
     assert not _is_missing_build_system(
         "make: *** [Makefile:512: foo.o] Error 1")
     assert not _is_missing_build_system("")
+    # A stale-cache MISmatch (a configured dir from another source tree)
+    # is a distinct, real CMake Error — not the absent-dir class.
+    assert not _is_missing_build_system(
+        "CMake Error: The current CMakeCache.txt is different than the "
+        "directory where CMake was run.")
 
 
 # ---------------------------------------------------------------------------
