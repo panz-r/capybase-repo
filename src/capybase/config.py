@@ -943,6 +943,21 @@ class FutureConfig(BaseModel):
     # compile failure of the reconstruction. Every probe is journaled as
     # whole_side_probe; the swap as whole_side_repair.
     enable_whole_side_repair_rung: bool = True
+    # File-level drift rescue (S28-149, the libuv-0056 class): when the
+    # whole-file validation fails AFTER unit acceptances AND a repair
+    # round has also failed (drift persisting through the CEGIS repair —
+    # 0056: failed twice, the loop kept accepting units, final 0.85 with
+    # the correct side verbatim at a stage), re-evaluate the pristine
+    # stage sides AS THE FILE against the same validation; a side that
+    # file-validates is taken over the drifted assembly. Never fires on
+    # first failure — the repair loop owns that shape. The validator is
+    # the acceptance authority (no LLM adjudication — the wsr rung owns
+    # the compile-flavored, adjudication-gated shapes; this arm
+    # partition-skips when that rung already ran). When both sides
+    # validate, the churn winner breaks the tie (the wholesale-winner
+    # heuristic). Journaled as side_takeover_rescue /
+    # side_takeover_rescue_declined.
+    enable_side_takeover_rescue: bool = True
     # Best-of-N preservation recovery (sprint-19 P2): when the
     # preservation heuristic rejects an otherwise-validation-passing
     # candidate and EVERY heuristic-forced retry then validates strictly

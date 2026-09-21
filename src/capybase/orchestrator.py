@@ -10961,6 +10961,7 @@ class Orchestrator:
                 self._p2_build_checked = False  # one build-test attempt per Phase 2
                 _ts_attempted = False  # true-side portfolio: once per file
                 _wsr_attempted = False  # whole-side repair rung: once per file
+                _str_attempted = False  # S28-149 drift rescue: once per file
                 while True:
                     spans_and_texts = [
                         (unit.marker_span, cand.resolved_text) for unit, cand in accepted
@@ -12019,6 +12020,42 @@ class Orchestrator:
                                     path, buffer, result, accepted=accepted)
                                 continue
                         else:
+                            # S28-149 file-level drift rescue — after the
+                            # deterministic F1 arms (tier-1 churn gate and
+                            # compile-clean both declined), BEFORE the paid
+                            # tier-2 ballot. The repair loop exhausted with
+                            # the assembly still failing AFTER unit
+                            # acceptances (libuv-0056: file_validated failed
+                            # twice, the loop kept accepting units, final
+                            # 0.85 with current == oracle verbatim at a
+                            # stage). Re-evaluate the pristine sides AS THE
+                            # FILE against the full validator; a side that
+                            # file-validates is taken over the drifted
+                            # assembly — validator-authority acceptance, no
+                            # LLM call. The ballot below runs only when
+                            # this declines.
+                            if len(accepted) > 0 and not _str_attempted:
+                                _str_attempted = True
+                                _str_res = None
+                                try:
+                                    _str_res = self._try_side_takeover_rescue(
+                                        path, language, original, units,
+                                        buffer,
+                                        wall_deadline=_file_wall_deadline)
+                                except Exception:  # noqa: BLE001 — rescue
+                                    # is a recovery mechanism; never break
+                                    # the exhaustion path.
+                                    _str_res = None
+                                if _str_res is not None:
+                                    accepted, buffer, file_validation = (
+                                        _str_res)
+                                    accepted_by_path[path] = accepted
+                                    # Same contract as the F1 takeover:
+                                    # write + stage, next file.
+                                    self._write_and_stage(
+                                        path, buffer, result,
+                                        accepted=accepted)
+                                    continue
                             # F1 tier-2 (sprint-23): LLM subsumption
                             # adjudication for symmetric shapes — when
                             # tier-1 declines (both sides changed
@@ -19589,6 +19626,171 @@ class Orchestrator:
             )
             return [(unit, cand)], text, val
         return None
+
+    def _try_side_takeover_rescue(
+        self, path: str, language: str | None,
+        original: str, units: list,
+        buffer: str,
+        wall_deadline: float | None = None,
+    ):
+        """S28-149: file-level drift rescue — the known-good side is
+        discoverable.
+
+        When the whole-file validation fails AFTER unit acceptances, the
+        per-unit assembly has demonstrably drifted (libuv-0056: current ==
+        oracle verbatim, file_validated failed twice, the loop kept
+        accepting units, final file scored 0.85). Re-evaluate the pristine
+        stage sides AS THE FILE against the same validation; a side that
+        file-validates is taken over the drifted assembly. The validator
+        is the acceptance authority — S28-144's oracle-equivalence
+        principle at candidate level (no LLM adjudication; the
+        whole-side-repair rung owns the adjudication-gated, compile-
+        flavored shapes, and this arm declines when that rung already ran
+        for the file so the two never contradict each other). When both
+        sides validate, the churn winner breaks the tie.
+
+        Returns ``(accepted, buffer, validation)`` like
+        ``_try_true_side_portfolio``, or None when the rescue declines
+        (the caller's repair loop proceeds unchanged).
+        """
+        if not getattr(self.config.future, "enable_side_takeover_rescue",
+                       True):
+            return None
+        if wall_deadline is not None:
+            import time as _str_time
+
+            if _str_time.monotonic() > wall_deadline - 120:
+                self.journal.emit(
+                    "side_takeover_rescue_declined",
+                    {"reason": "wall_deadline"},
+                    step_index=self.step, path=path,
+                )
+                return None
+        try:
+            ts = _true_stage_sides(self.git, path)
+        except Exception:
+            ts = None
+        if not ts:
+            self.journal.emit(
+                "side_takeover_rescue_declined",
+                {"reason": "no_stage_sides"},
+                step_index=self.step, path=path,
+            )
+            return None
+        sides, base_text = ts
+        if len(sides) < 2:
+            # A single pristine side is the portfolio's territory (its
+            # triggers handle the one-sided index); the drift rescue
+            # needs both sides to separate drifted-assembly from
+            # known-good-side.
+            self.journal.emit(
+                "side_takeover_rescue_declined",
+                {"reason": "single_stage_side"},
+                step_index=self.step, path=path,
+            )
+            return None
+        # The rescue runs at repair EXHAUSTION: the in-memory buffer is the
+        # last REPAIRED (never accepted) text, while the worktree holds the
+        # last ACCEPTED content — the repair beam validates via temp files
+        # and never wrote it. Restore the pre-probe disk state on decline,
+        # never the buffer (the wsr rung's restore contract is mid-loop and
+        # does not transfer here).
+        try:
+            _pre_probe_text = (Path(self.git.repo) / path).read_text()
+        except Exception:  # noqa: BLE001 — restore fallback only
+            _pre_probe_text = buffer
+        outcomes: dict[str, tuple[bool, object]] = {}
+        import time as _probe_time
+
+        for side, text in sides.items():
+            _t0 = _probe_time.monotonic()
+            # F2 (s27): NO brace-balance veto on pristine side texts —
+            # the validation build is the arbiter (see the repair rung).
+            self._write_worktree_only(path, text, accepted=None)
+            val = self.verification.verify_file(
+                path, language, original, [],
+                repo_root=str(self.git.repo), whole_text=text,
+                pristine_side_texts=[text])
+            self.journal.emit(
+                "side_takeover_rescue_probe",
+                {"side": side, "passed": bool(val.passed),
+                 "duration_s": round(_probe_time.monotonic() - _t0, 1)},
+                step_index=self.step, path=path,
+            )
+            if (val.passed
+                    and getattr(val, "resolved_text", None) is not None):
+                # R1 (s22): repaired ≠ pristine — decline the side.
+                val = None
+            outcomes[side] = (bool(val and val.passed), val)
+
+        def _restore_spliced() -> None:
+            # Leave the worktree holding what it held before the probes
+            # (the last accepted content), so the caller's remaining
+            # exhaustion arms and the end-of-step write operate on it.
+            try:
+                self._write_worktree_only(path, _pre_probe_text, accepted=None)
+            except Exception:  # noqa: BLE001
+                pass
+
+        ok_sides = [s for s, (ok, _) in outcomes.items() if ok]
+        if not ok_sides:
+            self.journal.emit(
+                "side_takeover_rescue_declined",
+                {"reason": "no_side_verifies"},
+                step_index=self.step, path=path,
+            )
+            _restore_spliced()
+            return None
+        if len(ok_sides) == 2:
+            # Both sides file-validate — churn breaks the tie (the
+            # wholesale-winner heuristic; journaled so post-hoc analysis
+            # can audit every tie-break).
+            from capybase.merge_intent import side_churn as _str_churn
+
+            cur_churn = _str_churn(base_text, sides.get("current", ""))
+            rep_churn = _str_churn(base_text, sides.get("replayed", ""))
+            choice = "current" if cur_churn >= rep_churn else "replayed"
+            via = "churn_tiebreak"
+        else:
+            choice = ok_sides[0]
+            via = "single_validating_side"
+        side, text, val = choice, sides[choice], outcomes[choice][1]
+        from capybase.conflict_model import (
+            CandidateResolution as _STR_CR,
+            ConflictSide as _STR_CS,
+        )
+        unit = ConflictUnit(
+            session_id=units[0].session_id,
+            step_index=units[0].step_index,
+            path=path,
+            language=units[0].language,
+            unit_id=f"{path}:true_side_stage",
+            unit_kind="whole_file",
+            base=_STR_CS(label="BASE", text=base_text),
+            current=_STR_CS(
+                label="CURRENT_UPSTREAM_SIDE",
+                text=sides.get("current", "")),
+            replayed=_STR_CS(
+                label="REPLAYED_COMMIT_SIDE",
+                text=sides.get("replayed", "")),
+            original_worktree_text=original,
+            marker_span=None,
+        )
+        cand = _STR_CR(
+            candidate_id=f"{unit.unit_id}:{side}",
+            unit_id=unit.unit_id,
+            model_name="side_takeover_rescue",
+            resolved_text=text,
+            provenance=f"deterministic_source_{side}_only_stage",
+            prompt_version="side_takeover_rescue.v1",
+        )
+        self.journal.emit(
+            "side_takeover_rescue",
+            {"side": side, "via": via, "n_units": len(units),
+             "both_validated": len(ok_sides) == 2},
+            step_index=self.step, path=path,
+        )
+        return [(unit, cand)], text, val
 
     def _f1_tier2_adjudicate(
         self, path: str, language: str | None,

@@ -405,6 +405,14 @@ splice_fitness_low = 0.40         # below: composition implausible, generate
 splice_max_chunks = 16            # more blocks = too fragmented to order
 splice_max_glue_insertions = 4
 splice_max_glue_lines = 3
+# File-level drift rescue (S28-149): when the whole-file validation fails
+# AFTER unit acceptances, the pristine stage sides are re-evaluated AS THE
+# FILE against the same validation; a side that file-validates is taken over
+# the drifted assembly (libuv-0056: current == oracle verbatim, final file
+# still scored 0.85). Validator-authority acceptance, no LLM adjudication;
+# partitioned after the whole-side repair rung. Default ON — it only fires
+# on an already-failing validation.
+enable_side_takeover_rescue = true
 # SBCR tuning (arXiv:2605.16646 §4.1). Fitness is char-level Gestalt, mean-
 # aggregated over both parents; the search is union-constrained (every candidate
 # keeps all lines from both sides). These knobs expose the research-tuned params.
