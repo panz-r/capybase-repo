@@ -10904,6 +10904,8 @@ class Orchestrator:
             if self.config.validation.require_whole_file_validation and units:
                 wf_retries = 0
                 _osc = RepairOscillationTracker()
+                _ss_sigs: list = []  # S28-140 same-signature stop window
+                _ss_round_model: list = []
                 # S28-54: pristine whole-file sides for signature injection —
                 # full stage texts when readable (declarations can sit far
                 # outside a unit's fragment), else the union of the units'
@@ -11141,6 +11143,39 @@ class Orchestrator:
                             not _phase2_model_used and effect == "UNCHANGED"
                         )
                     prev_failure_sig = cur_sig
+                    # S28-140 same-signature repetition stop: identical
+                    # hard-failure signatures across N consecutive repair
+                    # rounds mean the loop is producing zero new
+                    # information (nlohmann-json-0038: three candidates
+                    # rejected with the same "stray '@'" at ~the same
+                    # line). Requires a MODEL-drawn round inside the
+                    # repeated window — a deterministic-only repetition
+                    # must still let the model re-resolve have its chance
+                    # before the endgame claims the file.
+                    _ss_sigs.append(cur_sig)
+                    _ss_round_model.append(any(
+                        not str(getattr(c, "provenance", "") or "").startswith(
+                            "deterministic")
+                        for _u, c in accepted))
+                    _ss_t = max(
+                        2,
+                        getattr(self.config.policy,
+                                "cegis_convergence_threshold", 2) or 2)
+                    if (getattr(self.config.future,
+                                "enable_same_signature_stop", True)
+                            and len(_ss_sigs) >= _ss_t
+                            and len(set(_ss_sigs[-_ss_t:])) == 1
+                            and any(_ss_round_model[-_ss_t:])):
+                        self.journal.emit(
+                            "same_signature_stop",
+                            {"consecutive": _ss_t,
+                             "wf_retry": wf_retries,
+                             "model_in_window": any(_ss_round_model[-_ss_t:]),
+                             "signature_head": next(
+                                 iter(sorted(cur_sig)))[0][1][:80]},
+                            step_index=self.step, path=path,
+                        )
+                        break
                     if not file_validation.passed and wf_retries == 0 and not _ts_attempted:
                         # True-side portfolio at FIRST failure, before the
                         # repair loop: a whole-file side swap — the duplicate-
@@ -19742,14 +19777,22 @@ class Orchestrator:
             _restore_spliced()
             return None
         if len(ok_sides) == 2:
-            # Both sides file-validate — churn breaks the tie (the
-            # wholesale-winner heuristic; journaled so post-hoc analysis
-            # can audit every tie-break).
+            # Both sides file-validate — the churn heuristic breaks the
+            # tie (_whole_side_heuristic's exact policy, corpus-validated:
+            # massive asymmetry → the higher-churn side carries the merge
+            # intent; near-symmetric or both ≈ base → replayed, the commit
+            # being applied). Journaled so post-hoc analysis can audit
+            # every tie-break.
             from capybase.merge_intent import side_churn as _str_churn
 
             cur_churn = _str_churn(base_text, sides.get("current", ""))
             rep_churn = _str_churn(base_text, sides.get("replayed", ""))
-            choice = "current" if cur_churn >= rep_churn else "replayed"
+            if (max(cur_churn, rep_churn) == 0
+                    or (abs(cur_churn - rep_churn) / max(cur_churn, rep_churn))
+                    < 0.35):
+                choice = "replayed"
+            else:
+                choice = "current" if cur_churn > rep_churn else "replayed"
             via = "churn_tiebreak"
         else:
             choice = ok_sides[0]

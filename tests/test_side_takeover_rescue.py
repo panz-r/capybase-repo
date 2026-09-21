@@ -148,6 +148,21 @@ def test_rescue_both_validate_churn_tiebreak():
     assert swap[0]["both_validated"] is True
 
 
+def test_rescue_symmetric_churn_prefers_replayed():
+    """Near-symmetric churn (the _whole_side_heuristic <0.35 band) →
+    replayed — the commit being applied, not silently dropped."""
+    _REP_SYM = _BASE.replace("base line 7\n", "rep line 7\n")  # churn == current's
+    orch = _orch(_PassVer(ok_texts={_CUR, _REP_SYM}),
+                 stages={1: _BASE, 2: _CUR, 3: _REP_SYM})
+    out = orch._try_side_takeover_rescue(*_args(orch))
+    assert out is not None
+    _acc, buffer, _val = out
+    assert buffer == _REP_SYM
+    swap = [p for e, p in orch.journal.events if e == "side_takeover_rescue"]
+    assert swap[0]["side"] == "replayed"
+    assert swap[0]["via"] == "churn_tiebreak"
+
+
 def test_rescue_coherence_repair_side_declined():
     """R1 (s22): a side that only passes after a coherence repair is no
     longer pristine — the other side is taken instead."""

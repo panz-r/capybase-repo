@@ -958,6 +958,17 @@ class FutureConfig(BaseModel):
     # heuristic). Journaled as side_takeover_rescue /
     # side_takeover_rescue_declined.
     enable_side_takeover_rescue: bool = True
+    # Same-signature repetition stop (S28-140, the nlohmann-json-0038
+    # class): when the whole-file validation fails with the IDENTICAL
+    # hard-failure signature for N consecutive repair rounds
+    # (cegis_convergence_threshold, floor 2) AND at least one of those
+    # rounds drew a model candidate, the loop is producing zero new
+    # information — stop retrying and fall to the exhaustion endgame
+    # (wholesale floor, F1 arms, drift rescue) immediately. A
+    # deterministic-only repeated window does NOT stop the loop: the
+    # model re-resolve it precedes has not been given its chance yet.
+    # Journaled as same_signature_stop.
+    enable_same_signature_stop: bool = True
     # Best-of-N preservation recovery (sprint-19 P2): when the
     # preservation heuristic rejects an otherwise-validation-passing
     # candidate and EVERY heuristic-forced retry then validates strictly

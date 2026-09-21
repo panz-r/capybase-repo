@@ -413,6 +413,12 @@ splice_max_glue_lines = 3
 # partitioned after the whole-side repair rung. Default ON — it only fires
 # on an already-failing validation.
 enable_side_takeover_rescue = true
+# Same-signature repetition stop (S28-140): identical whole-file hard-failure
+# signatures across N consecutive repair rounds (with a model-drawn candidate
+# in the window) mean the loop is thrashing — stop retrying and fall to the
+# exhaustion endgame (wholesale floor, F1 arms, drift rescue) immediately
+# (nlohmann-json-0038: three candidates rejected with the same "stray '@'").
+enable_same_signature_stop = true
 # SBCR tuning (arXiv:2605.16646 §4.1). Fitness is char-level Gestalt, mean-
 # aggregated over both parents; the search is union-constrained (every candidate
 # keeps all lines from both sides). These knobs expose the research-tuned params.
