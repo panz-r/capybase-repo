@@ -391,8 +391,9 @@ enable_common_span_factoring = false
 # non-conflicting hunks for the conflict's file — the commit's own diff is the
 # cheapest evidence of what the edit was trying to accomplish (deterministic,
 # zero model calls). Budget-trimmed between the structural anchor and the
-# near-miss draft. Flip to true after the multi-hunk A/B.
-enable_commit_intent_context = false
+# near-miss draft. Default ON after the 12-case A/B (verdict parity, block
+# present in 3/12 cases' prompts, sim 0.99->1.00 on protobuf-0057).
+enable_commit_intent_context = true
 # SBCR tuning (arXiv:2605.16646 §4.1). Fitness is char-level Gestalt, mean-
 # aggregated over both parents; the search is union-constrained (every candidate
 # keeps all lines from both sides). These knobs expose the research-tuned params.

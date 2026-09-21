@@ -749,9 +749,11 @@ class FutureConfig(BaseModel):
     # non-conflicting hunks for the conflict's file in the prompt — the
     # commit's own diff is the cheapest evidence of what the edit was trying
     # to accomplish (deterministic, zero model calls). Budget-trimmed between
-    # the structural anchor and the near-miss draft. Default OFF pending the
-    # multi-hunk A/B.
-    enable_commit_intent_context: bool = False
+    # the structural anchor and the near-miss draft. Default ON after the
+    # 12-case A/B: verdict parity (10 PASS both arms), no regressions, sim
+    # 0.99→1.00 on protobuf-0057 (treatment), block present in 3/12 cases'
+    # prompts (the multi-hunk population it serves).
+    enable_commit_intent_context: bool = True
     # Near-miss seeding (S28-128; default ON after the paired targeted A/B
     # won: 12/13 slice cases identical-or-better, no attributable regression,
     # seeded cases resolved in fewer LLM attempts with 27-51% less wall time
