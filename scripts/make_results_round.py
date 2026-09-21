@@ -196,11 +196,15 @@ def _journal_mechanism(flights_root: Path | None, case_id: str) -> str | None:
 def _is_skip(rec: dict) -> bool:
     """The measurement/infrastructure skip classes — not resolver outcomes,
     excluded from every denominator (s27-73). SAFE_SKIP existed; the live
-    classifier emits SETUP_FAILED for harness crashes (s27-72); the
-    scenario harness's verdicts carry no terminal_reason at all."""
-    if rec.get("terminal_reason") in ("SAFE_SKIP", "SETUP_FAILED"):
+    classifier emits SETUP_FAILED for harness crashes (s27-72); INFRA_LOST
+    is S28-159's verdict-loss class (setup failure AFTER scoreable content
+    existed — queued for re-score, never a capability row); the scenario
+    harness's verdicts carry no terminal_reason at all."""
+    if rec.get("terminal_reason") in ("SAFE_SKIP", "SETUP_FAILED",
+                                      "INFRA_LOST"):
         return True
-    return rec.get("verdict") in ("SAFE_SKIP", "ALL_ABSENT", "ORACLE_HOLE")
+    return rec.get("verdict") in ("SAFE_SKIP", "ALL_ABSENT", "ORACLE_HOLE",
+                                  "INFRA_LOST")
 
 
 def _row_mechanism(rec: dict, flights_root: Path | None) -> str | None:

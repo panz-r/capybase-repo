@@ -2039,6 +2039,27 @@ def _verdict_chain(r: "CaseResult") -> str:
     return verdict
 
 
+def _recover_infra_lost(r: "CaseResult") -> bool:
+    """S28-159: verdict-loss recovery for SETUP_FAILED rows with content.
+
+    A setup failure that strikes AFTER the run already produced scoreable
+    content (matches_oracle >= 0.80, the NEAR_MATCH bar) is INFRA_LOST —
+    the resolution existed (php-0089's first run sat at sim 0.9998) and
+    only the verdict was lost to infrastructure (the 0106 re-score
+    incident class). Such rows are excluded from every capability
+    denominator (the SETUP_FAILED doctrine) and queued for re-score
+    instead of silently reading as failures. Returns True when
+    reclassified. Pure on ``r`` apart from the two field writes.
+    """
+    if r.terminal_reason != "SETUP_FAILED":
+        return False
+    if r.matches_oracle < 0.80:
+        return False
+    r.terminal_reason = "INFRA_LOST"
+    r.verdict = "INFRA_LOST"
+    return True
+
+
 def run_case(case: Case, client: OpenAICompatibleClient, *,
              flights_dir: Path | None = None,
              td: str | None = None,
@@ -2788,6 +2809,8 @@ def main():
                 r.terminal_reason = "TIMEOUT_THROUGHPUT"
             else:
                 r.terminal_reason = "TIMEOUT_CAPABILITY"
+        if _recover_infra_lost(r):
+            verdict = r.verdict  # INFRA_LOST: excluded + queued, not ESCALATE
         results.append(r)
         # Incremental write: a kill won't lose progress.
         out.write_text(json.dumps([r.__dict__ for r in results], indent=2))
@@ -2844,11 +2867,11 @@ def main():
     print(f"SKELETON-INTENT CANDIDATES: {idiomatic_ct}  (sim < 0.80 but "
           f"skeleton >= 0.85 — idiomatic rewrites; eval-only diagnostic)")
     print(f"wall:       {elapsed:.0f}s ({elapsed/60:.1f}m) [this run only]")
-    # Real-conflict pass rate: excludes SAFE_SKIP (no real conflict) and
-    # SETUP_FAILED (infrastructure failure — not a resolver outcome) from
-    # the denominator. This is the honest metric — neither is a resolution
-    # the system produced.
-    _excluded = ("SAFE_SKIP", "SETUP_FAILED")
+    # Real-conflict pass rate: excludes SAFE_SKIP (no real conflict),
+    # SETUP_FAILED (infrastructure failure — not a resolver outcome) and
+    # INFRA_LOST (S28-159: setup failure AFTER scoreable content existed —
+    # the verdict is lost, not the resolution) from the denominator.
+    _excluded = ("SAFE_SKIP", "SETUP_FAILED", "INFRA_LOST")
     real_conflicts = [
         r for r in results if r.terminal_reason not in _excluded]
     real_pass = sum(1 for r in real_conflicts if r.verdict == "PASS")
@@ -2856,11 +2879,25 @@ def main():
     safe_skip_ct = sum(1 for r in results if r.terminal_reason == "SAFE_SKIP")
     setup_fail_ct = sum(
         1 for r in results if r.terminal_reason == "SETUP_FAILED")
+    infra_lost = [r for r in results if r.terminal_reason == "INFRA_LOST"]
     # Explicit denominator breakdown so pass-rate comparisons are meaningful
     # across runs (Sprint 8: 64/76 vs Sprint 9: 52/75 — the denominator
     # changed by 1 with no explanation).
     print(f"total: {len(results)} | SAFE_SKIP: {safe_skip_ct} | "
-          f"SETUP_FAILED: {setup_fail_ct} | real conflicts: {len(real_conflicts)}")
+          f"SETUP_FAILED: {setup_fail_ct} | INFRA_LOST: {len(infra_lost)} | "
+          f"real conflicts: {len(real_conflicts)}")
+    if infra_lost:
+        lost_ids = [r.id for r in infra_lost]
+        print(f"INFRA_LOST re-score queue ({len(lost_ids)}): "
+              f"{', '.join(lost_ids)}")
+        try:
+            (out.parent / "re-score-queue.json").write_text(json.dumps({
+                "reason": "INFRA_LOST: first-run content (sim >= 0.80) lost "
+                          "to a setup failure; re-score these cases",
+                "cases": lost_ids,
+            }, indent=2))
+        except Exception:  # noqa: BLE001 — queue is best-effort
+            pass
     if real_conflicts:
         print(f"real-conflict PASS rate: {real_pass}/{len(real_conflicts)} = "
               f"{real_pass/len(real_conflicts)*100:.0f}%")

@@ -7333,6 +7333,46 @@ class Orchestrator:
         )
         return outcome
 
+    def _maybe_journal_mutual_wholesale(
+        self, unit: ConflictUnit, cand: CandidateResolution,
+    ) -> None:
+        """S28-160: mutual-wholesale take telemetry (journal-only).
+
+        duckdb-0014's shape: BOTH sides rewrote the whole file (churn 209
+        vs 211 on a 210-line base — invisible to every wholesale gate by
+        design) and the deterministic replayed-only take landed at
+        WORKING while the current side was oracle-perfect. The replayed
+        tie-break is a measured coin flip in this shape; this event
+        counts every source-only take that landed on it so the harvest
+        can measure tie-break accuracy and decide whether arbitration
+        (preservation, obligations, commit intent) is warranted.
+        """
+        prov = getattr(cand, "provenance", "") or ""
+        side = None
+        if "current_only" in prov:
+            side = "current"
+        elif "replayed_only" in prov:
+            side = "replayed"
+        if side is None:
+            return
+        base_t = unit.base.text or ""
+        base_n = sum(1 for ln in base_t.splitlines() if ln.strip())
+        if base_n < 10:
+            return
+        from capybase.merge_intent import side_churn as _mw_churn
+
+        cur_churn = _mw_churn(base_t, unit.current.text or "")
+        rep_churn = _mw_churn(base_t, unit.replayed.text or "")
+        if cur_churn < 0.8 * base_n or rep_churn < 0.8 * base_n:
+            return
+        self.journal.emit(
+            "mutual_wholesale_take",
+            {"side": side, "churn_current": cur_churn,
+             "churn_replayed": rep_churn, "base_lines": base_n,
+             "unit_id": unit.unit_id},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+
     def _try_generated_file_take(
         self, path: str, language: str | None,
         original: str, units: list,
@@ -15709,6 +15749,7 @@ class Orchestrator:
             if rescue is not None and rescue.accepted is not None:
                 return rescue
         if outcome.accepted is not None:
+            self._maybe_journal_mutual_wholesale(unit, outcome.accepted)
             return outcome
         if not getattr(self.config.future, "enable_preservation_bestof_n",
                        True):

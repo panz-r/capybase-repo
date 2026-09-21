@@ -268,3 +268,50 @@ def test_engine_session_completed_handles_missing_or_corrupt(tmp_path):
     j.parent.mkdir(parents=True)
     j.write_text("{not json at all\n")
     assert mod._engine_session_completed(tmp_path, "c1") is False
+
+
+# ---------------------------------------------------------------------------
+# S28-159: INFRA_LOST verdict-loss recovery
+# ---------------------------------------------------------------------------
+
+def _load_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "live_eval_realworld_m",
+        Path(__file__).resolve().parent.parent / "scripts" / "live_eval_realworld.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["live_eval_realworld_m"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_infra_lost_recovers_setup_failure_with_content():
+    """php-0089's shape: the run produced sim 0.9998 content, then the
+    setup of a later phase died. INFRA_LOST, never a capability row."""
+    mod = _load_module()
+    r = mod.CaseResult(id="php-history-0089", language="cpp",
+                       dataset="php", escalated=True,
+                       matches_oracle=0.9998, verdict="ESCALATE",
+                       reason="setup failed: git add rc=128")
+    r.terminal_reason = "SETUP_FAILED"
+    assert mod._recover_infra_lost(r) is True
+    assert r.terminal_reason == "INFRA_LOST"
+    assert r.verdict == "INFRA_LOST"
+
+
+def test_infra_lost_ignores_low_content_and_other_classes():
+    mod = _load_module()
+    # low-sim content: nothing worth re-scoring, SETUP_FAILED stands
+    r = mod.CaseResult(id="x", language="c", dataset="d", escalated=True,
+                       matches_oracle=0.3, verdict="ESCALATE",
+                       reason="setup failed: disk quota")
+    r.terminal_reason = "SETUP_FAILED"
+    assert mod._recover_infra_lost(r) is False
+    assert r.terminal_reason == "SETUP_FAILED"
+    # other terminal classes: untouched
+    r2 = mod.CaseResult(id="y", language="c", dataset="d", escalated=False,
+                        matches_oracle=0.99, verdict="PASS")
+    r2.terminal_reason = ""
+    assert mod._recover_infra_lost(r2) is False
+    assert r2.terminal_reason == ""
