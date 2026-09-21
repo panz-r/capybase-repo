@@ -757,8 +757,13 @@ class FutureConfig(BaseModel):
     # Ordered splice selection (S28-139): for additive conflicts SBCR declined
     # with fitness in the ambiguity band, the model returns a tiny
     # selection/order answer over the sides' blocks and capybase materializes
-    # verbatim. Default OFF pending the shape-positive A/B.
-    enable_ordered_splice: bool = False
+    # verbatim. Default ON after the A/B: verdict parity in both placements,
+    # a verdict conversion as a post-failure rescue (libuv-0056 ESCALATE 0.42
+    # -> NEAR_MATCH 0.84), the pre-LLM placement's one regression (libuv-0089)
+    # eliminated by generation-first ordering, zero protocol failures, and
+    # bounded downside (it only fires where the loop already failed and the
+    # alternative is escalation).
+    enable_ordered_splice: bool = True
     # Lower edge of the ambiguity band: below this the composition itself is
     # implausible (SBCR's decline is a capability signal, not an ordering
     # signal) — defer to normal generation.

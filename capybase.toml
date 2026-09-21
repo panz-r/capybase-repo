@@ -398,8 +398,9 @@ enable_commit_intent_context = true
 # with fitness in the ambiguity band [splice_fitness_low, sbcr_floor), the
 # model returns a tiny selection/order answer over the sides' blocks and
 # capybase materializes verbatim (byte-identical copied code, tens of tokens
-# per attempt). Protocol violations latch the unit to normal generation.
-enable_ordered_splice = false
+# per attempt). Runs as a POST-failure rescue: only after the LLM loop ended
+# without an accepted candidate. Protocol violations latch the unit.
+enable_ordered_splice = true
 splice_fitness_low = 0.40         # below: composition implausible, generate
 splice_max_chunks = 16            # more blocks = too fragmented to order
 splice_max_glue_insertions = 4
