@@ -152,3 +152,50 @@ def test_side_preservation_declines_monster_files():
     small = "a\nb\nc\n"
     assert side_preservation(small, small, small) is None  # no changes
     assert side_preservation("a\nb\n", "a\nB\n", "a\nB\n") == 1.0
+
+
+# ---------------------------------------------------------------------------
+# S28-162: the relaxed floor band (flag-gated A/B)
+# ---------------------------------------------------------------------------
+
+def test_relaxed_band_fires_between_081_and_090():
+    """With the flag ON, a ratio in [0.81, 0.90) + a measured degenerate
+    buffer fires the floor (trigger 'relaxed'); the calibrated band's
+    buffer-less eligibility does not extend to it."""
+    # c=24 (12 edited lines, both directions), r=160 (full 60-line
+    # rewrite + 100 additions) -> ratio (160-24)/160 = 0.85.
+    base = "\n".join(f"int fn{i}(void) {{ return {i}; }}" for i in range(60))
+    cur = "\n".join(
+        (f"int fn{i}(void) {{ return {i} + 1; }}" if i < 12
+         else f"int fn{i}(void) {{ return {i}; }}")
+        for i in range(60))
+    rep = "\n".join(f"int rep{i}(void) {{ return {i}; }}" for i in range(100))
+    from capybase.merge_intent import full_file_context
+    ctx = full_file_context(base, cur, rep)
+    assert 0.81 <= ctx["churn_ratio"] < 0.90, ctx["churn_ratio"]
+    orch = _orch()
+    orch.git = _FakeGit({1: base, 2: cur, 3: rep})  # local fixture stages
+    assert orch._wholesale_winner_floor(
+        "f.c", None, [_mk_unit(base)], buffer=cur) is None
+    orch.config.future.enable_floor_relaxed_band = True
+    out = orch._wholesale_winner_floor(
+        "f.c", None, [_mk_unit(base)], buffer=cur)
+    assert out is not None
+    ev = [p for e, p in orch.journal.events if e == "wholesale_winner_floor"]
+    assert ev[-1]["trigger"] == "relaxed"
+
+
+def test_relaxed_band_requires_a_buffer():
+    """The widened bar never inherits the calibrated band's buffer-less
+    eligibility: flag on, buffer None -> decline."""
+    base = "\n".join(f"int fn{i}(void) {{ return {i}; }}" for i in range(60))
+    cur = "\n".join(
+        (f"int fn{i}(void) {{ return {i} + 1; }}" if i < 12
+         else f"int fn{i}(void) {{ return {i}; }}")
+        for i in range(60))
+    rep = "\n".join(f"int rep{i}(void) {{ return {i}; }}" for i in range(100))
+    orch = _orch()
+    orch.git = _FakeGit({1: base, 2: cur, 3: rep})  # local fixture stages
+    orch.config.future.enable_floor_relaxed_band = True
+    assert orch._wholesale_winner_floor(
+        "f.c", None, [_mk_unit(base)], buffer=None) is None

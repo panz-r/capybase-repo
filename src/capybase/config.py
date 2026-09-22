@@ -977,6 +977,14 @@ class FutureConfig(BaseModel):
     # heuristic). Journaled as side_takeover_rescue /
     # side_takeover_rescue_declined.
     enable_side_takeover_rescue: bool = True
+    # Relaxed floor band (S28-162, A/B flag, default OFF): widens the
+    # wholesale-winner floor's bars (ratio 0.90 -> 0.81, shrinkage
+    # dominance 0.30 -> 0.35) — the census found 30/136 non-PASS rows
+    # within 10% relative of a bar, 23 at the 0.90 cliff. Every
+    # relaxed-band firing stays output-gated (a measured degenerate
+    # buffer is required); the calibrated band and the fast path keep
+    # their bars. Flip decision rides the 7-case targeted rerun.
+    enable_floor_relaxed_band: bool = False
     # Same-signature repetition stop (S28-140, the nlohmann-json-0038
     # class): when the whole-file validation fails with the IDENTICAL
     # hard-failure signature for N consecutive repair rounds

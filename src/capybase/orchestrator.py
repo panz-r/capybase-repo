@@ -18765,8 +18765,22 @@ class Orchestrator:
         from capybase.merge_intent import full_file_context as _ffc
 
         ctx = _ffc(base_text, cur, rep)
-        wholesale = (
+        # S28-162: the relaxed floor band (flag-gated, default OFF, A/B
+        # measured). The census found 30/136 non-PASS rows within 10%
+        # relative of a gate bar (23 at the 0.90 ratio cliff) — the flag
+        # widens BOTH bars (ratio 0.90 -> 0.81, shrinkage dominance
+        # 0.30 -> 0.35) while the measured-degenerate-output requirement
+        # below keeps every relaxed-band firing output-gated (a wrong
+        # take cannot silently ship; the fast path and midband keep
+        # their calibrated bars).
+        _relax = getattr(self.config.future, "enable_floor_relaxed_band",
+                         False)
+        wholesale_calibrated = (
             ctx["churn_ratio"] >= 0.90
+            and ctx["dominant_churn"] >= 0.30 * max(ctx["base_lines"], 1))
+        wholesale = wholesale_calibrated or (
+            _relax
+            and ctx["churn_ratio"] >= 0.81
             and ctx["dominant_churn"] >= 0.30 * max(ctx["base_lines"], 1))
         # S28-148: the mass-DELETION rewrite band (duckdb-0133: replayed
         # deleted ~92% of the base; churn_ratio 0.8944 missed the wholesale
@@ -18781,9 +18795,10 @@ class Orchestrator:
             _wchurn, _lchurn = max(_c, _r), min(_c, _r)
             _wlines = (ctx["current_lines"] if _c >= _r
                        else ctx["replayed_lines"])
+            _dom_bar = 0.35 if _relax else 0.30
             shrinkage = (
                 _wchurn >= 0.30 * max(ctx["base_lines"], 1)
-                and _lchurn <= 0.30 * _wchurn
+                and _lchurn <= _dom_bar * _wchurn
                 and _wlines <= 0.70 * max(ctx["base_lines"], 1))
         if not (wholesale or shrinkage):
             return None
@@ -18811,6 +18826,11 @@ class Orchestrator:
             # buffer-less eligibility (clap-0004's markers-unresolved
             # escalation shape).
             return None
+        if (wholesale and not wholesale_calibrated and pres is None):
+            # S28-162: relaxed-band ratio fires are equally output-gated —
+            # the widened bar never inherits the calibrated band's
+            # buffer-less eligibility.
+            return None
         from capybase.conflict_model import (
             CandidateResolution as _FL_CR,
             ConflictSide as _FL_CS,
@@ -18833,7 +18853,9 @@ class Orchestrator:
             {"winner": winner,
              "winner_preservation": pres if pres is not None else "n/a",
              "had_buffer": bool(buffer),
-             "trigger": "wholesale" if wholesale else "shrinkage",
+             "trigger": ("wholesale" if wholesale_calibrated else
+                         "relaxed" if wholesale else "shrinkage"),
+             "relaxed": bool(_relax),
              "churn_ratio": ctx["churn_ratio"],
              "winner_lines": ctx["current_lines" if winner == "current"
                                  else "replayed_lines"],
