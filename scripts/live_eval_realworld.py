@@ -37,10 +37,12 @@ Verdict per case:
   ESCALATE   — orch.run() escalated (human required). The SAFE outcome.
   ORACLE_DIVERGENT — marker/brace failure OR sim < 0.80 without the
                preservation property (genuinely different from the oracle).
-  GATE_UNAVAILABLE — sim >= 0.95 content that the build/validation gate
-               rejected, where the ORACLE itself fails the same gate
-               (oracle_builds=False, probed post-hoc while the materialized
-               tree still exists). The gate cannot distinguish the resolver's
+  GATE_UNAVAILABLE — content the build/validation gate rejected where the
+               ORACLE itself fails the same gate (oracle_builds=False,
+               probed post-hoc while the materialized tree still exists):
+               sim >= 0.95 for any verdict, >= 0.80 for escalations
+               (S28-144 — the escalation cannot implicate the merge). The
+               gate cannot distinguish the resolver's
                output from the human resolution — the case measures the
                sandbox, not the resolver (protobuf-0055/0065, fmt-0003,
                tokio-0110 classes). Distinct from PASS: not counted as a
@@ -534,6 +536,18 @@ class CaseResult:
     # measurable (empty text, or past the monster-file guard — S28-164).
     oracle_line_presence: float | None = None
     oracle_order_score: float | None = None
+    # S28-146: the runner's TEXTUAL checks (brace balance / markers /
+    # python compile) are inapplicable when the ORACLE fails the same
+    # check on the same file — the verdict then follows sim instead of
+    # reading oracle-class content as ORACLE_DIVERGENT (17 s28 rows at
+    # sim >= 0.95, 8 at 1.000, were the victims).
+    oracle_check_inapplicable: bool = False
+    # S28-144(2): oracle-equivalence (eval-only flag): marker-free
+    # content at sim >= 0.99 with oracle_builds False — the oracle cannot
+    # build in this environment, so identity with it is PASS-equivalent
+    # even without a working gate. The verdict vocabulary stays
+    # GATE_UNAVAILABLE; the recount counts the flag in the dual view.
+    oracle_equivalent: bool = False
     # FR2a flight recorder: the orchestrator's session_id (the per-case artifact
     # root under .rebase-agent/sessions/<session_id>/). Populated when
     # --preserve-flights copies the session dir out; None otherwise. The flight
@@ -2054,6 +2068,34 @@ def _oracle_order_fields(content: str, oracle: str) -> tuple[float | None, float
         return None, None
 
 
+def _oracle_check_inapplicable(
+        *, expected: str, language: str,
+        marker_free: bool | None, compiles: bool | None,
+        gate_applies: bool = True,
+        compiles_from_build: bool = False) -> bool:
+    """S28-146: did the ORACLE fail the same TEXTUAL check the candidate
+    failed? When yes, the check is inapplicable for the file — the oracle
+    defines correctness, so a verdict computed from that check would
+    label oracle-class content a resolver failure (the 17-row class:
+    sim >= 0.95, 8 at 1.000, all compiles=False).
+
+    Only the checks the runner applies to the TEXT calibrate for free:
+    markers, brace balance, python compile. A build-derived compiles
+    verdict (``compiles_from_build``) is S28-144's oracle_builds
+    business — the harness cannot re-run the tree build on the oracle
+    text alone, so this guard declines there.
+    """
+    if not expected:
+        return False
+    if marker_free is False and _contains_markers(expected):
+        return True
+    if compiles is not False or not gate_applies or compiles_from_build:
+        return False
+    if language == "python":
+        return _py_compiles(expected) is False
+    return _brace_balanced(expected, language) is False
+
+
 def _is_working(r: "CaseResult") -> bool:
     """WORKING: compiling, marker-free, below the PASS bar, and preserving
     both sides' changes — a functioning both-features merge the oracle
@@ -2081,9 +2123,14 @@ def _verdict_chain(r: "CaseResult") -> str:
     """The pure per-run verdict chain (module-level so tests can pin it).
 
     ESCALATE / PASS / WORKING / NEAR_MATCH / ORACLE_DIVERGENT per the fields,
-    then the GATE_UNAVAILABLE override: a sim >= 0.95 gate rejection where
+    then the GATE_UNAVAILABLE override: a gate rejection where
     the ORACLE fails the same gate (oracle_builds probed on the live tree) is
-    a sandbox artifact, not a resolver failure. ESCALATE_TOOLCHAIN comes
+    a sandbox artifact, not a resolver failure — sim >= 0.95 for any
+    verdict, >= 0.80 for escalations (S28-144: the escalation cannot
+    implicate a merge when the oracle fails the gate too). Above that,
+    S28-146: a failed TEXTUAL check the oracle fails too (verified by
+    running the check on the oracle text) makes the check inapplicable —
+    the verdict follows sim. ESCALATE_TOOLCHAIN comes
     first: the preflight proved all three texts (both sides + oracle) fail
     the gate identically — the case is un-passable by construction."""
     if getattr(r, "toolchain_dead", False):
@@ -2095,6 +2142,16 @@ def _verdict_chain(r: "CaseResult") -> str:
             verdict = "PASS"
         elif _is_working(r):
             verdict = "WORKING"
+        elif r.matches_oracle >= 0.80:
+            verdict = "NEAR_MATCH"
+        else:
+            verdict = "ORACLE_DIVERGENT"
+    elif getattr(r, "oracle_check_inapplicable", False):
+        # S28-146: the ORACLE fails the same textual check on the same
+        # file — the check cannot implicate the candidate, so the verdict
+        # follows sim (the anomaly rides oracle_check_inapplicable).
+        if r.matches_oracle >= PASS_THRESHOLD:
+            verdict = "PASS"
         elif r.matches_oracle >= 0.80:
             verdict = "NEAR_MATCH"
         else:
@@ -2111,6 +2168,15 @@ def _verdict_chain(r: "CaseResult") -> str:
     if (verdict in ("ESCALATE", "ORACLE_DIVERGENT")
             and getattr(r, "oracle_builds", None) is False
             and r.matches_oracle >= 0.95):
+        return "GATE_UNAVAILABLE"
+    # S28-144(1): an ESCALATED session whose oracle ALSO fails the build
+    # is un-passable in this environment — the escalation cannot implicate
+    # the merge. The NEAR_MATCH bar (0.80) widens the old 0.95 door: the
+    # census population (duckdb-0126/0127 at 0.899/0.916, php-0116 at
+    # 0.894) sat just under it.
+    if (verdict == "ESCALATE"
+            and getattr(r, "oracle_builds", None) is False
+            and r.matches_oracle >= 0.80):
         return "GATE_UNAVAILABLE"
     return verdict
 
@@ -2495,6 +2561,19 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
     # presence field as the oracle-equivalence doctrine's basis.
     res.oracle_line_presence, res.oracle_order_score = _oracle_order_fields(
         content, case.expected_resolved)
+    # S28-146: calibrate the runner's textual checks against the oracle.
+    res.oracle_check_inapplicable = _oracle_check_inapplicable(
+        expected=case.expected_resolved, language=case.language,
+        marker_free=res.marker_free, compiles=res.compiles,
+        gate_applies=bool(_sga(case.path)),
+        compiles_from_build=(
+            case.language in ("c", "cpp", "c++")
+            and c_builds_result is not None))
+    # S28-144(2): the oracle-equivalence flag (eval-only).
+    res.oracle_equivalent = (
+        res.oracle_builds is False
+        and res.marker_free is True
+        and res.matches_oracle >= 0.99)
     return res
 
 
@@ -3056,8 +3135,19 @@ def main():
     print(f"NEAR_MATCH: {near_ct}  (sim 0.80–{PASS_THRESHOLD}: defensible but imperfect)")
     print(f"ESCALATE:   {escalate_ct}")
     print(f"ORACLE_DIVERGENT: {wrong_ct}  (sim < 0.80 or marker/brace failure)")
-    print(f"GATE_UNAVAILABLE: {gate_ct}  (sim >= 0.95 gate rejection the oracle "
-          f"shares — sandbox artifact, not a resolver failure)")
+    print(f"GATE_UNAVAILABLE: {gate_ct}  (gate rejection the oracle shares — "
+          f"sim >= 0.95 any verdict, >= 0.80 for escalations (S28-144) — "
+          f"sandbox artifact, not a resolver failure)")
+    oeq_ct = sum(1 for r in results if getattr(r, "oracle_equivalent", False))
+    if oeq_ct:
+        print(f"  oracle-equivalent: {oeq_ct} of the GATE_UNAVAILABLE rows are "
+              f"marker-free at sim >= 0.99 — PASS-equivalent by identity with "
+              f"an oracle that cannot build here (S28-144, eval-only flag)")
+    ochk_ct = sum(1 for r in results
+                  if getattr(r, "oracle_check_inapplicable", False))
+    if ochk_ct:
+        print(f"  check-inapplicable: {ochk_ct} rows failed a textual check the "
+              f"ORACLE fails too — verdict follows sim (S28-146)")
     # Sprint-20 S20.11 (eval-only): idiomatic-rewrite candidates —
     # non-clean verdicts with content whose token jaccard to the oracle
     # is low but whose control-flow skeleton is largely preserved.
