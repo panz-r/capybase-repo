@@ -2770,6 +2770,7 @@ def main():
 
         def _execute_case() -> CaseResult:
             """One full attempt: fresh temp repo, worker thread, wall-clock cap."""
+            _case_t0 = time.time()
             # D3: create the temp dir in the MAIN thread so we own cleanup. The
             # worker receives it via `td=`; if the worker times out and is
             # abandoned, the main thread cleans up here (no leaked temp trees).
@@ -2858,11 +2859,17 @@ def main():
                         f"case timeout after {args.case_timeout}s "
                         "(engine accepted; post-resolution scoring exceeded "
                         "the wall)")
-                return CaseResult(
+                _trow = CaseResult(
                     id=case.id, language=case.language, dataset=case.dataset,
                     escalated=True,
                     conflict_region_count=case.marker_original.count("<<<<<<<"),
                     reason=_timeout_reason)
+                # S28-169: the timeout path returned a fresh result with
+                # elapsed=0.0 — 8 s28 TIMEOUT_CAPABILITY rows carry no wall
+                # time, blinding the throughput analysis to exactly the
+                # slowest cases. Record the real wall clock.
+                _trow.elapsed = time.time() - _case_t0
+                return _trow
             # Worker finished — safe to clean up the temp dir now.
             shutil.rmtree(_td, ignore_errors=True)
             return _holder[0] if _holder else CaseResult(
