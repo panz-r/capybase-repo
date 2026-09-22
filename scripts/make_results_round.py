@@ -203,8 +203,11 @@ def _is_skip(rec: dict) -> bool:
     if rec.get("terminal_reason") in ("SAFE_SKIP", "SETUP_FAILED",
                                       "INFRA_LOST"):
         return True
+    # UNVERIFIED (S28-161): the marker/compile checks never ran — a
+    # measurement hole, never a capability row (17 s28 rows at sim >= 0.95
+    # were mislabeled ORACLE_DIVERGENT before this class existed).
     return rec.get("verdict") in ("SAFE_SKIP", "ALL_ABSENT", "ORACLE_HOLE",
-                                  "INFRA_LOST")
+                                  "INFRA_LOST", "UNVERIFIED")
 
 
 def _row_mechanism(rec: dict, flights_root: Path | None) -> str | None:

@@ -19191,6 +19191,29 @@ class Orchestrator:
         if any(getattr(c, "model_name", "") == "deletion_respect_prune"
                for _u, c in (accepted or [])):
             return False
+        # S28-163: a buffer that is one side verbatim BY DESIGNED TAKE is
+        # the source portfolio working, not a silent drop — flask-0006's
+        # current side IS the oracle byte-for-byte and the guard escalated
+        # the system's own validated answer at sim 1.000. Mirrors the
+        # prune's exemption: provenance separates a designed take
+        # (deterministic source-only candidates, each per-unit-validated)
+        # from the suspicious case the guard owns (model candidates
+        # concatenating into one side — sea-orm-0027/0010). Zero model
+        # requests: the adjudication below is never billed for designed
+        # takes.
+        _acc = accepted or []
+        if _acc and all(
+                str(getattr(c, "provenance", "") or "")
+                .startswith("deterministic_source")
+                for _u, c in _acc):
+            self.journal.emit(
+                "side_collapse_designed",
+                {"accepted": len(_acc),
+                 "provenances": sorted({
+                     str(getattr(c, "provenance", "") or "")
+                     for _u, c in _acc})},
+                step_index=self.step, path=path)
+            return False
         if not units or not buffer:
             return False
         try:

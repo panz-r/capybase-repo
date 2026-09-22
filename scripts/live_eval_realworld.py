@@ -497,8 +497,12 @@ class CaseResult:
     language: str
     dataset: str
     escalated: bool = False
-    marker_free: bool = False
-    compiles: bool = False
+    # S28-161: None = the check never ran (exception paths, harness
+    # crashes). The verdict chain MUST distinguish that from a failed
+    # check — 17 s28 rows at sim >= 0.95 (8 at 1.000) were labeled
+    # ORACLE_DIVERGENT because unchecked content read as failed checks.
+    marker_free: bool | None = None
+    compiles: bool | None = None
     matches_oracle: float = 0.0
     # Sprint-20 S20.11: control-flow skeleton similarity to the oracle
     # (EVAL ONLY — never a gate). High with low matches_oracle flags an
@@ -2030,6 +2034,13 @@ def _verdict_chain(r: "CaseResult") -> str:
             verdict = "NEAR_MATCH"
         else:
             verdict = "ORACLE_DIVERGENT"
+    elif r.marker_free is None or r.compiles is None:
+        # S28-161: the checks never ran (exception path / harness crash) —
+        # "unverified" must never read as the worst verdict (17 s28 rows at
+        # sim >= 0.95, 8 at 1.000, were mislabeled ORACLE_DIVERGENT this
+        # way). Excluded from denominators by the results tooling; the sim
+        # stays on the row for post-hoc analysis.
+        verdict = "UNVERIFIED"
     else:
         verdict = "ORACLE_DIVERGENT"
     if (verdict in ("ESCALATE", "ORACLE_DIVERGENT")

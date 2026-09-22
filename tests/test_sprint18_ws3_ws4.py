@@ -894,3 +894,53 @@ def test_absorbed_side_requires_line_anchored_match(tmp_path: Path):
     # NOT suppressed (no contiguous outside line-run matches the block):
     # insertion wins per the unchanged-deleter doctrine.
     assert out.accepted.resolved_text.strip() == other.strip()
+
+
+def test_collapse_guard_accepts_designed_source_takes(tmp_path: Path):
+    """S28-163 (flask-0006): a one-side-verbatim buffer produced by
+    deterministic source-only takes is the portfolio working — the guard
+    declines WITHOUT billing an adjudication, even on a 'keep' script."""
+    import json as _json
+    from capybase.conflict_model import CandidateResolution
+
+    repo = tmp_path / "r2"
+    repo.mkdir()
+    _collapse_repo(repo)
+    orch = _collapse_orch(
+        repo, _json.dumps({"verdict": "keep", "confidence": 0.9,
+                           "reason": "current's rewrite adds real API"}))
+    unit = _collapse_unit(repo)
+    cand = CandidateResolution(
+        candidate_id=f"{unit.unit_id}:take", unit_id=unit.unit_id,
+        model_name="deterministic", resolved_text=COLLAPSE_REP,
+        prompt_version="v",
+        provenance="deterministic_source_replayed_only_stage")
+    fired = orch._check_side_collapse(
+        "app.py", "python", [unit], COLLAPSE_REP, _StepResult(),
+        accepted=[(unit, cand)])
+    assert not fired
+    events = [e.event_type for e in orch.journal.read_events()]
+    assert "side_collapse_designed" in events
+    assert "side_collapse_adjudication" not in events  # no model call
+
+
+def test_collapse_guard_still_fires_for_model_candidates(tmp_path: Path):
+    """Model-drawn candidates concatenating to one side keep the guard's
+    protection (sea-orm-0027/0010)."""
+    from capybase.conflict_model import CandidateResolution
+    import json as _json
+    repo = tmp_path / "r3"
+    repo.mkdir()
+    _collapse_repo(repo)
+    orch = _collapse_orch(
+        repo, _json.dumps({"verdict": "keep", "confidence": 0.9,
+                           "reason": "current's rewrite adds real API"}))
+    unit = _collapse_unit(repo)
+    cand = CandidateResolution(
+        candidate_id=f"{unit.unit_id}:llm", unit_id=unit.unit_id,
+        model_name="fake", resolved_text=COLLAPSE_REP,
+        prompt_version="v", provenance="plain_llm")
+    fired = orch._check_side_collapse(
+        "app.py", "python", [unit], COLLAPSE_REP, _StepResult(),
+        accepted=[(unit, cand)])
+    assert fired

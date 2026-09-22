@@ -390,3 +390,38 @@ def test_oracle_exempt_errors_extraction():
     assert mod._oracle_exempt_errors(
         {"probes": {"oracle": {"rc": 0, "sig": []}}}) == []
     assert mod._oracle_exempt_errors(None) == []
+
+
+# ---------------------------------------------------------------------------
+# S28-161: UNVERIFIED — unchecked content never reads as the worst verdict
+# ---------------------------------------------------------------------------
+
+def _row(**kw):
+    mod = _load_module()
+    r = mod.CaseResult(id="t", language="c", dataset="d", **kw)
+    return mod, r
+
+
+def test_unverified_for_never_run_checks():
+    """The s28-161 shape: sim 1.000 content whose marker/compile checks
+    never ran (None) must be UNVERIFIED, not ORACLE_DIVERGENT."""
+    mod, r = _row(escalated=False, marker_free=None, compiles=None,
+                  matches_oracle=1.0)
+    assert mod._verdict_chain(r) == "UNVERIFIED"
+
+
+def test_checked_failures_still_diverge():
+    """Checks that RAN and failed keep the honest ORACLE_DIVERGENT —
+    the fix must not launder real failures."""
+    mod, r = _row(escalated=False, marker_free=True, compiles=False,
+                  matches_oracle=1.0)
+    assert mod._verdict_chain(r) == "ORACLE_DIVERGENT"
+    mod, r = _row(escalated=False, marker_free=False, compiles=True,
+                  matches_oracle=1.0)
+    assert mod._verdict_chain(r) == "ORACLE_DIVERGENT"
+
+
+def test_pass_still_requires_both_checks():
+    mod, r = _row(escalated=False, marker_free=True, compiles=True,
+                  matches_oracle=0.999)
+    assert mod._verdict_chain(r) == "PASS"
