@@ -2149,6 +2149,8 @@ def _oracle_exempt_errors(probe: dict | None) -> list[str]:
 # S28-140 part 1: opt-in via --oracle-calibrate (measurement-semantics
 # change; the targeted rerun measures it before any default flip).
 _ORACLE_CALIBRATE = False
+# S28-162: the relaxed floor band A/B (default off; --relaxed-floor).
+_RELAXED_FLOOR = False
 
 
 def run_case(case: Case, client: OpenAICompatibleClient, *,
@@ -2224,6 +2226,8 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
             # (the harvest census reads per-case probe outcomes).
             res.toolchain_probe = _cached_probe
         cfg = _config_for(case, has_crate=crate_source is not None)
+        if _RELAXED_FLOOR:
+            cfg.future.enable_floor_relaxed_band = True
         engine = ResolutionEngine(cfg.model, client=client)
         orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
                             out=lambda *_a, **_k: None)
@@ -2596,6 +2600,10 @@ def main():
                     help="Print a failure census report from an existing results JSON and exit. "
                          "Classifies each escalated case by root diagnostic category. Example: "
                          "--census /tmp/capybase-live/c-live-full-corpus.json")
+    ap.add_argument("--relaxed-floor", action="store_true",
+                    help="S28-162 A/B: enable the wholesale-winner floor's "
+                         "relaxed band (ratio 0.81, shrinkage dominance "
+                         "0.35; every firing stays output-gated).")
     ap.add_argument("--oracle-calibrate", action="store_true",
                     help="S28-140 part 1: when the toolchain-era preflight's oracle probe "
                          "fails with real compile errors, downgrade candidate hard failures "
@@ -2604,6 +2612,7 @@ def main():
                          "semantics.")
     args = ap.parse_args()
     globals()["_ORACLE_CALIBRATE"] = bool(args.oracle_calibrate)
+    globals()["_RELAXED_FLOOR"] = bool(args.relaxed_floor)
 
     # Startup sweep: remove stale capy-rw-* temp dirs from prior runs that
     # were killed (SIGTERM/SIGKILL) before their atexit handler could run.
