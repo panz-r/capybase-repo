@@ -2736,7 +2736,7 @@ def test_empty_oscillation_band_retargets_shattered_rescue(conflicted_repo):
             ) if cands else self._report
             return cands, self._report
 
-        def propose_recovery(self, unit, context, *, failures=None,
+        def propose_recovery(self, unit, context, *, failures=None, strategy="reframe",
                              prev_candidate=None):
             return self._next()
 
@@ -2824,7 +2824,7 @@ def test_empty_terminal_recovery_grant_fires_before_escalate(conflicted_repo):
             c, rep = self._next("consensus")
             return c, rep
 
-        def propose_recovery(self, unit, context, *, failures=None,
+        def propose_recovery(self, unit, context, *, failures=None, strategy="reframe",
                              prev_candidate=None):
             c, _ = self._next("recovery")
             return c

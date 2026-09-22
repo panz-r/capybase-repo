@@ -240,6 +240,23 @@ def _error_class(message: str) -> str:
     return "other"
 
 
+def _soft_fail_near_miss_due(validation, outcome) -> bool:
+    """S28-145: True when this attempt is the near-oracle SOFT-FAIL shape —
+    validation failed with ZERO hard failures (soft/semantic signals only)
+    and the unit hasn't spent its one soft-fail grant. The census of the
+    retry-cap rows (php-0005: four units soft-failing on a single draw in
+    a many-unit file, all escalated at 0.949; prusaslicer-0089 similar)
+    showed the single-failing-unit `_close` grant denies exactly this
+    shape in multi-unit files. The caller latches
+    ``outcome._soft_fail_grant_used`` when the grant is consumed at the
+    cap boundary."""
+    return (
+        validation is not None
+        and not validation.passed
+        and not validation.hard_failures
+        and not getattr(outcome, "_soft_fail_grant_used", False))
+
+
 def _empty_terminal_grant_due(outcome) -> bool:
     """C20 follow-up (sprint-26): True when a unit's entire attempt
     history is PURE-EMPTY output (≥2 empties, zero defect candidates)
@@ -16504,10 +16521,25 @@ class Orchestrator:
             # not a fresh multi-sample resolve.
             if pending_recovery:
                 pending_recovery = False  # consume
+                # S28-157: the recovery ladder ROTATES strategies — a model
+                # that refused in format A may solve in format B (the
+                # census: 282 needs_human events, 65% of the sessions held a
+                # later accept). Draw 1 = the reframed recovery prompt;
+                # draw 2+ = the reduced-context variant (halved budget, the
+                # trimmer drops augmentation). needs_human terminates only
+                # when every enrolled format has been tried.
+                _recovery_strategy = (
+                    "reduced_context" if recovery_retry_count >= 2 else "reframe")
                 candidates = self.resolution_engine.propose_recovery(
                     unit, context, failures=failures,
                     prev_candidate=prev_candidate,
+                    strategy=_recovery_strategy,
                 )
+                self.journal.emit(
+                    "recovery_strategy_selected",
+                    {"unit_id": unit.unit_id, "strategy": _recovery_strategy,
+                     "recovery_retries": recovery_retry_count},
+                    step_index=self.step, path=unit.path, unit_id=unit.unit_id)
             elif difficulty == "simple":
                 # Fast path: one low-temperature sample, no intent pass, no
                 # consensus. Simple isolated hunks resolve trivially. Force
@@ -17259,7 +17291,20 @@ class Orchestrator:
                 )
                 if _progress:
                     outcome._progress_grant_used = True
-                if (_close or _progress) and retry_count == _eff_budget:
+                # S28-145 (the php-0005 shape, census-completed): the capped
+                # attempts carried ZERO hard failures — pure soft/semantic
+                # signals, the near-oracle shape `_close` already covers for
+                # single-failing-unit files. In multi-unit files the
+                # failing-unit count denied that grant and every unit
+                # escalated on soft fails alone (php-0005: four units, one
+                # draw each, 0.949). Grant ONE extra retry per unit for the
+                # zero-hard-failure shape regardless of file unit count;
+                # latched once like P8's grant, the cap stays the ceiling.
+                _soft_fail_near_miss = _soft_fail_near_miss_due(
+                    validation, outcome)
+                if (_close or _progress or _soft_fail_near_miss) and retry_count == _eff_budget:
+                    if _soft_fail_near_miss:
+                        outcome._soft_fail_grant_used = True
                     self.journal.emit(
                         "retry_relaxation",
                         {"unit_id": unit.unit_id,
@@ -17267,6 +17312,8 @@ class Orchestrator:
                          "reason": (
                              "converging-failure-trend"
                              if _progress and not _close
+                             else "soft-fail multi-unit near-miss (s28-145)"
+                             if _soft_fail_near_miss and not _close
                              else "high-sim single-failing-unit"),
                          "hf_trend": _hf_trend},
                         step_index=self.step, path=unit.path,

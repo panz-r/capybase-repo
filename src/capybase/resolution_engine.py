@@ -2314,6 +2314,7 @@ def build_recovery_prompt(
     failures: Iterable[VerificationFailure] | None,
     budget: TokenBudget | None = None,
     near_miss: bool = True,
+    reduced_context: bool = False,
 ) -> str:
     """The recovery prompt for a model that self-reported needs_human (CEGIS loop).
 
@@ -2333,7 +2334,18 @@ def build_recovery_prompt(
     Uses the same sides/structural anchor as the resolve prompt but with the
     recovery framing. Falls back to the standard resolve contract minus the
     needs_human field.
+
+    S28-157 strategy ladder: ``reduced_context`` halves the prompt budget —
+    the trimmer then drops augmentation sections (few-shot, deps,
+    surrounding context), always protecting the conflict sides + JSON
+    contract. A model that refused the full-context format may solve the
+    reduced one; with no window configured (total 0) the halving is a
+    no-op and the strategy degrades to the reframe.
     """
+    if reduced_context and budget is not None and budget.total > 0:
+        budget = TokenBudget(
+            total=budget.total // 2,
+            reserved_for_completion=budget.reserved_for_completion)
     feedback = (
         "\n".join(_render_failure(f) for f in (failures or []))
         or "- (the previous attempt self-reported it could not merge; no specific validator failure)"
@@ -3524,6 +3536,7 @@ class ResolutionEngine:
             failures: list[VerificationFailure] | None = None,
             prev_candidate: CandidateResolution | None = None,
             pending_recovery: bool = False,
+            recovery_reduced_context: bool = False,
             attempt: int = 0,
             shatter: bool = False,
             budget: TokenBudget | None = None,
@@ -3551,8 +3564,11 @@ class ResolutionEngine:
                 prev_candidate and getattr(prev_candidate, "resolved_text", ""))
             if pending_recovery:
                 pv = "cegis_recovery.v1"
+                if recovery_reduced_context:
+                    pv = "cegis_recovery_rc.v1"
                 prompt = build_recovery_prompt(
-                    unit, context, failures, budget=_budget, near_miss=_seed_ok)
+                    unit, context, failures, budget=_budget, near_miss=_seed_ok,
+                    reduced_context=recovery_reduced_context)
                 if _NM_MARKER in prompt:
                     pv += "#nm"
                 return prompt, pv, prompt_trims
@@ -4078,6 +4094,7 @@ class ResolutionEngine:
         *,
         failures: list[VerificationFailure] | None = None,
         prev_candidate: CandidateResolution | None = None,
+        strategy: str = "reframe",
     ) -> list[CandidateResolution]:
         """One recovery candidate via build_recovery_prompt (CEGIS loop hardening).
 
@@ -4087,10 +4104,16 @@ class ResolutionEngine:
         routing, no consensus, no prev_candidate (the refusal produced no usable
         code to repair). The orchestrator calls this when risk.decide grants a
         recovery retry (the __recovery_retry__ followup marker).
+
+        S28-157 strategy ladder: ``"reframe"`` (draw 1) vs
+        ``"reduced_context"`` (draw 2) — the same recovery contract over a
+        halved prompt budget, so the second recovery asks in a DIFFERENT
+        format instead of repeating the first blind.
         """
         prompt, _pv, _trims = self.build_attempt_prompt(
             unit, context, failures=failures, prev_candidate=prev_candidate,
-            pending_recovery=True)
+            pending_recovery=True,
+            recovery_reduced_context=(strategy == "reduced_context"))
         resp = self._one(unit, context, prompt, PROMPT_RECOVERY)
         return [resp] if resp is not None else []
 

@@ -210,14 +210,18 @@ class PolicyConfig(BaseModel):
     # is essential, latency is not, so the critic gets as many chances as the
     # resolver). A nonzero value overrides.
     max_critic_retries_per_unit: int = 0
-    # Recovery retry budget for model self-refusals (needs_human). When the model
-    # self-reports needs_human, a single recovery retry with a reframed prompt
+    # Recovery retry budget for model self-refusals (needs_human). When the
+    # model self-reports needs_human, a recovery retry with a reframed prompt
     # (build_recovery_prompt) is granted before escalating — a struggling model
-    # often succeeds with better scaffolding. 1 = one recovery retry (default);
-    # 0 = disable (escalate immediately on needs_human, the legacy behavior).
+    # often succeeds with better scaffolding. 2 = the S28-157 strategy ladder
+    # (draw 1 = reframe, draw 2 = reduced-context variant — needs_human
+    # terminates only when every enrolled format has been tried; the census:
+    # 282 needs_human events, 65% of those sessions held a later accept);
+    # 1 = reframe only (the pre-S28-157 behavior); 0 = disable (escalate
+    # immediately on needs_human, the legacy behavior).
     # Recovery retries use a SEPARATE counter so they can't starve syntactic or
     # critic retries.
-    max_recovery_retries_per_unit: int = 1
+    max_recovery_retries_per_unit: int = 2
     # Whole-file repair retry budget (Fix #3). The Phase 2 loop re-resolves the
     # attributed unit and re-validates the spliced file when a cross-unit error
     # (brace imbalance, duplicate symbol) surfaces. This is a SEPARATE budget
