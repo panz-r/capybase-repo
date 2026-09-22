@@ -562,6 +562,11 @@ class CaseResult:
     # escalation is an environment artifact (the tree could not be
     # judged), the S28-161 UNVERIFIED class at the runner level.
     compile_evidence_missing: bool = False
+    # S28-173(3): the engine's post-splice check found accepted units
+    # preserving under the bar of the loser side's changes (eval-only;
+    # sub-bands the NEAR_MATCH class — 0.875-with-0.31-loser-pres is a
+    # different story from 0.875-with-0.9).
+    splice_loser_dropped: bool = False
     # S28-171(1): the harness's OWN builds, site-tagged — the session
     # journal cannot see them. Entries {site, outcome, duration_s};
     # sites: toolchain_probe, runner_c_build, oracle_probe.
@@ -2523,6 +2528,10 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         if res.escalated:
             res.compile_evidence_missing = _compile_evidence_missing(
                 _session_events)
+        # S28-173(3): the splice's preservation-net flag (eval-only).
+        res.splice_loser_dropped = any(
+            getattr(e, "event_type", None) == "splice_loser_dropped"
+            for e in _session_events)
         # C post-hoc compile check must run WHILE the repo tree is on disk (the
         # finally below removes it). python/rust checks operate on the content
         # string alone, so they run after cleanup; the C build needs the tree.

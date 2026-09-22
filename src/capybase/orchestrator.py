@@ -240,6 +240,13 @@ def _error_class(message: str) -> str:
     return "other"
 
 
+#: S28-173(1): the post-splice loser-preservation bar — the WORKING
+#: judge's preservation minimum (scripts/live_eval_realworld.py), kept
+#: as a literal so the engine telemetry and the harness sub-banding
+#: speak the same number at the census.
+_SPLICE_LOSER_DROP_BAR = 0.5
+
+
 def _soft_fail_near_miss_due(validation, outcome) -> bool:
     """S28-145: True when this attempt is the near-oracle SOFT-FAIL shape —
     validation failed with ZERO hard failures (soft/semantic signals only)
@@ -12653,8 +12660,7 @@ class Orchestrator:
                 pre_comment_buffer = buffer
                 buffer = self._reconcile_comments(
                     path, buffer, accepted, originals[path], units, language,
-                ) or buffer
-                # §11 post-comment verify_file gate: defense-in-depth. The
+                ) or buffer                # §11 post-comment verify_file gate: defense-in-depth. The
                 # executable-token invariant in apply_comment_plan makes
                 # comment-induced failures unlikely, but it's blind to
                 # comment-INTERNAL structure (a malformed doc-comment code
@@ -12709,6 +12715,21 @@ class Orchestrator:
                                          result, accepted=accepted):
                 self._reconcile_and_record(result)
                 return result
+            # S28-173(1): post-splice preservation telemetry — the
+            # deterministic accept path has no rescue arm downstream of
+            # this point (the floor and deletion-respect checks above are
+            # its only nets), so a splice that dropped the loser side's
+            # changes journals here instead of shipping silently.
+            # Eval-only: the accept decision is untouched (the re-splice
+            # rescue is S28-173(2), harvest-gated).
+            _splice_drop = self._splice_loser_dropped(accepted)
+            if _splice_drop:
+                self.journal.emit(
+                    "splice_loser_dropped",
+                    {"path": path, **_splice_drop},
+                    step_index=self.step,
+                    path=path,
+                )
             self._write_and_stage(path, buffer, result, accepted=accepted)
         # After staging: assert no unmerged paths remain for our files.
         if self.git.has_unmerged_paths():
@@ -12759,6 +12780,80 @@ class Orchestrator:
                 step_index=self.step,
             )
         return result
+
+    def _splice_loser_dropped(self, accepted) -> dict | None:
+        """S28-173(1): post-splice preservation telemetry.
+
+        The deterministic accept path bypasses every rescue arm (the
+        drift rescue, side takeover, and wholesale floor all live at the
+        LLM/exhaustion boundary), so a structural splice that dropped the
+        loser side's changes ships silently — sqlite-0109: NEAR_MATCH
+        0.875 with loser_preservation 0.31. For each accepted unit, take
+        the lower-churn side (the loser convention the WORKING judge
+        uses) and ask how much of its changed-line content the unit's
+        resolved text preserves; a unit under the bar flags the splice.
+        Side-take provenances are excluded (a wholesale take IS one side
+        — its loser preservation is low by design, and the takeover
+        machinery documented that tradeoff). Returns the census payload
+        or None. Eval-only: nothing here changes the accept decision
+        (the rescue is S28-173(2), harvest-gated).
+        """
+        if not accepted:
+            return None
+        from capybase.merge_intent import side_churn, side_preservation
+        checked: list[str] = []
+        dropped: list[str] = []
+        for unit, cand in accepted:
+            if getattr(cand, "resolved_text", None) is None:
+                continue
+            prov = (getattr(cand, "provenance", "") or "")
+            cid = (getattr(cand, "candidate_id", "") or "")
+            if "side_take" in prov or "side_take" in cid or (
+                    "wholesale" in prov or "wholesale" in cid):
+                continue  # a side take IS one side — low loser pres by design
+            c = side_churn(unit.base.text or "", unit.current.text or "")
+            r = side_churn(unit.base.text or "", unit.replayed.text or "")
+            loser_text = (
+                (unit.replayed.text or "") if c >= r else (unit.current.text or ""))
+            pres = side_preservation(
+                unit.base.text or "", loser_text, cand.resolved_text)
+            if pres is None:
+                continue  # the loser made no changes — vacuous
+            checked.append(unit.unit_id)
+            if pres < _SPLICE_LOSER_DROP_BAR:
+                dropped.append(unit.unit_id)
+        if not checked or not dropped:
+            return None
+        return {"units": dropped, "dropped": len(dropped),
+                "checked": len(checked), "bar": _SPLICE_LOSER_DROP_BAR}
+
+    def _note_comment_transport(self, outcome_events) -> bool:
+        """S28-174: the comment phase's transport-weather breaker.
+
+        Counts CONSECUTIVE passes whose comment model calls RAISED
+        (`comment_model_call_failed` — transport errors, not content
+        failures, which the phase's own budget loop owns); any pass
+        without one resets the count. At K=2 the phase latches OFF for
+        the rest of the session (the 168-failure census: endpoint-weather
+        windows where every unit independently paid a dead call). Returns
+        True exactly when THIS pass latched the breaker; the caller
+        journals `comment_phase_latched_off` and every later phase skips
+        via the entry check in `_run_comment_pass`. Model-REDUCING;
+        comments are best-effort decoration, so code outcomes are
+        untouched."""
+        fails = sum(
+            1 for name, _payload in (outcome_events or [])
+            if name == "comment_model_call_failed")
+        if fails:
+            self._comment_transport_failures = (
+                getattr(self, "_comment_transport_failures", 0) + fails)
+        else:
+            self._comment_transport_failures = 0
+        if (not getattr(self, "_comment_phase_latched", False)
+                and self._comment_transport_failures >= 2):
+            self._comment_phase_latched = True
+            return True
+        return False
 
     def _reconcile_comments(
         self, path: str, buffer: str,
@@ -12867,6 +12962,16 @@ class Orchestrator:
         (or None when skipped — no comments / unsupported language). Does NOT
         journal the final report or write a review bundle (the caller,
         :meth:`_reconcile_comments`, does that once after the §10 loop settles)."""
+        # S28-174: the transport-weather latch — once two consecutive
+        # passes saw their model calls raise, every later phase in this
+        # session skips (the endpoint was down; comments are decoration).
+        if getattr(self, "_comment_phase_latched", False):
+            self.journal.emit(
+                "comment_phase_skipped",
+                {"reason": "comment transport latch (consecutive model failures)"},
+                step_index=self.step, path=path,
+            )
+            return None
         lang = (language or "").strip().lower()
         if lang not in _lang_any_of(
             "rust", "python", "javascript", "typescript",
@@ -12935,6 +13040,15 @@ class Orchestrator:
         # Replay the loop's events into the journal.
         for ev_name, ev_payload in outcome.events:
             self.journal.emit(ev_name, ev_payload, step_index=self.step, path=path)
+        # S28-174: feed the transport-weather breaker — two consecutive
+        # passes with raised model calls latch the phase off for the
+        # session (model-REDUCING; comments are decoration).
+        if self._note_comment_transport(outcome.events):
+            self.journal.emit(
+                "comment_phase_latched_off",
+                {"consecutive_failures": self._comment_transport_failures},
+                step_index=self.step, path=path,
+            )
         # FR1b: persist the flight-recorder trace (content-addressed). Each
         # trace entry is {boundary, kind, content, ext?, key_override?}. This is
         # the data the shadow jury (Phase 4) and the final enforcement phase
