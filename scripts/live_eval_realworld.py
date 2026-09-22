@@ -520,6 +520,20 @@ class CaseResult:
     # not measurable (empty output, or a side with no changes vs base).
     loser_preservation: float | None = None
     winner_preservation: float | None = None
+    # S28-167: order-sensitive secondary metrics vs the oracle (EVAL ONLY
+    # — never a gate). The token-Jaccard sim is order-blind — identical
+    # token multisets score 1.0 in ANY line order — so a scrambled merge
+    # of the oracle's lines would PASS identically to a real one. 14 s28
+    # PASS rows at sim >= 0.99 carry oracle line-presence 0.017-0.889
+    # (legitimate regenerations, but the PASS class is unauditable for
+    # order defects without these). oracle_line_presence: multiset share
+    # of the oracle's lines the output contains; oracle_order_score:
+    # difflib matching-block coverage of the longer line sequence (an
+    # order-sensitive LCS-grade ratio; difflib under-approximates the
+    # true LCS, which only deepens a reorder signal). None = not
+    # measurable (empty text, or past the monster-file guard — S28-164).
+    oracle_line_presence: float | None = None
+    oracle_order_score: float | None = None
     # FR2a flight recorder: the orchestrator's session_id (the per-case artifact
     # root under .rebase-agent/sessions/<session_id>/). Populated when
     # --preserve-flights copies the session dir out; None otherwise. The flight
@@ -1989,6 +2003,57 @@ def _preservation_fields(case, content: str) -> tuple[float | None, float | None
         return None, None
 
 
+def _oracle_line_presence(content: str, oracle: str) -> float | None:
+    """Multiset line presence: the share of the oracle's nonblank lines
+    (counted with multiplicity) the output contains — the S28-167
+    census's exact computation. Multiset counting so a line repeated in
+    the output can never cover more oracle occurrences than the oracle
+    itself has. Whitespace-normalized like every other line judge."""
+    from collections import Counter as _Counter
+    o = [ln.strip() for ln in oracle.splitlines() if ln.strip()]
+    if not o:
+        return None
+    out = _Counter(ln.strip() for ln in content.splitlines() if ln.strip())
+    want = _Counter(o)
+    return sum(min(n, out[ln]) for ln, n in want.items()) / len(o)
+
+
+def _oracle_order_score(content: str, oracle: str) -> float | None:
+    """Normalized order score: the share of the LONGER line sequence the
+    matching-block decomposition covers. Order-sensitive where the token
+    sim is not — the oracle's lines returned in scrambled order score
+    presence 1.0 but well below 1.0 here. difflib's block decomposition
+    under-approximates the true LCS; that bias is conservative for the
+    audit (it can only deepen a reorder signal, never mask one)."""
+    a = [ln.strip() for ln in content.splitlines() if ln.strip()]
+    b = [ln.strip() for ln in oracle.splitlines() if ln.strip()]
+    if not a or not b:
+        return None
+    from capybase.merge_intent import _SIDE_CHURN_MULTISETH_LINES as _guard
+    if max(len(a), len(b)) > _guard:
+        return None  # S28-164: the quadratic matcher is monster-file-only
+    import difflib as _dl
+    m = sum(
+        blk.size
+        for blk in _dl.SequenceMatcher(
+            None, a, b, autojunk=False).get_matching_blocks())
+    return m / max(len(a), len(b))
+
+
+def _oracle_order_fields(content: str, oracle: str) -> tuple[float | None, float | None]:
+    """(oracle_line_presence, oracle_order_score) for a resolved output —
+    the S28-167 pair, recorded beside matches_oracle on every row."""
+    if not content:
+        return None, None
+    try:
+        return (
+            _oracle_line_presence(content, oracle),
+            _oracle_order_score(content, oracle),
+        )
+    except Exception:
+        return None, None
+
+
 def _is_working(r: "CaseResult") -> bool:
     """WORKING: compiling, marker-free, below the PASS bar, and preserving
     both sides' changes — a functioning both-features merge the oracle
@@ -2424,6 +2489,12 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         _skeleton_similarity(content, case.expected_resolved)
         if content else 0.0)
     res.loser_preservation, res.winner_preservation = _preservation_fields(case, content)
+    # S28-167: order-sensitive secondary metrics (EVAL ONLY — never a
+    # gate). Recorded on every row; the harvest cross-tabs sim-high /
+    # order-low PASS rows as the reorder-audit population and reads the
+    # presence field as the oracle-equivalence doctrine's basis.
+    res.oracle_line_presence, res.oracle_order_score = _oracle_order_fields(
+        content, case.expected_resolved)
     return res
 
 
