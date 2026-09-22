@@ -5273,6 +5273,13 @@ class Orchestrator:
         _target_tmpl = getattr(config.validation, "cc_build_target_template", "")
         if _target_tmpl:
             _val_cfg.cc_build_target_template = _target_tmpl
+        # S28-180: the side-consistent repair feedback (pilot-gated,
+        # default OFF). Feedback-only enrichment — same repair rounds,
+        # both sides' variant of a failing symbol attached; the model
+        # stops guessing which API convention the file follows.
+        from capybase.resolution_engine import set_side_consistent_feedback
+        set_side_consistent_feedback(
+            getattr(config.future, "enable_side_consistent_feedback", False))
         self.verification = VerificationEngine.default(_val_cfg)
         # Sprint-19 P3: the session build-state tracker journals every
         # build probe/transition into the flight journal (the 300s silent

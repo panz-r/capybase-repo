@@ -1020,6 +1020,18 @@ class FutureConfig(BaseModel):
     # command+content, journaled (build_shared_inflight / probe
     # shared=true), and fails open to the racing behavior on any anomaly.
     enable_build_single_flight: bool = True
+    # Side-consistent repair feedback (S28-180, pilot-gated): when a
+    # repair round's failure names a symbol declared DIFFERENTLY in the
+    # two sides, attach both variants to the repair feedback so the model
+    # picks the convention the file already follows. Feedback-only — same
+    # repair rounds, zero new model requests (pinned by the pilot).
+    enable_side_consistent_feedback: bool = False
+    # Declaration restoration (S28-178, pilot-gated): when the FILE-level
+    # validation fails with an unknown-identifier diagnostic, restore the
+    # symbol's declaring line from the pristine side that carries it
+    # (include/using/typedef/forward-declaration only), re-validate after
+    # each insert. Transitive by construction; <=3 restorations per case.
+    enable_declaration_restoration: bool = False
     # Best-of-N preservation recovery (sprint-19 P2): when the
     # preservation heuristic rejects an otherwise-validation-passing
     # candidate and EVERY heuristic-forced retry then validates strictly

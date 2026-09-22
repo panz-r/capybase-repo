@@ -2428,6 +2428,68 @@ def _render_recovery_output(profile: PromptProfile) -> str:
     )
 
 
+#: S28-180: the side-consistent repair feedback toggle. Pilot-gated
+#: (default OFF): feedback-only enrichment of the existing repair loop —
+#: same rounds, sharper evidence; the pilot pins the request count.
+_SIDE_CONVENTION_ENABLED = False
+
+
+def set_side_consistent_feedback(enabled: bool) -> None:
+    global _SIDE_CONVENTION_ENABLED
+    _SIDE_CONVENTION_ENABLED = bool(enabled)
+
+
+_SIDE_SYMBOL_PATTERNS = (
+    r"no member named [\'\"](\w+)[\'\"]",
+    r"[\'\"](\w+)[\'\"] is not a member",
+    r"no matching function for call to [\'\"]([^\'\"\(]+)",
+    r"no declaration matches [\'\"]([^\'\"]+)[\'\"]",
+    r"unknown type name [\'\"](\w+)[\'\"]",
+    r"[\'\"](\w+)[\'\"] does not name a type",
+)
+
+
+def _side_convention_note(unit, failures) -> str:
+    """S28-180: the side-consistent repair-feedback enrichment.
+
+    When a failing symbol is DECLARED DIFFERENTLY in the two pristine
+    sides, the file is at risk of mixing API conventions — the model
+    guessed one, the file's other regions follow the other. Attach both
+    variants so the model picks the convention the file already uses.
+    Deterministic grep of the sides; same repair rounds (zero new model
+    requests — the anti-S28-74: sharper evidence, not a bigger budget).
+    """
+    import re as _re
+    if not _SIDE_CONVENTION_ENABLED:
+        return ""
+    cur = unit.current.text or ""
+    rep = unit.replayed.text or ""
+    if not cur or not rep:
+        return ""
+    syms: list[str] = []
+    for f in failures:
+        msg = getattr(f, "message", "") or ""
+        for pat in _SIDE_SYMBOL_PATTERNS:
+            m = _re.search(pat, msg)
+            if m and m.group(1) not in syms:
+                syms.append(m.group(1))
+    notes: list[str] = []
+    for sym in syms[:3]:
+        pat = _re.compile(rf"^.*\b{_re.escape(sym)}\b.*$", _re.MULTILINE)
+        cl = [ln.strip() for ln in pat.findall(cur) if len(ln.strip()) < 200][:2]
+        rl = [ln.strip() for ln in pat.findall(rep) if len(ln.strip()) < 200][:2]
+        if cl and rl and cl != rl:
+            notes.append(
+                f"  - {sym}:\n    CURRENT side:  {' ; '.join(cl)}\n"
+                f"    REPLAYED side: {' ; '.join(rl)}")
+    if not notes:
+        return ""
+    return ("### side convention note\nThe failing symbol is declared "
+            "DIFFERENTLY in the two sides — do not mix conventions:\n"
+            + "\n".join(notes)
+            + "\nMatch the convention the rest of the file already uses.\n")
+
+
 def _missing_symbol_decl_guard(failures) -> str:
     """D5c (s27): the declaration guard for missing-symbol failures.
 
@@ -2505,6 +2567,7 @@ def build_repair_prompt(
     profile = active_profile()
     feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
     _decl_guard = _missing_symbol_decl_guard(failures)
+    _side_note = _side_convention_note(unit, failures)
     cur_lines, _base_lines, rep_lines = _prompt_sides(unit)
     side_intent = _side_intent_block(unit)
     # Structural context: the block (file structure, unit inventory, change
@@ -2626,7 +2689,7 @@ YOUR PREVIOUS ATTEMPT (needs fixing):
 ### validator feedback (fix these specific issues)
 {feedback}
 {_decl_guard}
-
+{_side_note}
 HOW YOUR CODE IS TESTED: your snippet is spliced back into the full file and the
 entire file is compiled. If the file has OTHER unresolved conflict hunks (a
 multi-hunk conflict), the compiler may trip over those — NOT your snippet. If the
