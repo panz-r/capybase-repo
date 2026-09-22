@@ -5263,7 +5263,9 @@ class Orchestrator:
                 event, payload, step_index=self.step, path=_p)
 
         self.verification.build_state = BuildStateTracker(
-            event_sink=_build_event_sink)
+            event_sink=_build_event_sink,
+            single_flight=getattr(
+                self.config.future, "enable_build_single_flight", True))
         # Verifier-model critic: when enabled (the default —
         # opt-out), register an LLM judge that checks the resolution preserves
         # both sides' semantic intent — the failure mode the syntactic
@@ -11453,8 +11455,33 @@ class Orchestrator:
                                     _is_missing_build_system as _imbs_p2,
                                 )
 
+                                # S28-168 single-flight: the Phase-2 build
+                                # raced verify_file's own build of the same
+                                # tree — the census's duckdb-0080 shape (two
+                                # capped cmake processes starting within
+                                # 100ms). Adopt an in-flight identical build
+                                # instead of racing it; fail-open to running.
+                                _p2_bs = getattr(
+                                    self.verification, "build_state", None)
+                                _p2_share = (
+                                    _p2_bs.build_key(_build_cmd, str(buffer))
+                                    if _p2_bs is not None else None)
                                 _p2bt_t0 = _p2bt_time.monotonic()
-                                _build_ok, _build_output = self._run_raw_test(_build_cmd)
+                                _p2_own, _p2_shared = (
+                                    _p2_bs.build_acquire(_p2_share, 600)
+                                    if _p2_share is not None else (True, None))
+                                if _p2_own:
+                                    _build_ok, _build_output = self._run_raw_test(_build_cmd)
+                                    if _p2_share is not None:
+                                        _p2_bs.build_publish(
+                                            _p2_share, _build_ok, _build_output,
+                                            timed_out="timed out after" in (_build_output or ""))
+                                else:
+                                    _build_ok, _build_output = _p2_shared
+                                    self.journal.emit(
+                                        "build_shared_inflight",
+                                        {"command": _build_cmd, "site": "phase2"},
+                                        step_index=self.step, path=path)
                                 _p2bt_dur = _p2bt_time.monotonic() - _p2bt_t0
                                 # S28-152: the gate was INAPPLICABLE (no
                                 # configured build dir / no makefile) — a
@@ -20441,6 +20468,27 @@ class Orchestrator:
         # missing still fails (it was a deliberate choice).
         is_default_cmd = cmd.strip() == "pytest"
         cmd = self._resolve_test_command(cmd)
+        # S28-168: honor the SYNTAX_ONLY degrade in the gate itself. After
+        # a generic full-build timeout, "re-running a build that just timed
+        # out at the same cap adds zero information" — yet this gate kept
+        # launching full-tree builds, each dying at its cap (duckdb-0080:
+        # 300s rc=-1 AFTER two capped probes; 87-98% of the slow-PASS walls
+        # was build seconds). Advisory build gates skip under the degrade —
+        # the continue outcome is unchanged (the killed build read rc=-1 /
+        # unknown and never blocked) — while a required gate keeps its
+        # policy. Journaled for the census.
+        _gate_bs = getattr(getattr(self, "verification", None),
+                           "build_state", None)
+        if (_gate_bs is not None and not _gate_bs.full_build_available
+                and bool(_phase2_fallback_build_cmd(cmd))
+                and not getattr(self.config.tests, "required", False)):
+            self._last_tests_compiler_indictment = False
+            self.journal.emit(
+                "tests_build_skipped_degraded",
+                {"label": label, "command": cmd},
+                step_index=self.step,
+            )
+            return True
         self.journal.emit("tests_started", {"label": label, "command": cmd}, step_index=self.step)
         # Sprint-19 P4 (D4.1): make-output parsing. The runner's verdict
         # parser misses compile errors in raw make output (protobuf-0065:

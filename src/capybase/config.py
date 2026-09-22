@@ -1006,6 +1006,16 @@ class FutureConfig(BaseModel):
     # Journaled as no_clear_progress_stop.
     enable_no_clear_progress_stop: bool = True
     no_clear_stop_rounds: int = 3
+    # Single-flight builds (S28-168, the slow-duckdb-PASS class): a build
+    # command whose target content is already being built by this session
+    # ADOPTS the in-flight build's outcome instead of racing it. The
+    # harvest census showed the dominant cost of the 930-1086s PASS walls
+    # was a CONCURRENT double build at acceptance (two capped cmake
+    # processes starting within ~100ms) plus a third capped gate build
+    # after the SYNTAX_ONLY degrade. Sharing is one-shot, keyed on
+    # command+content, journaled (build_shared_inflight / probe
+    # shared=true), and fails open to the racing behavior on any anomaly.
+    enable_build_single_flight: bool = True
     # Best-of-N preservation recovery (sprint-19 P2): when the
     # preservation heuristic rejects an otherwise-validation-passing
     # candidate and EVERY heuristic-forced retry then validates strictly

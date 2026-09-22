@@ -5001,6 +5001,21 @@ def _classify_build_failure_kind(output: str) -> str:
     return "generic"
 
 
+class _InFlightBuild:
+    """One shared build outcome for the S28-168 single-flight registry."""
+
+    __slots__ = ("event", "ok", "output", "timed_out", "published", "owner")
+
+    def __init__(self, owner_thread: int) -> None:
+        import threading as _th
+        self.event = _th.Event()
+        self.ok = False
+        self.output = ""
+        self.timed_out = False
+        self.published = False
+        self.owner = owner_thread
+
+
 class BuildStateTracker:
     """Session-scoped full-build economics (the P3 build state machine).
 
@@ -5013,14 +5028,91 @@ class BuildStateTracker:
     crash, network weather) get one retry at 2× the cap before the
     degradation fires. Every probe and transition is journaled through
     the attached event sink (``build_probe`` / ``build_state``).
+
+    S28-168 single-flight: the harvest census showed the slow duckdb
+    PASSes spend 87-98% of their wall in builds, and the dominant shape
+    is a CONCURRENT double build at acceptance — two identical
+    ``cmake --build`` invocations starting within ~100ms (each capped,
+    each doomed on a cold tree). The registry lets the second caller of
+    an identical build (same command, same target content) adopt the
+    first caller's outcome instead of racing it. Sharing is one-shot
+    and keyed on command+content: correctness is unchanged because the
+    adopted outcome is what the caller's own build would have produced
+    on the same inputs; any anomaly (owner vanished, wait expired) fails
+    open to today's behavior.
     """
 
-    def __init__(self, event_sink=None) -> None:
+    def __init__(self, event_sink=None, single_flight: bool = True) -> None:
+        import threading as _th
         self.full_build_available = True
         self.timeout_count = 0
         self.recoverable_retry_count = 0
         self.degrade_reason = ""
         self._event_sink = event_sink
+        self.single_flight = single_flight
+        self._inflight: dict[str, _InFlightBuild] = {}
+        self._inflight_lock = _th.Lock()
+
+    # -- S28-168 single-flight registry ---------------------------------
+
+    def build_key(self, cmd: str, content: str | None) -> str | None:
+        """Share key: build command + hash of the target content (the
+        tree state a validation build observes is dominated by the file
+        text under validation). None when sharing is off."""
+        if not self.single_flight or not cmd:
+            return None
+        import hashlib as _hl
+        return _hl.sha1(
+            f"{cmd}\x00{content or ''}".encode("utf-8", "replace")).hexdigest()[:16]
+
+    def build_acquire(self, key: str | None, wait_s: float):
+        """Claim the right to run a build for ``key``.
+
+        (True, None) — you own it: run the build and call
+        ``build_publish`` on EVERY exit path. (False, (ok, output,
+        timed_out)) — an identical build was in flight from another
+        thread and finished while you waited: adopt its outcome.
+        Same-thread reentry never shares (a waiter that is also the
+        runner would deadlock); any anomaly fails open to ownership.
+        """
+        if key is None:
+            return True, None
+        import threading as _th
+        me = _th.get_ident()
+        entry: _InFlightBuild | None
+        with self._inflight_lock:
+            entry = self._inflight.get(key)
+            if entry is None:
+                self._inflight[key] = _InFlightBuild(me)
+                return True, None
+            if entry.owner == me:
+                return True, None
+        if not entry.event.wait(wait_s):
+            return True, None
+        with self._inflight_lock:
+            if not entry.published:
+                return True, None
+        return False, (entry.ok, entry.output, entry.timed_out)
+
+    def build_publish(self, key: str | None, ok: bool, output: str,
+                      timed_out: bool = False) -> None:
+        """Publish this thread's build outcome to any waiter and release
+        the key (one-shot sharing — the next acquire runs its own
+        build; sequential repeats are the memo's business, not the
+        registry's). No-op when this thread does not own the key."""
+        if key is None:
+            return
+        import threading as _th
+        me = _th.get_ident()
+        with self._inflight_lock:
+            entry = self._inflight.pop(key, None)
+            if entry is None or entry.owner != me:
+                return
+            entry.ok = ok
+            entry.output = output or ""
+            entry.timed_out = timed_out
+            entry.published = True
+            entry.event.set()
 
     def emit(self, event: str, payload: dict) -> None:
         if self._event_sink is None:
@@ -6363,13 +6455,46 @@ class VerificationEngine:
                         _build_timeout = 30 if target_tmpl else 300
                         _build_attempts = 0
                         proc = None
+                        # S28-168 single-flight: an identical concurrent
+                        # build (same cmd, same target content) adopts
+                        # one execution instead of racing (the census's
+                        # duckdb-0080 double 300s burn). Fail-open — any
+                        # anomaly runs the build like today.
+                        _share_key = (
+                            _bs.build_key(build_cmd, whole)
+                            if _bs is not None else None)
+                        _shared_adopt = False
                         while proc is None:
                             _build_attempts += 1
+                            _own, _shared = (
+                                _bs.build_acquire(
+                                    _share_key, _build_timeout * 2)
+                                if _share_key is not None else (True, None))
+                            _shared_adopt = not _own
                             try:
-                                proc = _run_shell_tree(
-                                    build_cmd, cwd=str(repo_root),
-                                    timeout=_build_timeout, env=_build_env,
-                                )
+                                if _shared_adopt:
+                                    _ok, _out, _timed_out = _shared
+                                    if _timed_out:
+                                        # Route the waiter through the SAME
+                                        # timeout handler as a real run (it
+                                        # records the probe, notes the degrade,
+                                        # and takes the syntax-only fallback).
+                                        raise _sp_build.TimeoutExpired(
+                                            build_cmd, _build_timeout,
+                                            output=_out, stderr=_out)
+                                    proc = subprocess.CompletedProcess(
+                                        build_cmd, 0 if _ok else 1,
+                                        stdout="", stderr=_out)
+                                else:
+                                    proc = _run_shell_tree(
+                                        build_cmd, cwd=str(repo_root),
+                                        timeout=_build_timeout, env=_build_env,
+                                    )
+                                    if _share_key is not None:
+                                        _bs.build_publish(
+                                            _share_key, proc.returncode == 0,
+                                            (proc.stderr or "")
+                                            + (proc.stdout or ""))
                             except _sp_build.TimeoutExpired as _to_exc:
                                 _to_out = ""
                                 for _attr in ("stderr", "stdout"):
@@ -6379,6 +6504,10 @@ class VerificationEngine:
                                             _chunk = _chunk.decode(
                                                 "utf-8", errors="replace")
                                         _to_out += _chunk
+                                if _share_key is not None:
+                                    _bs.build_publish(
+                                        _share_key, False, _to_out,
+                                        timed_out=True)
                                 # The shared failing-probe tail (:6448) reads
                                 # err_lines; the completed-build path assigns
                                 # it after the returncode check, but a timeout
@@ -6406,6 +6535,7 @@ class VerificationEngine:
                                         build_cmd,
                                         _bs_time.monotonic() - _bs_t0,
                                         "timeout", path=path, kind=_kind,
+                                        shared=_shared_adopt or None,
                                         errors=(_to_out or "")[-300:] or None)
                                     if _is_full_build:
                                         _bs.note_timeout(
@@ -6663,7 +6793,8 @@ class VerificationEngine:
                                 build_cmd,
                                 _bs_time.monotonic() - _bs_t0,
                                 "pass" if syntax_ok else "fail",
-                                path=path, **_probe_extra)
+                                path=path, shared=_shared_adopt or None,
+                                **_probe_extra)
                     except FileNotFoundError as exc:
                         # Build tool absent → skip (never a false fail), mirroring
                         # the gcc-absent path below.
