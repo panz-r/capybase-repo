@@ -567,6 +567,14 @@ class CaseResult:
     # sub-bands the NEAR_MATCH class — 0.875-with-0.31-loser-pres is a
     # different story from 0.875-with-0.9).
     splice_loser_dropped: bool = False
+    # S28-176(a): terminal gcc diagnostics, attributed (eval-only). The
+    # batch-19 finding: 11 of the 19 near-oracle REPAIR_FAILUREs died on
+    # file-level errors in the include/type-visibility HEAD region the
+    # conflict units occupy — per-unit repair cannot fix what the unit
+    # itself damaged. terminal_error_line is the last gcc diagnostic's
+    # line; failure_head_region flags the head shape.
+    terminal_error_line: int | None = None
+    failure_head_region: bool = False
     # S28-171(1): the harness's OWN builds, site-tagged — the session
     # journal cannot see them. Entries {site, outcome, duration_s};
     # sites: toolchain_probe, runner_c_build, oracle_probe.
@@ -2168,6 +2176,56 @@ def _compile_evidence_missing(events) -> bool:
     return trust and timed_out
 
 
+#: S28-176(a): the head-region bounds — a terminal gcc diagnostic at or
+#: above the include/type-visibility territory (first ~50 lines) of a
+#: file whose conflict units start at the head is the class that killed
+#: the near-oracle REPAIR_FAILUREs (libuv-0089's uv_loop_t at line 3,
+#: duckdb-0099's optional_ptr at 1:1).
+_HEAD_REGION_LINE_LIMIT = 50
+_HEAD_REGION_UNIT_START = 10
+
+
+def _terminal_error_attribution(events) -> tuple[int | None, bool]:
+    """S28-176(a): the LAST gcc diagnostic in the captured session events,
+    attributed. Returns (error_line, head_region). Head region = the
+    error sits at or above the include/type-visibility territory AND the
+    conflict units start at the head (or no unit info survived — the
+    error line alone still reads head-ish at <=50)."""
+    import re as _re
+    pat = _re.compile(r"[\w./\\+-]+:(\d+):\d+: error: ")
+    unit_starts: list[int] = []
+    last_line: int | None = None
+    for e in events or []:
+        t = getattr(e, "event_type", None)
+        p = getattr(e, "payload", None) or {}
+        if t == "conflict_unit_extracted":
+            uid = str(p.get("unit_id") or "")
+            parts = uid.split(":")
+            if len(parts) >= 2:
+                try:
+                    unit_starts.append(int(parts[-2]))
+                except ValueError:
+                    pass
+        blob = None
+        for k in ("errors", "stderr_tail", "stdout_tail", "message",
+                  "diagnostics"):
+            v = p.get(k)
+            if isinstance(v, str) and " error: " in v:
+                blob = v
+                break
+        if blob:
+            for m in pat.finditer(blob):
+                try:
+                    last_line = int(m.group(1))
+                except ValueError:
+                    pass
+    if last_line is None:
+        return None, False
+    head = last_line <= _HEAD_REGION_LINE_LIMIT and (
+        not unit_starts or min(unit_starts) <= _HEAD_REGION_UNIT_START)
+    return last_line, head
+
+
 def _is_working(r: "CaseResult") -> bool:
     """WORKING: compiling, marker-free, below the PASS bar, and preserving
     both sides' changes — a functioning both-features merge the oracle
@@ -2532,6 +2590,9 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         res.splice_loser_dropped = any(
             getattr(e, "event_type", None) == "splice_loser_dropped"
             for e in _session_events)
+        # S28-176(a): the terminal gcc diagnostic, attributed (eval-only).
+        res.terminal_error_line, res.failure_head_region = (
+            _terminal_error_attribution(_session_events))
         # C post-hoc compile check must run WHILE the repo tree is on disk (the
         # finally below removes it). python/rust checks operate on the content
         # string alone, so they run after cleanup; the C build needs the tree.
