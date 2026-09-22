@@ -2440,6 +2440,9 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
                 else ("declined" if _cached_probe is not None else "skipped"))
             _TOOLCHAIN_PROBE_CACHE[case.id] = _cached_probe
         if _cached_probe is not None and _cached_probe.get("toolchain_dead"):
+            # S28-171(1) review: carry the probe's own instrumentation —
+            # the early return precedes the scoring block's assignment.
+            res.harness_builds = _harness_builds or None
             return _mark_toolchain_dead(res, _cached_probe, t0)
         if _cached_probe is not None:
             # Declined classification — still recorded for the audit trail
@@ -2672,7 +2675,10 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
     res.oracle_line_presence, res.oracle_order_score = _oracle_order_fields(
         content, case.expected_resolved)
     # S28-146: calibrate the runner's textual checks against the oracle.
-    res.oracle_check_inapplicable = _oracle_check_inapplicable(
+    # REVIEW (2026-09-23): guarded on non-empty content — an EMPTY
+    # resolution fails both checks vacuously, and marking the check
+    # inapplicable would misdescribe a nothing-output as oracle-class.
+    res.oracle_check_inapplicable = bool(content) and _oracle_check_inapplicable(
         expected=case.expected_resolved, language=case.language,
         marker_free=res.marker_free, compiles=res.compiles,
         gate_applies=bool(_sga(case.path)),
@@ -2687,7 +2693,6 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
     # S28-171(1): the harness's own builds ride the row.
     res.harness_builds = _harness_builds or None
     return res
-
 
 def _print_census(results_path: str) -> None:
     """Print a failure census report from an existing results JSON.

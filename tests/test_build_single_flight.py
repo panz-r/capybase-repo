@@ -200,6 +200,9 @@ def test_degraded_advisory_build_gate_skips():
     assert ok is True  # advisory continue — same outcome as the rc=-1 kill
     assert ran["build"] is False
     assert orch._last_tests_compiler_indictment is False
+    # REVIEW 2026-09-23: the report surface must not carry a previous
+    # step's verdict into a skipped gate
+    assert getattr(orch, "_last_test_verdict", None) is None
     events = [e for e, _ in orch.journal.events]
     assert "tests_build_skipped_degraded" in events
     assert "tests_started" not in events  # skipped BEFORE the gate launches

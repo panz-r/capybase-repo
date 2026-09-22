@@ -20529,6 +20529,10 @@ class Orchestrator:
         if (_gate_bs is not None and not _gate_bs.full_build_available
                 and bool(_phase2_fallback_build_cmd(cmd))
                 and not getattr(self.config.tests, "required", False)):
+            # REVIEW (2026-09-23): reset the report surfaces the gate
+            # normally writes — a stale _last_test_verdict from a previous
+            # step must not leak into this step's accept report.
+            self._last_test_verdict = None
             self._last_tests_compiler_indictment = False
             self.journal.emit(
                 "tests_build_skipped_degraded",
