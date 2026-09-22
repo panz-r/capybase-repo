@@ -548,6 +548,24 @@ class CaseResult:
     # even without a working gate. The verdict vocabulary stays
     # GATE_UNAVAILABLE; the recount counts the flag in the dual view.
     oracle_equivalent: bool = False
+    # S28-170: cross-session stability (the repeat protocol's evidence).
+    # stability: "stable" | "unstable" across a repeated case's runs
+    # ("single-run" when no repeats ran); best_repeat_verdict/sim: the
+    # BEST outcome any repeat achieved — rows whose best beats the kept
+    # verdict form the repeat-flip queue, the corpus's cheapest re-score
+    # population (the passing candidates already sit in the flights).
+    stability: str = ""
+    best_repeat_verdict: str = ""
+    best_repeat_sim: float | None = None
+    # S28-170(1): the engine's acceptance_trust proposed FOR REVIEW on
+    # "compile evidence missing" AND a gate build timed out — the
+    # escalation is an environment artifact (the tree could not be
+    # judged), the S28-161 UNVERIFIED class at the runner level.
+    compile_evidence_missing: bool = False
+    # S28-171(1): the harness's OWN builds, site-tagged — the session
+    # journal cannot see them. Entries {site, outcome, duration_s};
+    # sites: toolchain_probe, runner_c_build, oracle_probe.
+    harness_builds: list = None
     # FR2a flight recorder: the orchestrator's session_id (the per-case artifact
     # root under .rebase-agent/sessions/<session_id>/). Populated when
     # --preserve-flights copies the session dir out; None otherwise. The flight
@@ -2096,6 +2114,55 @@ def _oracle_check_inapplicable(
     return _brace_balanced(expected, language) is False
 
 
+#: S28-170(2): outcome quality order for the repeat-flip census. A PASS
+#: repeat beats an ESCALATE kept verdict; equal ranks compare sim.
+_VERDICT_RANK = {"PASS": 6, "WORKING": 5, "NEAR_MATCH": 4,
+                 "GATE_UNAVAILABLE": 3, "UNVERIFIED": 2, "ESCALATE": 2,
+                 "ORACLE_DIVERGENT": 1}
+
+
+def _verdict_rank(v: str) -> int:
+    return _VERDICT_RANK.get(v or "", 0)
+
+
+def _is_repeat_flip(r: "CaseResult") -> bool:
+    """S28-170(2): True when the row's best repeat beats the kept
+    verdict — by outcome rank, or by sim within the same rank. Such rows
+    are the repeat-flip queue: the cheapest re-score targets in the
+    corpus (a repeat already proved the better outcome)."""
+    if not r.best_repeat_verdict:
+        return False
+    kept, best = _verdict_rank(r.verdict), _verdict_rank(r.best_repeat_verdict)
+    if best != kept:
+        return best > kept
+    return (r.best_repeat_sim or 0.0) > (r.matches_oracle or 0.0) + 0.005
+
+
+def _compile_evidence_missing(events) -> bool:
+    """S28-170(1): the escalation is a compile-evidence artifact.
+
+    True when the session's own acceptance_trust proposed FOR REVIEW
+    because compile evidence was missing AND a gate build timed out (the
+    SYNTAX_ONLY degrade, a timed-out pre-continue gate, or a timeout
+    probe). The cold-tree duckdb-0053 shape: identical candidates PASS
+    on a warm tree — the escalation measured the environment, not the
+    resolver. Requires BOTH signals: the engine's own confession and the
+    missed deadline that explains it."""
+    trust = timed_out = False
+    for e in events or []:
+        t = getattr(e, "event_type", None)
+        p = getattr(e, "payload", None) or {}
+        if t == "acceptance_trust" and p.get("decision") == "PROPOSE_FOR_REVIEW":
+            reasons = p.get("reasons") or []
+            if any("compile evidence missing" in str(x) for x in reasons):
+                trust = True
+        if (t == "build_state"
+                or (t == "tests_finished" and p.get("timed_out"))
+                or (t == "build_probe" and p.get("outcome") == "timeout")):
+            timed_out = True
+    return trust and timed_out
+
+
 def _is_working(r: "CaseResult") -> bool:
     """WORKING: compiling, marker-free, below the PASS bar, and preserving
     both sides' changes — a functioning both-features merge the oracle
@@ -2136,6 +2203,12 @@ def _verdict_chain(r: "CaseResult") -> str:
     if getattr(r, "toolchain_dead", False):
         return "ESCALATE_TOOLCHAIN"
     if r.escalated:
+        if getattr(r, "compile_evidence_missing", False):
+            # S28-170(1): the environment could not judge the merge (the
+            # gate build timed out and the engine proposed FOR REVIEW on
+            # missing compile evidence) — the S28-161 UNVERIFIED class at
+            # the runner level, excluded from capability denominators.
+            return "UNVERIFIED"
         verdict = "ESCALATE"
     elif r.marker_free and r.compiles:
         if r.matches_oracle >= PASS_THRESHOLD:
@@ -2346,9 +2419,25 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         # identical real compile errors on both sides AND an oracle
         # failure; passable cases are behavior-identical (the probes
         # restore the conflicted file byte-exact and warm the build).
+        # S28-171(1): the harness's own builds are instrumented (site-
+        # tagged, durations) — the session journal cannot see them, so
+        # the wall-time census reads them from the row.
+        _harness_builds: list = []
+
+        def _timed_harness_build(site: str, fn, *args, **kwargs):
+            _t0 = time.time()
+            out = fn(*args, **kwargs)
+            _harness_builds.append(
+                {"site": site, "duration_s": round(time.time() - _t0, 1)})
+            return out
+
         if _cached_probe is None:
-            _cached_probe = _toolchain_era_probe(
+            _cached_probe = _timed_harness_build(
+                "toolchain_probe", _toolchain_era_probe,
                 repo, case, has_crate=crate_source is not None)
+            _harness_builds[-1]["outcome"] = (
+                "dead" if (_cached_probe or {}).get("toolchain_dead")
+                else ("declined" if _cached_probe is not None else "skipped"))
             _TOOLCHAIN_PROBE_CACHE[case.id] = _cached_probe
         if _cached_probe is not None and _cached_probe.get("toolchain_dead"):
             return _mark_toolchain_dead(res, _cached_probe, t0)
@@ -2362,6 +2451,13 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         engine = ResolutionEngine(cfg.model, client=client)
         orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
                             out=lambda *_a, **_k: None)
+        # S28-170(1): capture the session's events in memory — the
+        # compile-evidence-missing guard reads them after the run.
+        _session_events: list = []
+        try:
+            orch.journal.subscribe(_session_events.append)
+        except Exception:  # noqa: BLE001 — capture is best-effort
+            pass
         # S28-140 part 1: oracle-calibrated validation (opt-in). The
         # preflight's oracle probe ran above; its error texts become the
         # exemption set the gate downgrades to warnings.
@@ -2417,12 +2513,22 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         # Read the resolved file.
         final = repo / case.path
         content = final.read_text() if final.exists() else ""
+        # S28-170(1): the compile-evidence-missing guard — an escalated
+        # session whose acceptance_trust proposed FOR REVIEW on missing
+        # compile evidence AND whose gate build timed out measured the
+        # environment, not the resolver.
+        if res.escalated:
+            res.compile_evidence_missing = _compile_evidence_missing(
+                _session_events)
         # C post-hoc compile check must run WHILE the repo tree is on disk (the
         # finally below removes it). python/rust checks operate on the content
         # string alone, so they run after cleanup; the C build needs the tree.
         c_builds_result: bool | None = None
         if case.language in ("c", "cpp", "c++") and content:
-            c_builds_result = _c_builds(repo, case)
+            c_builds_result = _timed_harness_build("runner_c_build", _c_builds, repo, case)
+            _harness_builds[-1]["outcome"] = (
+                "pass" if c_builds_result is True
+                else "fail" if c_builds_result is False else "na")
         # WS1c oracle-build-check — only for cases heading to a non-clean
         # verdict (cost: one tree build / two cargo runs per failing case;
         # clean passes never need reclassification). The predicate mirrors
@@ -2445,7 +2551,11 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
                     and not _brace_balanced(content, case.language))
                 or _gate_failed_clean_buffer):
             try:
-                oracle_builds_result = _oracle_builds(repo, case, crate_source)
+                oracle_builds_result = _timed_harness_build(
+                    "oracle_probe", _oracle_builds, repo, case, crate_source)
+                _harness_builds[-1]["outcome"] = (
+                    "pass" if oracle_builds_result is True
+                    else "fail" if oracle_builds_result is False else "na")
             except Exception:  # noqa: BLE001 — classification is best-effort
                 oracle_builds_result = None
         # S28-110: the API-drift probe (attribution-only, zero model cost).
@@ -2574,6 +2684,8 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         res.oracle_builds is False
         and res.marker_free is True
         and res.matches_oracle >= 0.99)
+    # S28-171(1): the harness's own builds ride the row.
+    res.harness_builds = _harness_builds or None
     return res
 
 
@@ -3060,6 +3172,14 @@ def main():
             # isn't assigned yet — index the verdict list instead).
             _kept = _records[_verdicts.index(_maj)]
             _kept.repeat_verdicts = _verdicts
+            # S28-170(2): stability + best-repeat evidence on the kept row.
+            _best_i = max(range(len(_verdicts)),
+                          key=lambda i: (_verdict_rank(_verdicts[i]),
+                                         _records[i].matches_oracle or 0.0))
+            _kept.stability = (
+                "stable" if len(set(_verdicts)) == 1 else "unstable")
+            _kept.best_repeat_verdict = _verdicts[_best_i]
+            _kept.best_repeat_sim = _records[_best_i].matches_oracle
             if _kept is not r:
                 print(f"      [majority: {_maj} (verdicts: {','.join(_verdicts)})]",
                       end=" ")
@@ -3083,6 +3203,8 @@ def main():
         else:
             wrong_ct += 1
         r.verdict = verdict
+        if not r.stability:
+            r.stability = "single-run"
         r.terminal_reason = _classify_terminal_reason(r.reason) if r.escalated else ""
         # Subclassify timeouts: throughput (many regions overwhelm the budget)
         # vs capability (few regions but the model can't solve them).
@@ -3148,6 +3270,10 @@ def main():
     if ochk_ct:
         print(f"  check-inapplicable: {ochk_ct} rows failed a textual check the "
               f"ORACLE fails too — verdict follows sim (S28-146)")
+    _unstable = sum(1 for r in results if r.stability == "unstable")
+    if _unstable:
+        print(f"  unstable verdicts: {_unstable} repeated rows disagreed across "
+              f"runs (S28-170 — cold-start flips and model variance)")
     # Sprint-20 S20.11 (eval-only): idiomatic-rewrite candidates —
     # non-clean verdicts with content whose token jaccard to the oracle
     # is low but whose control-flow skeleton is largely preserved.
@@ -3228,6 +3354,21 @@ def main():
 
     out = Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps([r.__dict__ for r in results], indent=2))
+    # S28-170(2): the repeat-flip queue — rows whose best repeat beat the
+    # kept verdict (by outcome rank, or sim within the rank). The corpus's
+    # cheapest re-score population: a repeat already proved the better
+    # outcome and its candidate sits in the preserved flights.
+    _flips = [r for r in results if _is_repeat_flip(r)]
+    if _flips:
+        (out.parent / "repeat-flip-queue.json").write_text(json.dumps(
+            [{"id": r.id, "kept_verdict": r.verdict,
+              "kept_sim": r.matches_oracle,
+              "best_repeat_verdict": r.best_repeat_verdict,
+              "best_repeat_sim": r.best_repeat_sim,
+              "repeat_verdicts": r.repeat_verdicts,
+              "stability": r.stability} for r in _flips], indent=2))
+        print(f"repeat-flip queue: {len(_flips)} rows whose best repeat beat "
+              f"the kept verdict -> {out.parent / 'repeat-flip-queue.json'}")
     if dropped:
         print(f"\n!! SUBSET RUN — size guard dropped {len(dropped)} corpus cases;"
               " these results are NOT a full shard")
