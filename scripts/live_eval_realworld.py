@@ -1187,6 +1187,10 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # request-count pin must hold with it on).
     if os.environ.get("CAPYBASE_SIDE_FEEDBACK", "") == "1":
         cfg.future.enable_side_consistent_feedback = True
+    # S28-183 pilot gate: the repair-edit delimiter guard is default OFF
+    # (census-gated decline); the screening rerun opts in via env.
+    if os.environ.get("CAPYBASE_REPAIR_GUARD", "") == "1":
+        cfg.future.enable_repair_delimiter_guard = True
     # B10 (sprint-26): the self-consistency A/B arm —
     # CAPYBASE_SELF_CONSISTENCY=N (N>1) enables consensus sampling with N
     # samples (samples_complex follows). The per-candidate consensus fields
