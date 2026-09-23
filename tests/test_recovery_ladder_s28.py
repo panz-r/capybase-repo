@@ -28,7 +28,6 @@ from capybase.conflict_model import (
     TokenBudget,
     VerificationResult,
 )
-from capybase.orchestrator import _soft_fail_near_miss_due
 from capybase.resolution_engine import build_recovery_prompt
 from capybase.risk import RiskEngine
 
@@ -130,31 +129,3 @@ def test_recovery_budget_two_keeps_the_ladder_reachable():
         recovery_retry_count=2).action == "escalate"
 
 
-# ---------------------------------------------------------------------------
-# S28-145: the soft-fail near-miss grant
-# ---------------------------------------------------------------------------
-
-def _validation(*, passed=False, hf=0):
-    return SimpleNamespace(passed=passed, hard_failures=list(range(hf)))
-
-
-def test_soft_fail_zero_hard_failures_qualifies():
-    outcome = SimpleNamespace()
-    assert _soft_fail_near_miss_due(_validation(passed=False, hf=0), outcome)
-
-
-def test_hard_failures_disqualify():
-    outcome = SimpleNamespace()
-    assert not _soft_fail_near_miss_due(_validation(passed=False, hf=2), outcome)
-
-
-def test_passed_or_missing_validation_disqualify():
-    assert not _soft_fail_near_miss_due(_validation(passed=True), SimpleNamespace())
-    assert not _soft_fail_near_miss_due(None, SimpleNamespace())
-
-
-def test_grant_is_latched_per_unit():
-    outcome = SimpleNamespace()
-    assert _soft_fail_near_miss_due(_validation(), outcome)
-    outcome._soft_fail_grant_used = True
-    assert not _soft_fail_near_miss_due(_validation(), outcome)

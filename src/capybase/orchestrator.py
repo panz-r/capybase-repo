@@ -246,22 +246,35 @@ def _error_class(message: str) -> str:
 #: speak the same number at the census.
 _SPLICE_LOSER_DROP_BAR = 0.5
 
+#: S28-145 re-target: the advisory soft signals that do NOT block
+#: accepting a compiling candidate at the unit-count cap boundary (the
+#: zero-budget escape's set, hoisted so both sites share one judgment:
+#: content-loss acceptance is strictly better than escalating the file).
+_ZB_ADVISORY = frozenset({
+    "preservation_heuristic",
+    "both_sides_represented",
+    "obligation",
+    "intent_coverage",
+    "unattributed_code",
+})
 
-def _soft_fail_near_miss_due(validation, outcome) -> bool:
-    """S28-145: True when this attempt is the near-oracle SOFT-FAIL shape —
-    validation failed with ZERO hard failures (soft/semantic signals only)
-    and the unit hasn't spent its one soft-fail grant. The census of the
-    retry-cap rows (php-0005: four units soft-failing on a single draw in
-    a many-unit file, all escalated at 0.949; prusaslicer-0089 similar)
-    showed the single-failing-unit `_close` grant denies exactly this
-    shape in multi-unit files. The caller latches
-    ``outcome._soft_fail_grant_used`` when the grant is consumed at the
-    cap boundary."""
+
+def _cap_boundary_advisory(validation, cand) -> bool:
+    """S28-145 re-target (the screening run's catch): True when the
+    boundary candidate is a compiling, advisory-only pass — passed
+    validation, zero hard failures, resolved text present, and every
+    warning in the advisory set. The php-0005 rerun shape: five units
+    whose candidates PASSED validation with advisory
+    both_sides_represented warnings, all escalated at the cap with
+    0.949 content. Such a candidate is accepted, not escalated (the
+    zero-budget escape's doctrine at any unit-count budget)."""
     return (
         validation is not None
-        and not validation.passed
+        and validation.passed
         and not validation.hard_failures
-        and not getattr(outcome, "_soft_fail_grant_used", False))
+        and bool((getattr(cand, "resolved_text", "") or "").strip())
+        and not [w for w in (validation.warnings or [])
+                 if getattr(w, "validator", "") not in _ZB_ADVISORY])
 
 
 def _empty_terminal_grant_due(outcome) -> bool:
@@ -17421,11 +17434,18 @@ class Orchestrator:
                 # draw each, 0.949). Grant ONE extra retry per unit for the
                 # zero-hard-failure shape regardless of file unit count;
                 # latched once like P8's grant, the cap stays the ceiling.
-                _soft_fail_near_miss = _soft_fail_near_miss_due(
-                    validation, outcome)
-                if (_close or _progress or _soft_fail_near_miss) and retry_count == _eff_budget:
-                    if _soft_fail_near_miss:
-                        outcome._soft_fail_grant_used = True
+                # S28-145 re-target (the screening run's catch): at the cap
+                # boundary, a compiling candidate whose only blockers are
+                # the advisory soft signals is ACCEPTED, not escalated —
+                # the zero-budget escape's doctrine at any unit-count
+                # budget (php-0005's rerun: five passed=True candidates
+                # with advisory both_sides_represented, all escalated at
+                # 0.949 content). Zero model requests: the candidate
+                # already exists.
+                _cap_advisory_accept = (
+                    _cap_boundary_advisory(validation, cand)
+                    and retry_count == _eff_budget)
+                if (_close or _progress) and retry_count == _eff_budget:
                     self.journal.emit(
                         "retry_relaxation",
                         {"unit_id": unit.unit_id,
@@ -17433,13 +17453,43 @@ class Orchestrator:
                          "reason": (
                              "converging-failure-trend"
                              if _progress and not _close
-                             else "soft-fail multi-unit near-miss (s28-145)"
-                             if _soft_fail_near_miss and not _close
                              else "high-sim single-failing-unit"),
                          "hf_trend": _hf_trend},
                         step_index=self.step, path=unit.path,
                         unit_id=unit.unit_id)
                     # fall through: don't escalate, let the retry happen
+                elif _cap_advisory_accept:
+                    outcome.accepted = cand
+                    outcome.validation = validation
+                    outcome.retry_count = retry_count
+                    _cap_blockers = sorted(
+                        {getattr(w, "validator", "") for w in (validation.warnings or [])
+                         if getattr(w, "validator", "") in _ZB_ADVISORY})
+                    outcome.reason = (
+                        f"cap boundary: accepted compiling candidate "
+                        f"(advisory-only blockers {_cap_blockers}; s28-145)"
+                    )
+                    self._record_resolution_attempt(
+                        outcome, mechanism="llm",
+                        decision="accept", reason=outcome.reason,
+                    )
+                    self.journal.emit(
+                        "cap_boundary_accept",
+                        {"unit_id": unit.unit_id,
+                         "original_cap": _unit_budget,
+                         "blockers": _cap_blockers},
+                        step_index=self.step, path=unit.path,
+                        unit_id=unit.unit_id,
+                    )
+                    self.journal.emit(
+                        "candidate_accepted",
+                        {"candidate_id": cand.candidate_id,
+                         "via": cand.provenance or "plain_llm",
+                         "provenance": cand.provenance or ""},
+                        step_index=self.step, path=unit.path,
+                        unit_id=unit.unit_id,
+                    )
+                    return outcome
                 else:
                     outcome.escalated = True
                     outcome.retry_count = retry_count
