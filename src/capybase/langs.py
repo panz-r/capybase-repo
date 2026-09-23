@@ -161,6 +161,7 @@ _PROVENANCE_SAFETY: dict[str, SafetyClass] = {
     # never matched the produced deterministic_{gcc,cc}_fixit strings)
     "combination_search": SafetyClass.HEURISTIC,
     "deterministic_symbol_injection": SafetyClass.HEURISTIC,
+    "deterministic_block_dedup": SafetyClass.HEURISTIC,
     "deterministic_brace_repair": SafetyClass.HEURISTIC,
     "deterministic_pystring_repair": SafetyClass.HEURISTIC,
     "deterministic_generated_file_side": SafetyClass.POLICY,
