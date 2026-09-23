@@ -17578,13 +17578,13 @@ class Orchestrator:
                 and cand.resolved_text
                 and not validation.hard_failures
             ):
-                _ZB_ADVISORY = frozenset({
-                    "preservation_heuristic",
-                    "both_sides_represented",
-                    "obligation",
-                    "intent_coverage",
-                    "unattributed_code",
-                })
+                # S28-145 re-target review: `_ZB_ADVISORY` lives at module
+                # level — the old LOCAL frozenset here made the name
+                # function-local for ALL of _resolve_unit_core, so the
+                # relaxation block's read (earlier in the function, before
+                # this conditional assignment) raised UnboundLocalError on
+                # the first unit-count-budget boundary (caught live by the
+                # screening slice on php-0005).
                 _zb_non_advisory = [
                     w for w in validation.warnings
                     if w.validator not in _ZB_ADVISORY

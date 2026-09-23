@@ -124,3 +124,17 @@ def test_advisory_set_covers_the_screening_shape():
     that let a passing candidate be escalated must now admit it."""
     assert "both_sides_represented" in _ZB_ADVISORY
     assert "preservation_heuristic" in _ZB_ADVISORY
+
+
+def test_no_local_zb_shadowing_in_the_unit_loop():
+    """The screening slice's catch: a local `_ZB_ADVISORY = frozenset(...)`
+    inside _resolve_unit_core (the zero-budget escape's conditional
+    assignment) made the name function-local, so the relaxation block's
+    earlier read raised UnboundLocalError on the first unit-count-budget
+    boundary (php-0005, live). The constant lives at module level; the
+    loop must consult it, never assign it."""
+    import inspect
+    import capybase.orchestrator as orch_mod
+    src = inspect.getsource(orch_mod.Orchestrator._resolve_unit_core)
+    assert "_ZB_ADVISORY = " not in src
+    assert "_ZB_ADVISORY" in src  # still consulted by both sites
