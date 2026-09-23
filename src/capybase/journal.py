@@ -115,14 +115,46 @@ class Journal:
         return target
 
     def store_prompt(self, unit_id: str, attempt: int, text: str) -> Path:
-        return self.write_artifact(
-            self.paths.prompts, f"{_safe(unit_id)}.attempt{attempt}.txt", text
+        return self._store_round_artifact(
+            self.paths.prompts, unit_id, attempt, text
         )
 
     def store_response(self, unit_id: str, attempt: int, text: str) -> Path:
-        return self.write_artifact(
-            self.paths.responses, f"{_safe(unit_id)}.attempt{attempt}.txt", text
+        return self._store_round_artifact(
+            self.paths.responses, unit_id, attempt, text
         )
+
+    def _store_round_artifact(
+        self, root, unit_id: str, attempt: int, text: str
+    ) -> Path:
+        """S28-184(1): preserve every DISTINCT round for the same
+        (unit, attempt) slot. Repair rounds and re-resolves reuse attempt
+        indices, and overwriting them made repair edits unattributable
+        (the duckdb-0093 paren: the recorded response had the `)`, the
+        stored buffer did not, and which round wrote what was
+        unknowable). Identical content dedupes to the same file;
+        different content lands in an `.rN` sibling — the original file
+        is never replaced.
+        """
+        base = root / f"{_safe(unit_id)}.attempt{attempt}.txt"
+        if not base.exists():
+            return self.write_artifact(root, base.name, text)
+        try:
+            if base.read_text(encoding="utf-8") == text:
+                return base  # identical round — dedupe
+        except OSError:
+            pass
+        seq = 1
+        while True:
+            alt = root / f"{_safe(unit_id)}.attempt{attempt}.r{seq}.txt"
+            if not alt.exists():
+                return self.write_artifact(root, alt.name, text)
+            try:
+                if alt.read_text(encoding="utf-8") == text:
+                    return alt
+            except OSError:
+                pass
+            seq += 1
 
     def store_candidate(self, candidate: CandidateResolution) -> Path:
         return self.write_artifact(

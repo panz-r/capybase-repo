@@ -1032,6 +1032,13 @@ class FutureConfig(BaseModel):
     # (include/using/typedef/forward-declaration only), re-validate after
     # each insert. Transitive by construction; <=3 restorations per case.
     enable_declaration_restoration: bool = False
+    # Repair-edit delimiter guard (S28-183, census-gated): a whole-file
+    # repair round that UNBALANCES a previously-balanced ()/{} pair is
+    # declined (the duckdb-0093 shape — a one-char ';' defect became a
+    # paren loss via the repair's reflow; the pre-repair state was
+    # strictly closer). repair_delimiter_loss is journaled
+    # unconditionally either way; the flag gates only the decline.
+    enable_repair_delimiter_guard: bool = False
     # Best-of-N preservation recovery (sprint-19 P2): when the
     # preservation heuristic rejects an otherwise-validation-passing
     # candidate and EVERY heuristic-forced retry then validates strictly

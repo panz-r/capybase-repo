@@ -11940,7 +11940,7 @@ class Orchestrator:
                         path=path,
                     )
                     accepted_opt: list[tuple[ConflictUnit, CandidateResolution]] | None = (
-                        self._whole_file_repair(
+                        self._guarded_whole_file_repair(
                             path, accepted, original, file_validation.hard_failures,
                             wall_deadline=_file_wall_deadline,
                             skip_deterministic=_det_unchanged,
@@ -12874,6 +12874,63 @@ class Orchestrator:
             self._comment_phase_latched = True
             return True
         return False
+
+    def _guarded_whole_file_repair(
+        self, path: str, accepted, original: str, failures: list, **kwargs
+    ):
+        """S28-182(a)/183: the whole-file repair boundary, observed and
+        guarded. Journals `repair_edit_shape` (what the repair DID —
+        lines removed/added; deletion-repairs and adaptation-repairs were
+        indistinguishable before) on every round, and — when
+        `enable_repair_delimiter_guard` is on — DECLINES rounds that
+        unbalance a previously-balanced delimiter pair (the duckdb-0093
+        shape: a one-char `;` defect became a paren loss via the repair's
+        reflow; the pre-repair state was strictly closer). The decline
+        returns None so the caller's existing fallback/exit path runs on
+        the pre-repair state."""
+        from collections import Counter as _C
+        try:
+            pre = _resolved_buffer(original, accepted)
+        except Exception:  # noqa: BLE001 — splice may fail on bad spans
+            pre = None
+        det = self._whole_file_repair(
+            path, accepted, original, failures, **kwargs)
+        if det is None:
+            return None
+        try:
+            post = _resolved_buffer(original, det)
+        except Exception:  # noqa: BLE001
+            post = None
+        if pre is None or post is None:
+            return det
+        _pre_c, _post_c = _C(pre.splitlines()), _C(post.splitlines())
+        _removed = sum((_pre_c - _post_c).values())
+        _added = sum((_post_c - _pre_c).values())
+        _removed_nonblank = sum(
+            cnt for ln, cnt in (_pre_c - _post_c).items() if ln.strip())
+        self.journal.emit(
+            "repair_edit_shape",
+            {"path": path, "lines_removed": _removed, "lines_added": _added,
+             "removed_nonblank": _removed_nonblank},
+            step_index=self.step, path=path,
+        )
+        loss = []
+        for _op, _cl in (("(", ")"), ("{", "}")):
+            _b_pre = pre.count(_op) - pre.count(_cl)
+            _b_post = post.count(_op) - post.count(_cl)
+            if _b_pre == 0 and _b_post != 0:
+                loss.append(f"{_op}{_cl} balance {_b_pre}->{_b_post}")
+        if loss:
+            self.journal.emit(
+                "repair_delimiter_loss",
+                {"path": path, "loss": loss},
+                step_index=self.step, path=path,
+            )
+            if getattr(
+                    getattr(self.config, "future", None),
+                    "enable_repair_delimiter_guard", False):
+                return None  # decline: the pre-repair state was closer
+        return det
 
     def _reconcile_comments(
         self, path: str, buffer: str,
