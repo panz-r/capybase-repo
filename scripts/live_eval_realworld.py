@@ -1182,6 +1182,11 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
         cfg.future.enable_true_side_asymmetry_takeover = False
         cfg.future.enable_midband_subsumption_takeover = False
         cfg.future.enable_wholesale_winner_floor = False
+    # S28-180 pilot gate: the side-consistent repair feedback is default
+    # OFF; the screening rerun opts in via env (feedback-only — the
+    # request-count pin must hold with it on).
+    if os.environ.get("CAPYBASE_SIDE_FEEDBACK", "") == "1":
+        cfg.future.enable_side_consistent_feedback = True
     # B10 (sprint-26): the self-consistency A/B arm —
     # CAPYBASE_SELF_CONSISTENCY=N (N>1) enables consensus sampling with N
     # samples (samples_complex follows). The per-candidate consensus fields

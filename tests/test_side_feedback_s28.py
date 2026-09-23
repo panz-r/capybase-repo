@@ -90,3 +90,4 @@ def test_member_shape_is_recognized():
     finally:
         re_mod.set_side_consistent_feedback(False)
     assert note is not None and "make" in note
+
