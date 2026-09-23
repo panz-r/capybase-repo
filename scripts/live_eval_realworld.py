@@ -1191,6 +1191,12 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # (census-gated decline); the screening rerun opts in via env.
     if os.environ.get("CAPYBASE_REPAIR_GUARD", "") == "1":
         cfg.future.enable_repair_delimiter_guard = True
+    # S28-197 pilot gate: the declaration-restoration mode (default OFF).
+    if os.environ.get("CAPYBASE_DECL_RESTORE", "") == "1":
+        cfg.future.enable_declaration_restoration = True
+    # S28-206 pilot gate: the identical-block dedup rung (default OFF).
+    if os.environ.get("CAPYBASE_BLOCK_DEDUP", "") == "1":
+        cfg.future.enable_identical_block_dedup = True
     # B10 (sprint-26): the self-consistency A/B arm —
     # CAPYBASE_SELF_CONSISTENCY=N (N>1) enables consensus sampling with N
     # samples (samples_complex follows). The per-candidate consensus fields

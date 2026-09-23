@@ -2803,6 +2803,78 @@ def _try_deterministic_brace_repair(
     return [(wf_unit, wf_cand)], "repaired"
 
 
+def _try_identical_block_dedup(
+    failures: list,
+    original: str,
+    accepted: list[tuple[ConflictUnit, CandidateResolution]],
+) -> tuple[list[tuple[ConflictUnit, CandidateResolution]] | None, str]:
+    """S28-206: remove one copy of a byte-identical duplicated block.
+
+    The fmt-0003 class (a cross-era fixed point): the splice ECHOED a
+    whole block — TEST(ChronoTest, InvalidWidthId) appears at lines 299
+    and 304, character-identical — and gtest's macro expansion reports
+    "redefinition of class ..._Test" (sim 1.00 content minus one
+    duplicate). Fires only when the failures name redefinition/duplicate
+    AND a non-adjacent byte-identical block (>= 3 lines, non-blank)
+    exists; the LATER copy is removed. Returns (repaired, "deduped") or
+    (None, reason). Deterministic, zero model requests; validated by the
+    caller's whole-file gate."""
+    import re as _re
+
+    def _msg(f):
+        return getattr(f, "message", "") or str(f)
+
+    msgs = "\n".join(_msg(f) for f in (failures or []))
+    if not _re.search(r"redefinition|redefine|duplicate", msgs, _re.I):
+        return None, "not_redefinition"
+    try:
+        spliced = _resolved_buffer(original, accepted)
+    except Exception:  # noqa: BLE001 — splice may fail on bad spans
+        return None, "splice_failed"
+    if not accepted:
+        return None, "no_units"
+    lines = spliced.split("\n")
+    n = len(lines)
+    min_block = 3
+    # hash every block start for length min_block..12
+    for size in range(min_block, 13):
+        seen: dict[tuple, int] = {}
+        for i in range(0, n - size + 1):
+            block = tuple(lines[i:i + size])
+            if not any(ln.strip() for ln in block):
+                continue  # blank runs are legitimately repeated
+            key = tuple(ln.rstrip() for ln in block)
+            if key in seen:
+                j = seen[key]
+                if i - j >= size:  # non-adjacent (no overlap)
+                    unit, _old = accepted[0]
+                    repaired_lines = (
+                        lines[:i] + lines[i + size:])
+                    repaired = "\n".join(repaired_lines)
+                    wf_unit = unit.model_copy(
+                        update={"marker_span": None,
+                                "unit_kind": "whole_file"})
+                    wf_cand = CandidateResolution(
+                        candidate_id=(unit.unit_id + ":blockdedup"),
+                        unit_id=unit.unit_id,
+                        model_name="deterministic",
+                        resolved_text=repaired,
+                        prompt_version="deterministic_block_dedup",
+                        provenance="deterministic_block_dedup",
+                        self_reported_confidence=0.0,
+                        explanation=(
+                            f"S28-206 identical-block dedup: removed the "
+                            f"later copy of a {size}-line byte-identical "
+                            f"block at lines {j + 1}-{j + size} / "
+                            f"{i + 1}-{i + size}"),
+                    )
+                    return [(wf_unit, wf_cand)], "deduped"
+            else:
+                seen[key] = i
+    return None, "no_duplicate_block"
+
+
+
 def _try_deterministic_pystring_repair(
     failures: list,
     original: str,
@@ -14239,6 +14311,58 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 - splice may fail on bad spans
             return None
         sides, base_text = self._micro_stage_sides(path)
+        # S28-197 (the declaration mode, pilot-gated): for NOT-DECLARED
+        # failures the right fix class is the DECLARING LINE from the
+        # pristine sides — the dry-run proved the tokenizer family's
+        # declarations exist verbatim (replayed:376 `Tokenizer
+        # tokenizer(behavior, keyword_helper);` etc.) while the corpus
+        # shows line_replace whack-a-moles 34/34 (each use-site swap
+        # renames the missing symbol). Under the flag the declaration
+        # search runs BEFORE line_replace, and line_replace is skipped
+        # for the not-declared class entirely (the P4a precedent: it is
+        # already skipped for implicit declarations — a use-site
+        # replacement cannot fix a missing declaration).
+        _decl_mode = bool(getattr(
+            getattr(self.config, "future", None),
+            "enable_declaration_restoration", False))
+        _not_declared = any(sig in msgs for sig in (
+            "was not declared", "undeclared identifier",
+            "does not name a type", "unknown type name"))
+        if _decl_mode and _not_declared:
+            from capybase.verification import inject_local_declaration
+            for symbol in symbols[:3]:
+                decls = find_symbol_declaration_lines(
+                    symbol, language,
+                    sides.get("current", ""), sides.get("replayed", ""),
+                    base_text or "")
+                for decl in decls:
+                    repaired = inject_local_declaration(
+                        spliced, decl, symbol)
+                    if repaired is None or repaired == spliced:
+                        continue
+                    wf_unit = unit.model_copy(
+                        update={"marker_span": None,
+                                "unit_kind": "whole_file"})
+                    wf_cand = CandidateResolution(
+                        candidate_id=(unit.unit_id + ":decllocal"),
+                        unit_id=unit.unit_id,
+                        model_name="deterministic",
+                        resolved_text=repaired,
+                        prompt_version="deterministic_local_declaration",
+                        provenance="deterministic_symbol_injection",
+                        self_reported_confidence=0.0,
+                        explanation=(
+                            f"S28-197 local declaration: inserted the "
+                            f"pristine side's declaring line for "
+                            f"{symbol}: {decl[:80]}"),
+                    )
+                    self.journal.emit(
+                        "symbol_inject_applied",
+                        {"kind": "declaration_local", "symbol": symbol,
+                         "declaration": decl[:100], "path": path},
+                        step_index=self.step, path=path,
+                        unit_id=unit.unit_id)
+                    return [(wf_unit, wf_cand)]
         # C1b REPLACE mode: for corrupted-line errors, try replacing the
         # corrupted line with its parent counterpart (verbatim, LCS-anchored).
         # P4a (sprint-24): SKIP line-replacement for implicit-declaration
@@ -14248,8 +14372,12 @@ class Orchestrator:
         import re as _re_p4a
         _is_implicit_decl = bool(_re_p4a.search(
             r"implicit declaration", msgs, _re_p4a.I))
+        # S28-197: under the flag, the not-declared class skips
+        # line_replace too — a use-site swap cannot fix a missing
+        # declaration (it renames the missing symbol instead).
+        _skip_replace = _is_implicit_decl or (_decl_mode and _not_declared)
         from capybase.verification import find_replacement_line
-        _replace = None if _is_implicit_decl else find_replacement_line(
+        _replace = None if _skip_replace else find_replacement_line(
             spliced, msgs, language,
             sides.get("current", ""), sides.get("replayed", ""),
             base_text or "")
@@ -14549,6 +14677,38 @@ class Orchestrator:
                      "reason": "already failed for this failure signature"},
                     step_index=self.step, path=path,
                 )
+            # S28-206 (pilot-gated): the identical-block dedup — a splice
+            # ECHO duplicates a whole block byte-identically (fmt-0003's
+            # TEST(...) at 299 AND 304, a cross-era fixed point) and the
+            # compiler reports redefinition. Removing the later copy is a
+            # pure reduction; the whole-file gate revalidates.
+            if getattr(getattr(self.config, "future", None),
+                       "enable_identical_block_dedup", False):
+                if f"blockdedup:{_sig}" not in _tried:
+                    det, _dd_diag = _try_identical_block_dedup(
+                        failures, original, accepted)
+                    if det is not None:
+                        unit_new, cand_new = det[0]
+                        self.journal.emit(
+                            "candidate_validated",
+                            {
+                                "candidate_id": cand_new.candidate_id,
+                                "passed": True,
+                                "whole_file_repair_for": unit_new.unit_id,
+                                "deterministic_block_dedup": True,
+                            },
+                            step_index=self.step,
+                            path=path,
+                            unit_id=unit_new.unit_id,
+                        )
+                        return det
+                    _tried.add(f"blockdedup:{_sig}")
+                    if _dd_diag not in ("not_redefinition",):
+                        self.journal.emit(
+                            "block_dedup_skipped",
+                            {"reason": _dd_diag},
+                            step_index=self.step, path=path,
+                        )
             # C1 (sprint-22): deterministic symbol injection at the file
             # gate — before fault attribution, because the missing symbol's
             # declaration lives OUTSIDE the conflict units (the attributed

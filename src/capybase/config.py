@@ -1026,12 +1026,23 @@ class FutureConfig(BaseModel):
     # picks the convention the file already follows. Feedback-only — same
     # repair rounds, zero new model requests (pinned by the pilot).
     enable_side_consistent_feedback: bool = False
-    # Declaration restoration (S28-178, pilot-gated): when the FILE-level
-    # validation fails with an unknown-identifier diagnostic, restore the
-    # symbol's declaring line from the pristine side that carries it
-    # (include/using/typedef/forward-declaration only), re-validate after
-    # each insert. Transitive by construction; <=3 restorations per case.
+    # Declaration restoration (S28-197, pilot-gated — the corrected
+    # S28-178): when a whole-file failure names an UNDECLARED symbol,
+    # insert the pristine side's DECLARING LINE before the symbol's
+    # first use (the dry-run proved the tokenizer family's declarations
+    # exist verbatim in the sides; the corpus shows use-site
+    # line_replace whack-a-moles 34/34 instead). Under the flag the
+    # declaration search runs BEFORE line_replace and line_replace is
+    # skipped for the not-declared class. Transitive by the
+    # validate-after-each loop; compile-gated.
     enable_declaration_restoration: bool = False
+    # Identical-block dedup (S28-206, pilot-gated): a splice ECHO
+    # duplicates a whole block byte-identically (fmt-0003's TEST(...) at
+    # lines 299 AND 304 — a cross-era fixed point) and the compiler
+    # reports redefinition. Fires only on redefinition/duplicate-class
+    # failures with a non-adjacent byte-identical >=3-line block; the
+    # later copy is removed; the whole-file gate revalidates.
+    enable_identical_block_dedup: bool = False
     # Repair-edit delimiter guard (S28-183, census-gated): a whole-file
     # repair round that UNBALANCES a previously-balanced ()/{} pair is
     # declined (the duckdb-0093 shape — a one-char ';' defect became a

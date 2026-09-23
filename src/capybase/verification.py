@@ -2646,6 +2646,37 @@ def inject_symbol_declaration(
     return "\n".join(lines) + ("\n" if (buffer or "").endswith("\n") else "")
 
 
+def inject_local_declaration(
+    buffer: str, decl_line: str, symbol: str,
+) -> str | None:
+    """S28-197: insert a FUNCTION-LOCAL declaration before the symbol's
+    first use. ``inject_symbol_declaration`` splices at the file-scope
+    import point — correct for prototypes/includes, invalid for locals
+    with constructor arguments (the tokenizer family: the pristine side
+    carries `Tokenizer tokenizer(behavior, keyword_helper);` and the
+    model's splice dropped it; a use-site line swap just renames the
+    missing symbol — whack-a-mole, measured 34/34 in the corpus).
+    Insert-before-first-use is the side's own relative position; the
+    whole-file compile gate owns the verdict. None when the declaration
+    is already present or the symbol has no use site."""
+    s = (decl_line or "").strip()
+    if not s or "\n" in s:
+        return None
+    lines = (buffer or "").splitlines()
+    norm = s.replace(" ", "")
+    pat = re.compile(rf"\b{re.escape(symbol)}\b")
+    use_idx = None
+    for i, ln in enumerate(lines):
+        if ln.strip().replace(" ", "") == norm:
+            return None  # already declared
+        if use_idx is None and pat.search(ln):
+            use_idx = i
+    if use_idx is None:
+        return None
+    lines.insert(use_idx, s)
+    return "\n".join(lines) + ("\n" if (buffer or "").endswith("\n") else "")
+
+
 def find_replacement_line(
     buffer: str, error_text: str, language: str | None,
     *parent_texts: str,
