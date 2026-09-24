@@ -107,3 +107,49 @@ def test_adjacent_overlap_not_deduped(monkeypatch):
     # abc/abc IS a non-adjacent 3-line identical block -> fires
     assert det is not None
     assert det[0][1].resolved_text == "a\nb\nc\n"
+
+
+# ---------------------------------------------------------------------------
+# S28-206 redesign: the symbol-named requirement (the pilot's FAIL)
+# ---------------------------------------------------------------------------
+
+_HELPER_DENSE = (
+    "std::tm make_hour(int h) {\n"
+    "  auto time = make_tm();\n"
+    "  time.tm_hour = h;\n"
+    "  return time;\n"
+    "}\n"
+    "\n"
+    "std::tm make_minute(int m) {\n"
+    "  auto time = make_tm();\n"
+    "  time.tm_min = m;\n"
+    "  return time;\n"
+    "}\n"
+)
+
+
+def test_generic_helper_tail_not_deduped_when_symbol_named(monkeypatch):
+    """The pilot's exact FAIL: a generic `return time; }` tail repeated
+    across helpers must NOT be removed when the failure names a symbol
+    the tail doesn't carry."""
+    import capybase.orchestrator as orch_mod
+    monkeypatch.setattr(orch_mod, "_resolved_buffer",
+                        lambda original, accepted: _HELPER_DENSE)
+    det, diag = _try_identical_block_dedup(
+        _fail("t.cc:9:6: error: redefinition of 'class ChronoTest_InvalidWidthId_Test'"),
+        "orig", _accepted())
+    assert det is None  # the tail carries no named token
+
+
+def test_named_symbol_block_still_deduped(monkeypatch):
+    """The real echo (carrying the TEST name) still fires."""
+    import capybase.orchestrator as orch_mod
+    monkeypatch.setattr(orch_mod, "_resolved_buffer",
+                        lambda original, accepted: _ECHO + _HELPER_DENSE)
+    det, diag = _try_identical_block_dedup(
+        _fail("t.cc:304:6: error: redefinition of 'class ChronoTest_InvalidWidthId_Test'"),
+        "orig", _accepted())
+    assert det is not None
+    text = det[0][1].resolved_text
+    assert text.count("TEST(ChronoTest, InvalidWidthId)") == 1
+    assert "make_hour" in text and "make_minute" in text  # helpers intact

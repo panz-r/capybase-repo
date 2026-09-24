@@ -2827,6 +2827,19 @@ def _try_identical_block_dedup(
     msgs = "\n".join(_msg(f) for f in (failures or []))
     if not _re.search(r"redefinition|redefine|duplicate", msgs, _re.I):
         return None, "not_redefinition"
+    # S28-206 redesign (the pilot's FAIL): the duplicated block must
+    # carry the redefinition's NAMED symbol — parse "redefinition of
+    # 'X'" and require a meaningful token of X (>= 4 chars, split on
+    # underscores) to appear in the block. The pilot's false positive
+    # was a GENERIC 3-line helper tail (`return time; }` repeated
+    # across make_hour/make_minute) that carries no symbol — this rule
+    # filters it and every boilerplate shape like it.
+    named = _re.search(r"redefinition of ['\u2018]([^'\u2019]+)['\u2019]", msgs)
+    if named:
+        tokens = [t for t in named.group(1).replace("::", "_").split("_")
+                  if len(t) >= 4]
+    else:
+        tokens = []
     try:
         spliced = _resolved_buffer(original, accepted)
     except Exception:  # noqa: BLE001 — splice may fail on bad spans
@@ -2843,6 +2856,9 @@ def _try_identical_block_dedup(
             block = tuple(lines[i:i + size])
             if not any(ln.strip() for ln in block):
                 continue  # blank runs are legitimately repeated
+            blob = "\n".join(block)
+            if tokens and not any(t in blob for t in tokens):
+                continue  # not the redefinition's block — boilerplate
             key = tuple(ln.rstrip() for ln in block)
             if key in seen:
                 j = seen[key]
