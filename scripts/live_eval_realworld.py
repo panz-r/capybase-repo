@@ -386,6 +386,18 @@ _DETECTED_BUILD_CMD: dict[str, str] = {}
 # across repeats — re-probing would only burn build time).
 _TOOLCHAIN_PROBE_CACHE: dict[str, dict | None] = {}
 
+# S28-191(1): the oracle probe is iteration-invariant per case too
+# (expected_resolved never changes) — pilot4's duckdb repeats burned
+# 3x300s on three IDENTICAL failing probes. Same pattern as the
+# toolchain cache: first probe memoized, repeats read the memo.
+_ORACLE_PROBE_CACHE: dict[str, bool | None] = {}
+
+# S28-191(3)/S28-192(c): a C tree build that TIMED OUT marks the tree's
+# gate undecidable for this cold environment — later builds for the
+# same case (the oracle probe's inner build) skip the second 300s burn
+# (the content cannot be discriminated by a build that never finishes).
+_C_BUILD_TIMED_OUT: set[str] = set()
+
 
 @dataclass
 class Case:
@@ -579,6 +591,12 @@ class CaseResult:
     # journal cannot see them. Entries {site, outcome, duration_s};
     # sites: toolchain_probe, runner_c_build, oracle_probe.
     harness_builds: list = None
+    # S28-194: the engine's own acceptance trust on the row — the
+    # libuv-0089 finding: a PASS can be a tier-B PROPOSE_FOR_REVIEW
+    # over a FAILED gate, and the harvest could not see the
+    # distribution. Last acceptance_trust event wins.
+    acceptance_tier: str | None = None
+    acceptance_decision: str | None = None
     # FR2a flight recorder: the orchestrator's session_id (the per-case artifact
     # root under .rebase-agent/sessions/<session_id>/). Populated when
     # --preserve-flights copies the session dir out; None otherwise. The flight
@@ -674,8 +692,19 @@ def _engine_session_completed(flights_dir, case_id, live_root=None) -> bool:
     return False
 
 
-def _classify_terminal_reason(reason: str) -> str:
+def _classify_terminal_reason(
+    reason: str, *, elapsed_s: float | None = None,
+    budget_s: float | None = None,
+) -> str:
     """Classify an escalation reason into a disjoint terminal category.
+
+    S28-202: TIMEOUT_* classes require TIMEOUT EVIDENCE — a
+    timeout/wall substring in the reason, or elapsed within ~10% of the
+    case budget. The zenodo class carried 69-428s against a 1200s
+    budget: ordinary escalations wearing a timeout label; without the
+    evidence requirement the class lies about what stopped the run.
+    Evidence-less TIMEOUT_* matches fall through to the generic
+    escalation classes.
 
     Returns one of:
       SAFE_STOP           — safety guard caught a real danger (resurrection)
@@ -696,6 +725,14 @@ def _classify_terminal_reason(reason: str) -> str:
       OTHER               — uncategorized
     """
     r = (reason or "").lower()
+    # S28-202: the timeout-evidence gate for every TIMEOUT_* decision
+    # below — explicit wall language, or the run actually approached
+    # the budget. Computed once; None (no elapsed recorded) keeps the
+    # reason-substring path as the only evidence source.
+    _timeout_evident = (
+        "timeout" in r or "timed out" in r or "wall" in r
+        or (elapsed_s is not None and budget_s
+            and elapsed_s >= 0.9 * float(budget_s)))
     # Sprint-20 S20.2: the preflight classification (un-passable case, not
     # a resolver outcome).
     if "toolchain-era" in r:
@@ -724,13 +761,13 @@ def _classify_terminal_reason(reason: str) -> str:
     # in post-resolution scoring (cold c/oracle builds), not in the CEGIS
     # loop. A completed resolution mislabeled as a capability timeout
     # overstated regressions (duckdb-0062/0106 vs s28).
-    if "post-resolution scoring exceeded the wall" in r:
+    if "post-resolution scoring exceeded the wall" in r and _timeout_evident:
         return "TIMEOUT_AFTER_ACCEPT"
     if "case timeout" in r:
         return "TIMEOUT_CASE"
-    if "wall-time" in r or "wall_time" in r:
+    if ("wall-time" in r or "wall_time" in r) and _timeout_evident:
         return "TIMEOUT_CONVERGENCE"
-    if "no hard-failure progress" in r:
+    if "no hard-failure progress" in r and _timeout_evident:
         return "TIMEOUT_CONVERGENCE"
     if "needs_human" in r:
         return "MODEL_NEEDS_HUMAN"
@@ -738,7 +775,14 @@ def _classify_terminal_reason(reason: str) -> str:
         return "MODEL_EMPTY"
     if "whole-file" in r or "whole_file" in r:
         return "REPAIR_FAILURE"
-    if "convergence" in r:
+    # S28-202: an evidence-less convergence/no-progress exit is the
+    # CEGIS loop exhausting its ROUNDS on failing validation — the
+    # generic capability/repair class, not a timeout that never
+    # happened (the zenodo class: 69-428s against a 1200s budget).
+    if ("convergence" in r or "no hard-failure progress" in r) \
+            and not _timeout_evident:
+        return "VALIDATION_EXHAUSTED"
+    if "convergence" in r and _timeout_evident:
         return "TIMEOUT_CONVERGENCE"
     if "could not resolve" in r:
         if "error:" in r or "syntax" in r or "delimiter" in r:
@@ -1475,6 +1519,11 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
     cmd = _DETECTED_BUILD_CMD.get(case.id) or C_BUILD_COMMANDS.get(case.dataset, "")
     if not cmd or cmd == "true":
         return None
+    # S28-191(3): this case's tree build already burned the 300s cap
+    # once (a cold environment — content-independent). Repeats (and the
+    # oracle probe's second cold build) buy nothing from another burn.
+    if case.id in _C_BUILD_TIMED_OUT:
+        return None
     try:
         proc = _run_shell_tree(cmd, cwd=str(repo), timeout=300)
         if proc.returncode == 0:
@@ -1526,6 +1575,14 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
             # the merge compiled fine; build failure is pre-existing infrastructure.
             return True
         return False
+    except subprocess.TimeoutExpired:
+        # S28-192(c): a TIMEOUT is not "no gate". The None contract here
+        # means "no build command registered" (the degraded route), and
+        # conflating the two sent the oracle probe down the standalone
+        # fallback on a gate that merely could not FINISH. Memoize the
+        # case and re-raise so callers discriminate.
+        _C_BUILD_TIMED_OUT.add(case.id)
+        raise
     except Exception:  # noqa: BLE001 — best-effort; treat as "couldn't check"
         return None
 
@@ -1863,7 +1920,34 @@ def _api_drift_probe(
     return None
 
 
+def _oracle_include_roots(repo: Path, case: "Case") -> list[str]:
+    """S28-192(b): the standalone probe's include paths — repo + the
+    file's dir (the S28-105 baseline) plus the tree's REAL roots: the
+    conventional include dirs that exist on disk, and any -I flags in
+    the adaptively-detected build command."""
+    roots = [str(repo), str((repo / case.path).parent)]
+    for sub in ("src/include", "include", "src"):
+        cand = repo / sub
+        if cand.is_dir():
+            roots.append(str(cand))
+    for m in re.finditer(r"-I\s*(\S+)",
+                         _DETECTED_BUILD_CMD.get(case.id, "")):
+        roots.append(m.group(1))
+    return roots
+
+
 def _oracle_builds(repo: Path, case: Case, crate_source: Path | None) -> bool | None:
+    """S28-191(1): per-case memo around the probe — repeats read the
+    cache (the oracle text is iteration-invariant; the toolchain-probe
+    precedent)."""
+    if case.id in _ORACLE_PROBE_CACHE:
+        return _ORACLE_PROBE_CACHE[case.id]
+    result = _oracle_builds_uncached(repo, case, crate_source)
+    _ORACLE_PROBE_CACHE[case.id] = result
+    return result
+
+
+def _oracle_builds_uncached(repo: Path, case: Case, crate_source: Path | None) -> bool | None:
     """Does the ORACLE (expected_resolved) pass the same gate the merge faced?
 
     Writes expected_resolved into the materialized tree and runs the gate the
@@ -1880,6 +1964,14 @@ def _oracle_builds(repo: Path, case: Case, crate_source: Path | None) -> bool | 
     try:
         target.write_text(case.expected_resolved)
         if case.language in ("c", "cpp", "c++"):
+            # S28-191(2)/S28-192(c): a runner build that TIMED OUT marks
+            # this cold tree's gate undecidable — the same command on the
+            # oracle text cannot finish either (pilot4: 300.0s ×3), and
+            # a build that never completes cannot discriminate content.
+            # Skip the second cold burn AND refuse the standalone route
+            # (designed for ABSENT gates, not unfinished ones).
+            if case.id in _C_BUILD_TIMED_OUT:
+                return None
             _full = _c_builds(repo, case)
             if _full is False:
                 return False
@@ -1888,22 +1980,25 @@ def _oracle_builds(repo: Path, case: Case, crate_source: Path | None) -> bool | 
                 # ("true" — no prepare/build entry, S28-78's honest
                 # degrade), so the resolver's whole-file verdicts came from
                 # the STANDALONE SYNTAX FALLBACK. Probe the oracle through
-                # the SAME check, mirroring the verifier's own invocation
-                # (language-appropriate compiler/std; repo + file-dir
-                # includes): oracle-fails-too => GATE_UNAVAILABLE — the
-                # case measures the sandbox, not the resolver (the php
-                # arginfo band: bare generated headers that cannot parse
-                # without their tree's include context; every resolution
-                # including the human one fails identically).
+                # the SAME check, mirroring the verifier's own invocation.
+                # S28-192(b): the probe runs with the tree's REAL include
+                # roots — with them, a failure is the environment's true
+                # state (the php arginfo band's generated headers are
+                # ABSENT, not misplaced), and False is the sound
+                # discriminator S28-199 dispositioned. S28-192(a)'s
+                # missing-include→None rule is deliberately NOT applied
+                # here: the unsound population (timeout-routed probes) is
+                # handled above by the S28-192(c) split, and applying (a)
+                # to the degraded route would strip the sound php band of
+                # its honest GU (the D10 pin caught exactly that).
                 from capybase.verification import _compile_ccs
                 _cpp = case.language in ("cpp", "c++")
-                _dir = (repo / case.path).parent
                 _ok, _ = _compile_ccs(
                     case.expected_resolved,
                     cc_path="g++" if _cpp else "gcc",
                     std="c++17" if _cpp else "c11",
                     suffix=".cpp" if _cpp else ".c",
-                    include_paths=[str(repo), str(_dir)],
+                    include_paths=_oracle_include_roots(repo, case),
                 )
                 return bool(_ok)
             # D10 (s27): the resolver's IN-SESSION gate is the TARGETED
@@ -2503,8 +2598,19 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         _harness_builds: list = []
 
         def _timed_harness_build(site: str, fn, *args, **kwargs):
+            # S28-191(3): a build that RAISES (the timeout path —
+            # _run_shell_tree re-raises TimeoutExpired) must still land
+            # in the census: previously the entry vanished and the
+            # caller's `_harness_builds[-1]` mislabelled the PREVIOUS
+            # site's entry.
             _t0 = time.time()
-            out = fn(*args, **kwargs)
+            try:
+                out = fn(*args, **kwargs)
+            except Exception:
+                _harness_builds.append({
+                    "site": site, "duration_s": round(time.time() - _t0, 1),
+                    "outcome": "timeout"})
+                raise
             _harness_builds.append(
                 {"site": site, "duration_s": round(time.time() - _t0, 1)})
             return out
@@ -2605,6 +2711,16 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         res.splice_loser_dropped = any(
             getattr(e, "event_type", None) == "splice_loser_dropped"
             for e in _session_events)
+        # S28-194: carry the engine's acceptance trust onto the row
+        # (last acceptance_trust event wins — the splice_loser_dropped
+        # capture pattern).
+        for _e in _session_events:
+            if getattr(_e, "event_type", None) == "acceptance_trust":
+                _p = getattr(_e, "payload", None) or {}
+                if _p.get("tier"):
+                    res.acceptance_tier = str(_p["tier"])
+                if _p.get("decision"):
+                    res.acceptance_decision = str(_p["decision"])
         # S28-176(a): the terminal gcc diagnostic, attributed (eval-only).
         res.terminal_error_line, res.failure_head_region = (
             _terminal_error_attribution(_session_events))
@@ -2613,10 +2729,18 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         # string alone, so they run after cleanup; the C build needs the tree.
         c_builds_result: bool | None = None
         if case.language in ("c", "cpp", "c++") and content:
-            c_builds_result = _timed_harness_build("runner_c_build", _c_builds, repo, case)
+            # S28-192(c): a timed-out runner build RAISES (the memo is
+            # set inside _c_builds first) — catch so the case still
+            # scores; the census entry already reads outcome=timeout.
+            try:
+                c_builds_result = _timed_harness_build(
+                    "runner_c_build", _c_builds, repo, case)
+            except Exception:  # noqa: BLE001 — scoring is best-effort
+                c_builds_result = None
             _harness_builds[-1]["outcome"] = (
                 "pass" if c_builds_result is True
-                else "fail" if c_builds_result is False else "na")
+                else "fail" if c_builds_result is False
+                else _harness_builds[-1].get("outcome", "na"))
         # WS1c oracle-build-check — only for cases heading to a non-clean
         # verdict (cost: one tree build / two cargo runs per failing case;
         # clean passes never need reclassification). The predicate mirrors
@@ -3295,7 +3419,11 @@ def main():
         r.verdict = verdict
         if not r.stability:
             r.stability = "single-run"
-        r.terminal_reason = _classify_terminal_reason(r.reason) if r.escalated else ""
+        r.terminal_reason = (
+            _classify_terminal_reason(
+                r.reason, elapsed_s=r.elapsed,
+                budget_s=float(getattr(args, "case_timeout", 1200) or 1200))
+            if r.escalated else "")
         # Subclassify timeouts: throughput (many regions overwhelm the budget)
         # vs capability (few regions but the model can't solve them).
         if r.terminal_reason == "TIMEOUT_CASE":

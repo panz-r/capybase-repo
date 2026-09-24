@@ -2446,6 +2446,12 @@ _SIDE_SYMBOL_PATTERNS = (
     r"no declaration matches [\'\"]([^\'\"]+)[\'\"]",
     r"unknown type name [\'\"](\w+)[\'\"]",
     r"[\'\"](\w+)[\'\"] does not name a type",
+    # S28-196b (the fixed-point census): matcher.cpp-0099's terminal
+    # error — `no match for 'operator=' (operand types are ...)` — is
+    # the one gcc shape the set missed; the symbol captured is the
+    # operator token itself, which the side grep locates in each
+    # side's assignment-convention lines.
+    r"no match for [\'\"](operator[^\'\"]+)[\'\"]",
 )
 
 

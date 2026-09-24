@@ -55,13 +55,22 @@ def test_validation_exhausted_compile_vector():
 
 def test_genuine_wall_time_still_timeout_convergence():
     """A real no-progress/wall-time reason keeps TIMEOUT_CONVERGENCE —
-    the split must not swallow the budget-exhaustion class."""
+    the split must not swallow the budget-exhaustion class.
+    S28-202: the bare convergence phrase (no wall language) is NOT
+    timeout evidence — it routes to the generic VALIDATION_EXHAUSTED
+    (the zenodo class: 69-428s against a 1200s budget, never near a
+    wall); with elapsed evidence (>=90% of budget) it stays a
+    timeout."""
     mod = _load_module()
     assert mod._classify_terminal_reason(
         "could not resolve f.py: no hard-failure progress across 4 rounds "
         "(wall-time budget exhausted)") == "TIMEOUT_CONVERGENCE"
     assert mod._classify_terminal_reason(
         "could not resolve f.py: CEGIS convergence threshold not met"
+    ) == "VALIDATION_EXHAUSTED"
+    assert mod._classify_terminal_reason(
+        "could not resolve f.py: CEGIS convergence threshold not met",
+        elapsed_s=1150.0, budget_s=1200.0,
     ) == "TIMEOUT_CONVERGENCE"
 
 
