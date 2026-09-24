@@ -2690,12 +2690,39 @@ def _declaration_line_idx(lines: list[str], symbol: str) -> int | None:
     return None
 
 
+def _brace_depths(lines: list[str]) -> list[int]:
+    """Depth AFTER each line (string/comment masked); 0 = outside any
+    block — the file's top level."""
+    depths: list[int] = []
+    d = 0
+    masked = _mask_strings_and_comments(
+        "\n".join(lines), "cpp") if lines else ""
+    for ln in masked.split("\n"):
+        d += ln.count("{") - ln.count("}")
+        depths.append(d)
+    return depths
+
+
+def _same_function(lines: list[str], a: int, b: int) -> bool:
+    """True when lines a and b sit in the same function body — no
+    top-level (depth-0) line between them. The 0126 lesson: `auto& cache`
+    in an EARLIER function neither hoists (wrong function to move from)
+    nor blocks the insert (a different scope's declaration is not THIS
+    scope's)."""
+    depths = _brace_depths(lines)
+    lo, hi = min(a, b), max(a, b)
+    for i in range(lo, hi + 1):
+        if depths[i] <= 0:
+            return False
+    return True
+
+
 def hoist_local_declaration(buffer: str, symbol: str) -> str | None:
     """S28-197 v2: MOVE an existing declaration above the symbol's first
-    use — the out-of-order subclass (0126: `auto& cache = GetCache();`
-    existed BELOW the use; inserting a second declaration conflicted).
-    A move, not an insert: no new content enters the file. None when no
-    declaration exists or it is already above the first use."""
+    use — the out-of-order subclass, SAME FUNCTION ONLY (0126: `auto&
+    cache = GetCache();` existed in an earlier function; a cross-function
+    hoist would break the donor, and the use's scope still needs its own
+    local). A move, not an insert: no new content enters the file."""
     lines = (buffer or "").splitlines()
     decl_idx = _declaration_line_idx(lines, symbol)
     if decl_idx is None:
@@ -2707,6 +2734,8 @@ def hoist_local_declaration(buffer: str, symbol: str) -> str | None:
         if use_pat.search(ln):
             if i > decl_idx:
                 return None  # already ordered
+            if not _same_function(lines, decl_idx, i):
+                continue  # a different function's use — not ours to fix
             decl_line = lines.pop(decl_idx)
             lines.insert(i, decl_line)
             return "\n".join(lines) + ("\n" if (buffer or "").endswith("\n") else "")

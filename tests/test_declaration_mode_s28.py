@@ -247,3 +247,40 @@ def test_expand_window_reaches_the_member_block():
     assert any("parse_allocator;" in ln for ln in block)
     assert any("max_token_index" in ln for ln in block)
     assert len(block) <= 5
+
+
+def test_hoist_declines_cross_function():
+    """The pilot2 0126 read: `auto& cache` in an EARLIER function must
+    neither hoist (it would break the donor) nor read as 'ordered'."""
+    from capybase.verification import hoist_local_declaration
+    buf = ("int a(){\n"
+           "  auto &cache = GetCache();\n"
+           "  return cache.x;\n"
+           "}\n"
+           "\n"
+           "int b(){\n"
+           "  cache.TokenizeInput();\n"
+           "  return 0;\n"
+           "}\n")
+    # the use is AFTER the decl in file order but in another function:
+    # the hoist declines (not 'ordered' — the use's scope needs its own)
+    assert hoist_local_declaration(buf, "cache") is None
+
+
+def test_hoist_fires_same_function_only():
+    from capybase.verification import hoist_local_declaration
+    buf = ("int b(){\n"
+           "  cache.TokenizeInput();\n"
+           "  auto &cache = GetCache();\n"
+           "  return cache.x;\n"
+           "}\n")
+    out = hoist_local_declaration(buf, "cache")
+    assert out is not None
+    assert out.splitlines()[1].strip() == "auto &cache = GetCache();"
+
+
+def test_same_function_boundary_detection():
+    from capybase.verification import _same_function
+    lines = ["int a(){", "  int x;", "}", "", "int b(){", "  int y;", "}"]
+    assert _same_function(lines, 1, 1) is True
+    assert _same_function(lines, 1, 5) is False  # crossed the boundary

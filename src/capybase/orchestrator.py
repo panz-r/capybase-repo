@@ -14383,10 +14383,27 @@ class Orchestrator:
                     symbol, language,
                     sides.get("current", ""), sides.get("replayed", ""),
                     base_text or "")
-                from capybase.verification import _declaration_line_idx
-                if _declaration_line_idx(
-                        spliced.split("\n"), symbol) is not None:
-                    continue
+                from capybase.verification import (
+                    _declaration_line_idx, _same_function,
+                )
+                _spliced_lines = spliced.split("\n")
+                _existing = _declaration_line_idx(_spliced_lines, symbol)
+                if _existing is not None:
+                    # S28-197 v3.2 (the pilot2 0126 read): a declaration
+                    # in a DIFFERENT FUNCTION neither hoists nor blocks —
+                    # the use's scope still needs its own local, so the
+                    # insert proceeds (0126: `auto& cache` at :44 vs the
+                    # use at :375 crossed a function boundary and BOTH
+                    # v2 paths declined, leaving the legacy conflicting
+                    # insert).
+                    _first_use = next(
+                        (i for i, ln in enumerate(_spliced_lines)
+                         if i != _existing and re.search(
+                             rf"\b{re.escape(symbol)}\b", ln)), None)
+                    if _first_use is not None and _same_function(
+                            _spliced_lines, _existing, _first_use):
+                        continue  # same-scope declaration exists: skip
+
                 for decl in decls:
                     # v3 (the 0127 lesson): transplant the CONTIGUOUS
                     # DECLARATION BLOCK — the single-line insert's own
