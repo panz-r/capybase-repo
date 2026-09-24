@@ -1231,6 +1231,10 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # request-count pin must hold with it on).
     if os.environ.get("CAPYBASE_SIDE_FEEDBACK", "") == "1":
         cfg.future.enable_side_consistent_feedback = True
+    # S28-189/S28-204 pilot gate: the seam-aware repair feedback is
+    # default OFF; the screening rerun opts in via env.
+    if os.environ.get("CAPYBASE_SEAM_FEEDBACK", "") == "1":
+        cfg.future.enable_seam_aware_feedback = True
     # S28-183 pilot gate: the repair-edit delimiter guard is default OFF
     # (census-gated decline); the screening rerun opts in via env.
     if os.environ.get("CAPYBASE_REPAIR_GUARD", "") == "1":

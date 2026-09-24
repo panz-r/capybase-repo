@@ -1026,6 +1026,10 @@ class FutureConfig(BaseModel):
     # picks the convention the file already follows. Feedback-only — same
     # repair rounds, zero new model requests (pinned by the pilot).
     enable_side_consistent_feedback: bool = False
+    # S28-189/S28-204: seam-aware repair feedback (pilot-gated, default
+    # OFF) — the splice-seam context reveal (string-seam + scope-seam).
+    # Feedback-only: same repair rounds, zero new model requests.
+    enable_seam_aware_feedback: bool = False
     # Declaration restoration (S28-197, pilot-gated — the corrected
     # S28-178): when a whole-file failure names an UNDECLARED symbol,
     # insert the pristine side's DECLARING LINE before the symbol's

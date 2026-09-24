@@ -2439,6 +2439,164 @@ def set_side_consistent_feedback(enabled: bool) -> None:
     _SIDE_CONVENTION_ENABLED = bool(enabled)
 
 
+#: S28-189/S28-204/205: seam-aware repair feedback (pilot-gated, default
+#: OFF). The seam family's members fail on context their fragment cannot
+#: see: a splice seam's unclosed opener (scikit-0005: six identical
+#: paren-mismatch failures, fragments internally balanced) or an
+#: enclosing BLOCK SCOPE (prusaslicer-0115's `for` and redis-0032's `if`
+#: spliced outside any function). The note is a one-line deterministic
+#: context reveal riding the repair round that already happens — zero new
+#: model requests (the S28-180 family's contract).
+_SEAM_AWARE_ENABLED = False
+
+
+def set_seam_aware_feedback(enabled: bool) -> None:
+    global _SEAM_AWARE_ENABLED
+    _SEAM_AWARE_ENABLED = bool(enabled)
+
+
+#: S28-204: statement openers — a fragment HEAD with one of these at
+#: namespace/file scope is the scope-seam shape.
+_SEAM_STATEMENT_KEYWORDS = frozenset((
+    "for", "if", "while", "switch", "return", "else", "try", "do",
+    "case", "default", "goto", "break", "continue"))
+
+
+def _nearest_unclosed_opener(
+    text: str, line_idx: int, language: str | None,
+) -> tuple[str, int] | None:
+    """The opener the failing line could NOT match (S28-189): a masked
+    bracket-stack scan INCLUDING ``line_idx`` — the failing line's own
+    closer pops the nearest candidate, and the remaining top is the
+    splice-seam opener the fragment could not see. Matching-pop
+    semantics: a closer that does not match the enclosing opener IS the
+    splice seam — name that opener (it is exactly what the compiler's
+    paren-mismatch complaint names, with its location). Strings and
+    comments are masked via the canonical lexer, so brackets inside
+    string literals or docstrings never count. Returns
+    ``(opener_char, opener_line_idx)`` or None when the prefix through
+    the failing line carries no mismatched opener (no seam to
+    reveal)."""
+    from capybase.verification import _mask_strings_and_comments
+    masked = _mask_strings_and_comments(text or "", language)
+    stack: list[tuple[str, int]] = []
+    close = {")": "(", "]": "[", "}": "{"}
+    for i, ln in enumerate(masked.split("\n")[:max(0, line_idx) + 1]):
+        for ch in ln:
+            if ch in "([{":
+                stack.append((ch, i))
+            elif ch in ")]}":
+                if stack and stack[-1][0] == close[ch]:
+                    stack.pop()
+                elif stack:
+                    # the closer did NOT match the enclosing opener —
+                    # this is the splice seam itself; name the opener
+                    return stack[-1]
+    return stack[-1] if stack else None
+
+
+def _splice_scope_depth(
+    text: str, line_idx: int, language: str | None,
+) -> int:
+    """Brace depth BEFORE ``line_idx`` (0-based) for the C family —
+    namespace/file scope is depth <= 1 (S28-204)."""
+    from capybase.verification import _mask_strings_and_comments
+    masked = _mask_strings_and_comments(text or "", language)
+    d = 0
+    for ln in masked.split("\n")[:max(0, line_idx)]:
+        d += ln.count("{") - ln.count("}")
+    return d
+
+
+def _fragment_opens_statement(text: str | None) -> bool:
+    """True when the fragment's opening lines carry a bare STATEMENT —
+    the scope-seam shape only matters for statements (declarations at
+    namespace scope are legal). A spliced fragment may carry header
+    lines (namespace/class openings) before the statement, so the
+    first few content lines are scanned, not just the first."""
+    seen = 0
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if not s or s.startswith(("//", "/*", "*", "#")):
+            continue
+        seen += 1
+        if s.split(None, 1)[0].strip("();") in _SEAM_STATEMENT_KEYWORDS:
+            return True
+        if seen >= 5:
+            break
+    return False
+
+
+def _seam_scan_text(unit: ConflictUnit, candidate_text: str | None) -> str:
+    """The text the seam scans run on: the SPLICED file's shape — the
+    worktree pre-context before the unit's marker span, then the
+    candidate. For whole-file units the pre-context is empty and the
+    candidate IS the file."""
+    ws = unit.original_worktree_text or ""
+    span = getattr(unit, "marker_span", None)
+    pre = ""
+    if ws and span and span[0] > 0:
+        pre = "\n".join(ws.split("\n")[:span[0]]) + "\n"
+    return pre + (candidate_text or "")
+
+
+_SEAM_OPENERS = {"(": ")", "[": "]", "{": "}"}
+
+
+def _seam_aware_note(
+    unit: ConflictUnit, failures: Iterable[VerificationFailure],
+    candidate_text: str | None,
+) -> str:
+    """S28-189/S28-204: the deterministic context reveal for the two
+    seam variants. Failure-signature driven; declines (empty string)
+    whenever the scan cannot SEE the seam — the note never invents.
+
+    string-seam (python): a paren-mismatch failure's opener sits in the
+    PRE-CONTEXT — report it (scikit-0005: six identical stalls).
+    scope-seam (c family): an `expected unqualified-id/identifier`
+    failure at namespace/file scope over a statement-opening fragment —
+    state the scope (prusaslicer-0115, redis-0032)."""
+    if not _SEAM_AWARE_ENABLED:
+        return ""
+    msgs = "\n".join(str(getattr(f, "message", "") or "") for f in failures)
+    if not msgs:
+        return ""
+    lang = (unit.language or "").lower()
+    scan = _seam_scan_text(unit, candidate_text)
+    if not scan:
+        return ""
+    line_m = re.search(r":(\d+):\d+", msgs)
+    if not line_m:
+        return ""
+    line_idx = int(line_m.group(1)) - 1
+    if not (0 <= line_idx < scan.count("\n") + 1):
+        return ""
+    # string-seam: the python paren-mismatch family
+    if lang.startswith("py") and "does not match opening parenthesis" in msgs:
+        op = _nearest_unclosed_opener(scan, line_idx, lang)
+        if op:
+            op_line = (scan.split("\n")[op[1]] or "").strip()
+            return (
+                f"SEAM CONTEXT (splice seam): the failing line sits inside a "
+                f"`{op[0]}` container opened at line {op[1] + 1}: "
+                f"`{op_line[:80]}` — the fragment's closer must match THAT "
+                f"opener (or the container must be rebalanced); the fragment "
+                f"alone is internally balanced.")
+        return ""
+    # scope-seam: the c-family statement-outside-function family
+    if lang in ("c", "cpp", "c++", "h", "hpp") and re.search(
+            r"expected (unqualified-id|identifier or '\(') before", msgs):
+        if _fragment_opens_statement(candidate_text):
+            depth = _splice_scope_depth(scan, line_idx, lang)
+            if depth <= 1:
+                return (
+                    "SEAM CONTEXT (scope seam): the splice point sits at "
+                    "namespace/file scope — OUTSIDE any function body. A bare "
+                    "statement there cannot compile: wrap it in a function "
+                    "definition or relocate it into the existing body.")
+    return ""
+
+
 _SIDE_SYMBOL_PATTERNS = (
     r"no member named [\'\"](\w+)[\'\"]",
     r"[\'\"](\w+)[\'\"] is not a member",
@@ -2574,6 +2732,8 @@ def build_repair_prompt(
     feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
     _decl_guard = _missing_symbol_decl_guard(failures)
     _side_note = _side_convention_note(unit, failures)
+    _seam_note = _seam_aware_note(
+        unit, failures, getattr(candidate, "resolved_text", None))
     cur_lines, _base_lines, rep_lines = _prompt_sides(unit)
     side_intent = _side_intent_block(unit)
     # Structural context: the block (file structure, unit inventory, change
@@ -2696,6 +2856,7 @@ YOUR PREVIOUS ATTEMPT (needs fixing):
 {feedback}
 {_decl_guard}
 {_side_note}
+{_seam_note}
 HOW YOUR CODE IS TESTED: your snippet is spliced back into the full file and the
 entire file is compiled. If the file has OTHER unresolved conflict hunks (a
 multi-hunk conflict), the compiler may trip over those — NOT your snippet. If the

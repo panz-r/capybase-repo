@@ -5381,6 +5381,12 @@ class Orchestrator:
         from capybase.resolution_engine import set_side_consistent_feedback
         set_side_consistent_feedback(
             getattr(config.future, "enable_side_consistent_feedback", False))
+        # S28-189/S28-204: the seam-aware repair feedback (pilot-gated,
+        # default OFF) — the splice-seam context reveal (string-seam +
+        # scope-seam). Same rounds, zero new model requests.
+        from capybase.resolution_engine import set_seam_aware_feedback
+        set_seam_aware_feedback(
+            getattr(config.future, "enable_seam_aware_feedback", False))
         self.verification = VerificationEngine.default(_val_cfg)
         # Sprint-19 P3: the session build-state tracker journals every
         # build probe/transition into the flight journal (the 300s silent
