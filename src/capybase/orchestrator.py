@@ -14341,6 +14341,7 @@ class Orchestrator:
         _decl_mode = bool(getattr(
             getattr(self.config, "future", None),
             "enable_declaration_restoration", False))
+        _use_in_sides = False  # set by the v3.4 declaration block below
         _not_declared = any(sig in msgs for sig in (
             "was not declared", "undeclared identifier",
             "does not name a type", "unknown type name"))
@@ -14348,104 +14349,125 @@ class Orchestrator:
             from capybase.verification import (
                 hoist_local_declaration, inject_local_block,
                 inject_local_declaration, expand_declaration_block,
+                _declaration_line_idx, _same_function,
             )
-            for symbol in symbols[:3]:
-                # v2 (the 0126 lesson): a declaration that EXISTS but
-                # sits below the first use is HOISTED — a move, not an
-                # insert (inserting a second declaration conflicted).
-                hoisted = hoist_local_declaration(spliced, symbol)
-                if hoisted is not None and hoisted != spliced:
-                    wf_unit = unit.model_copy(
-                        update={"marker_span": None,
-                                "unit_kind": "whole_file"})
-                    wf_cand = CandidateResolution(
-                        candidate_id=(unit.unit_id + ":declhoist"),
-                        unit_id=unit.unit_id,
-                        model_name="deterministic",
-                        resolved_text=hoisted,
-                        prompt_version="deterministic_declaration_hoist",
-                        provenance="deterministic_symbol_injection",
-                        self_reported_confidence=0.0,
-                        explanation=(
-                            f"S28-197 v2 hoist: moved {symbol}'s existing "
-                            f"declaration above its first use"),
-                    )
-                    self.journal.emit(
-                        "symbol_inject_applied",
-                        {"kind": "declaration_hoist", "symbol": symbol,
-                         "path": path},
-                        step_index=self.step, path=path,
-                        unit_id=unit.unit_id)
-                    return [(wf_unit, wf_cand)]
-                # v2 guard: skip the insert when a declaration already
-                # exists anywhere (the conflicting-declaration shape).
-                decls = find_symbol_declaration_lines(
-                    symbol, language,
-                    sides.get("current", ""), sides.get("replayed", ""),
-                    base_text or "")
-                from capybase.verification import (
-                    _declaration_line_idx, _same_function,
-                )
-                _spliced_lines = spliced.split("\n")
-                # S28-197 v3.3 (the pilot3 read): the guard keys on the
-                # FAILING USE — the error's own file:line — not the first
-                # mention (0126's side declares cache in THREE functions;
-                # the first mention sits in the decl's own function, so
-                # v3.2's any-use guard skipped the insert and the legacy
-                # tail fired at file scope where the TYPE wasn't visible).
-                _err_m = re.search(rf"[^\s:]*{re.escape(path)}:(\d+):\d+", msgs) or \
-                    re.search(r":(\d+):\d+: error:", msgs)
-                _fail_line = (int(_err_m.group(1)) - 1
-                              if _err_m and 0 < int(_err_m.group(1)) <= len(_spliced_lines)
-                              else None)
-                _existing = _declaration_line_idx(_spliced_lines, symbol)
-                if _existing is not None:
-                    # a declaration in the FAILING USE's own scope blocks;
-                    # every other function's declaration does not (each
-                    # function carries its own local — the side's pattern).
-                    if (_fail_line is not None and _same_function(
-                            _spliced_lines, _existing, _fail_line)):
-                        continue  # same-scope declaration exists: skip
+            # S28-197 v3.3 (the pilot3 read): the guard keys on the
+            # FAILING USE — the error's own file:line — not the first
+            # mention (0126's side declares cache in THREE functions;
+            # the first mention sits in the decl's own function, so
+            # v3.2's any-use guard skipped the insert and the legacy
+            # tail fired at file scope where the TYPE wasn't visible).
+            _spliced_lines = spliced.split("\n")
+            _err_m = re.search(rf"[^\s:]*{re.escape(path)}:(\d+):\d+", msgs) or \
+                re.search(r":(\d+):\d+: error:", msgs)
+            _fail_line = (int(_err_m.group(1)) - 1
+                          if _err_m and 0 < int(_err_m.group(1)) <= len(_spliced_lines)
+                          else None)
+            # S28-197 v3.4 (the pilot4 0126 read): split the class by
+            # whether the FAILING USE line exists verbatim in any side.
+            # A use line no side ever wrote (0126's
+            # `cache.GetTokenizer().TokenizeInput(behavior);` — a splice
+            # artifact; the oracle never uses `cache` there) is not a
+            # missing-declaration shape: no declaration can fix an
+            # artifact use site, and the declaration family only chases
+            # the artifact symbol (the pilot4 rounds: file-scope insert
+            # -> 'does not name a type' -> derived-prototype). The
+            # artifact class belongs to line_replace — the sides' own
+            # line is the replacement — so _skip_replace exempts it.
+            _use_line = (_spliced_lines[_fail_line].strip()
+                         if _fail_line is not None
+                         and _spliced_lines[_fail_line].strip() else None)
+            _use_in_sides = bool(_use_line) and any(
+                _use_line in (t or "") for t in (
+                    sides.get("current"), sides.get("replayed"), base_text))
+            if _use_in_sides:
+                for symbol in symbols[:3]:
+                    # v2 (the 0126 lesson): a declaration that EXISTS but
+                    # sits below the first use is HOISTED — a move, not an
+                    # insert (inserting a second declaration conflicted).
+                    hoisted = hoist_local_declaration(spliced, symbol)
+                    if hoisted is not None and hoisted != spliced:
+                        wf_unit = unit.model_copy(
+                            update={"marker_span": None,
+                                    "unit_kind": "whole_file"})
+                        wf_cand = CandidateResolution(
+                            candidate_id=(unit.unit_id + ":declhoist"),
+                            unit_id=unit.unit_id,
+                            model_name="deterministic",
+                            resolved_text=hoisted,
+                            prompt_version="deterministic_declaration_hoist",
+                            provenance="deterministic_symbol_injection",
+                            self_reported_confidence=0.0,
+                            explanation=(
+                                f"S28-197 v2 hoist: moved {symbol}'s existing "
+                                f"declaration above its first use"),
+                        )
+                        self.journal.emit(
+                            "symbol_inject_applied",
+                            {"kind": "declaration_hoist", "symbol": symbol,
+                             "path": path},
+                            step_index=self.step, path=path,
+                            unit_id=unit.unit_id)
+                        return [(wf_unit, wf_cand)]
+                    # v2 guard: skip the insert when a declaration already
+                    # exists anywhere (the conflicting-declaration shape).
+                    decls = find_symbol_declaration_lines(
+                        symbol, language,
+                        sides.get("current", ""), sides.get("replayed", ""),
+                        base_text or "")
+                    _existing = _declaration_line_idx(_spliced_lines, symbol)
+                    if _existing is not None:
+                        # a declaration in the FAILING USE's own scope blocks;
+                        # every other function's declaration does not (each
+                        # function carries its own local — the side's pattern).
+                        if (_fail_line is not None and _same_function(
+                                _spliced_lines, _existing, _fail_line)):
+                            continue  # same-scope declaration exists: skip
 
-                for decl in decls:
-                    # v3 (the 0127 lesson): transplant the CONTIGUOUS
-                    # DECLARATION BLOCK — the single-line insert's own
-                    # arguments were undeclared (state -> tokens).
-                    for side_name in ("current", "replayed"):
-                        block = expand_declaration_block(
-                            sides.get(side_name, ""), decl, symbol)
-                        if len(block) > 1:
-                            break
-                    repaired = inject_local_block(
-                        spliced, block, symbol)
-                    if repaired is None or repaired == spliced:
-                        repaired = inject_local_declaration(
-                            spliced, block[0], symbol)
-                    if repaired is None or repaired == spliced:
-                        continue
-                    wf_unit = unit.model_copy(
-                        update={"marker_span": None,
-                                "unit_kind": "whole_file"})
-                    wf_cand = CandidateResolution(
-                        candidate_id=(unit.unit_id + ":decllocal"),
-                        unit_id=unit.unit_id,
-                        model_name="deterministic",
-                        resolved_text=repaired,
-                        prompt_version="deterministic_local_declaration",
-                        provenance="deterministic_symbol_injection",
-                        self_reported_confidence=0.0,
-                        explanation=(
-                            f"S28-197 v3 declaration block ({len(block)} "
-                            f"lines) for {symbol}: {decl[:70]}"),
-                    )
-                    self.journal.emit(
-                        "symbol_inject_applied",
-                        {"kind": "declaration_local", "symbol": symbol,
-                         "declaration": decl[:100],
-                         "block_lines": len(block), "path": path},
-                        step_index=self.step, path=path,
-                        unit_id=unit.unit_id)
-                    return [(wf_unit, wf_cand)]
+                    for decl in decls:
+                        # v3 (the 0127 lesson): transplant the CONTIGUOUS
+                        # DECLARATION BLOCK — the single-line insert's own
+                        # arguments were undeclared (state -> tokens).
+                        for side_name in ("current", "replayed"):
+                            block = expand_declaration_block(
+                                sides.get(side_name, ""), decl, symbol)
+                            if len(block) > 1:
+                                break
+                        # v3.4: anchor at the FAILING use, not the
+                        # first mention (a donor function earlier in
+                        # the file must not capture the insert).
+                        repaired = inject_local_block(
+                            spliced, block, symbol,
+                            use_idx_hint=_fail_line)
+                        if repaired is None or repaired == spliced:
+                            repaired = inject_local_declaration(
+                                spliced, block[0], symbol,
+                                use_idx_hint=_fail_line)
+                        if repaired is None or repaired == spliced:
+                            continue
+                        wf_unit = unit.model_copy(
+                            update={"marker_span": None,
+                                    "unit_kind": "whole_file"})
+                        wf_cand = CandidateResolution(
+                            candidate_id=(unit.unit_id + ":decllocal"),
+                            unit_id=unit.unit_id,
+                            model_name="deterministic",
+                            resolved_text=repaired,
+                            prompt_version="deterministic_local_declaration",
+                            provenance="deterministic_symbol_injection",
+                            self_reported_confidence=0.0,
+                            explanation=(
+                                f"S28-197 v3 declaration block ({len(block)} "
+                                f"lines) for {symbol}: {decl[:70]}"),
+                        )
+                        self.journal.emit(
+                            "symbol_inject_applied",
+                            {"kind": "declaration_local", "symbol": symbol,
+                             "declaration": decl[:100],
+                             "block_lines": len(block), "path": path},
+                            step_index=self.step, path=path,
+                            unit_id=unit.unit_id)
+                        return [(wf_unit, wf_cand)]
         # C1b REPLACE mode: for corrupted-line errors, try replacing the
         # corrupted line with its parent counterpart (verbatim, LCS-anchored).
         # P4a (sprint-24): SKIP line-replacement for implicit-declaration
@@ -14458,7 +14480,12 @@ class Orchestrator:
         # S28-197: under the flag, the not-declared class skips
         # line_replace too — a use-site swap cannot fix a missing
         # declaration (it renames the missing symbol instead).
-        _skip_replace = _is_implicit_decl or (_decl_mode and _not_declared)
+        # v3.4: the artifact subclass (failing use line in NO side)
+        # keeps line_replace — the use site itself is the corruption
+        # and the sides' own line is the replacement (0126's
+        # `cache.GetTokenizer()` hybrid exists in no side).
+        _skip_replace = _is_implicit_decl or (
+            _decl_mode and _not_declared and _use_in_sides)
         from capybase.verification import find_replacement_line
         _replace = None if _skip_replace else find_replacement_line(
             spliced, msgs, language,

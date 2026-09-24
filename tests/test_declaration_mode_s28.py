@@ -284,3 +284,137 @@ def test_same_function_boundary_detection():
     lines = ["int a(){", "  int x;", "}", "", "int b(){", "  int y;", "}"]
     assert _same_function(lines, 1, 1) is True
     assert _same_function(lines, 1, 5) is False  # crossed the boundary
+
+
+# ---------------------------------------------------------------------------
+# S28-197 v3.4: the pilot4 reads — the suffix false positive, the
+# namespace-blind scope test, failing-use anchoring, the artifact split
+# ---------------------------------------------------------------------------
+
+def test_decl_shape_rejects_suffix_collisions():
+    """pilot4 0126: `local_cache = make_uniq<ParserCache>();` matched as
+    a declaration of `cache` (the type token absorbed the `local_`
+    prefix), giving the guard a false _existing."""
+    from capybase.verification import _declaration_line_idx
+    lines = ["\tlocal_cache = make_uniq<ParserCache>();",
+             "\tParserCache cache;",
+             "\tauto &cache = GetCache();"]
+    assert _declaration_line_idx(lines, "cache") == 1
+    assert _declaration_line_idx(lines[:1], "cache") is None
+
+
+def test_same_function_namespace_aware():
+    """pilot4 0126: the whole file sits inside `namespace duckdb {}` —
+    depth never returns to 0, so the s27 depth-0 test called ANY two
+    lines same-function (line 34 vs 375) and the guard skipped."""
+    from capybase.verification import _same_function
+    ns = ["namespace duckdb {",
+          "void a() {",
+          "  auto &cache = GetCache();",
+          "}",
+          "void b() {",
+          "  cache.GetTokenizer();",
+          "}",
+          "}"]
+    assert _same_function(ns, 2, 5) is False   # different functions
+    assert _same_function(ns, 4, 5) is True    # same function
+    assert _same_function(ns, 0, 5) is True    # namespace scope: visible
+
+
+def test_same_function_block_visibility():
+    """The enclosing-depth drop IS C++ visibility: a local declared in an
+    if-block is out of scope once the block closes."""
+    from capybase.verification import _same_function
+    src = ["void f() {",
+           "  if (x) {",
+           "    Tokenizer t(a, b);",
+           "  }",
+           "  t.use();",
+           "}"]
+    assert _same_function(src, 2, 4) is False  # block closed in between
+    assert _same_function(src, 1, 4) is True   # function-level: visible
+
+
+def test_hint_anchors_at_the_failing_use():
+    """pilot4 0126: first-use anchoring put the insert in the DONOR
+    function (its own `cache` reference at line 43); the failing use
+    sat at 375. The hint pins the insert to the failing scope."""
+    buf = ("void donor() {\n"
+           "  auto &cache = GetCache();\n"
+           "  cache.GetMatcher();\n"
+           "}\n"
+           "void failing() {\n"
+           "  cache.GetTokenizer();\n"
+           "}\n")
+    out = inject_local_declaration(
+        buf, "ParserCache cache;", "cache", use_idx_hint=5)
+    lines = out.splitlines()
+    assert lines[5].strip() == "ParserCache cache;"
+    assert lines[6].strip().startswith("cache.GetTokenizer")
+
+
+def test_hint_ignored_when_line_lacks_the_symbol():
+    buf = "int main() {\n  tokenizer.x();\n}\n"
+    out = inject_local_declaration(
+        buf, "Tokenizer t(a);", "tokenizer", use_idx_hint=0)
+    assert out is not None
+    assert out.splitlines()[1].startswith("Tokenizer")
+
+
+def test_block_insert_hint_anchors_at_the_failing_use():
+    from capybase.verification import inject_local_block
+    buf = ("void donor() {\n"
+           "  auto &cache = GetCache();\n"
+           "}\n"
+           "void failing() {\n"
+           "  cache.x();\n"
+           "}\n")
+    out = inject_local_block(
+        buf, ["ParserCache cache;", "Helper helper;"], "cache",
+        use_idx_hint=4)
+    lines = out.splitlines()
+    assert lines[4].startswith("ParserCache cache;")
+    assert lines[5].strip() == "Helper helper;"
+
+
+ARTIFACT_SIDES = {
+    "current": "int other() {\n  phantom2.Symbol();\n}\n",
+    "replayed": "int other2() {\n  int x = 4;\n}\n",
+}
+
+
+def test_artifact_use_line_falls_to_line_replace(monkeypatch):
+    """v3.4 split: a failing use line that exists in NO side is a splice
+    artifact — the declaration family declines (no declaration can fix
+    an invented use site) and line_replace owns the round."""
+    import capybase.orchestrator as orch_mod
+    orch = _orch(flag=True, sides=ARTIFACT_SIDES)
+    buf = "int main(){\n  phantom.Symbol();\n}\n"
+    monkeypatch.setattr(orch_mod, "_resolved_buffer",
+                        lambda original, accepted: buf)
+    orch._try_symbol_injection_repair(
+        "src/p.cpp", "orig", _accepted(),
+        _failures("src/p.cpp:2:3: error: 'phantom' was not declared in this scope"),
+        0)
+    kinds = [p.get("kind") for e, p in orch.journal.events
+             if e == "symbol_inject_applied"]
+    assert "declaration_local" not in kinds
+    assert "declaration_hoist" not in kinds
+    assert "line_replace" in kinds
+
+
+def test_verbatim_use_keeps_the_declaration_class(monkeypatch):
+    """The complementary half of the split: a failing use line that IS
+    verbatim in a side (the 0127 family) keeps v3.3 semantics —
+    declaration insert, no line_replace."""
+    import capybase.orchestrator as orch_mod
+    orch = _orch(flag=True, sides=SIDES)
+    monkeypatch.setattr(
+        orch_mod, "_resolved_buffer",
+        lambda original, accepted: "int main(){\n  tokenizer.TokenizeInput();\n}\n")
+    orch._try_symbol_injection_repair(
+        "src/p.cpp", "orig", _accepted(), _failures(), 0)
+    kinds = [p.get("kind") for e, p in orch.journal.events
+             if e == "symbol_inject_applied"]
+    assert "declaration_local" in kinds
+    assert "line_replace" not in kinds

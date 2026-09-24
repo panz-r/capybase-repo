@@ -2647,7 +2647,8 @@ def inject_symbol_declaration(
 
 
 def inject_local_declaration(
-    buffer: str, decl_line: str, symbol: str,
+    buffer: str, decl_line: str, symbol: str, *,
+    use_idx_hint: int | None = None,
 ) -> str | None:
     """S28-197: insert a FUNCTION-LOCAL declaration before the symbol's
     first use. ``inject_symbol_declaration`` splices at the file-scope
@@ -2658,7 +2659,13 @@ def inject_local_declaration(
     missing symbol — whack-a-mole, measured 34/34 in the corpus).
     Insert-before-first-use is the side's own relative position; the
     whole-file compile gate owns the verdict. None when the declaration
-    is already present or the symbol has no use site."""
+    is already present or the symbol has no use site.
+
+    v3.4 ``use_idx_hint``: the FAILING use's line (parsed from the
+    compiler error) — first-use is the wrong anchor when other functions
+    mention the symbol before the failing function does (pilot4 0126:
+    first use sat in an earlier donor function at line 43 while the
+    failing use sat at 375; the insert landed in the donor's scope)."""
     s = (decl_line or "").strip()
     if not s or "\n" in s:
         return None
@@ -2666,6 +2673,9 @@ def inject_local_declaration(
     norm = s.replace(" ", "")
     pat = re.compile(rf"\b{re.escape(symbol)}\b")
     use_idx = None
+    if use_idx_hint is not None and 0 <= use_idx_hint < len(lines) \
+            and pat.search(lines[use_idx_hint]):
+        use_idx = use_idx_hint
     for i, ln in enumerate(lines):
         if ln.strip().replace(" ", "") == norm:
             return None  # already declared
@@ -2677,7 +2687,11 @@ def inject_local_declaration(
     return "\n".join(lines) + ("\n" if (buffer or "").endswith("\n") else "")
 
 
-_DECL_SHAPE_TEMPLATE = r"^\s*(?:auto\s*&?|[\w:<>]+(?:\s*[&*])?)\s*{sym}\s*(?:\(|=|;)"
+# v3.4: the \b before {sym} is load-bearing — without it the type token
+# backtracks to absorb an underscore prefix and `local_cache = ...`
+# matches as a declaration of `cache` (pilot4 0126: the false _existing
+# guard then skipped the insert for the failing function's own local).
+_DECL_SHAPE_TEMPLATE = r"^\s*(?:auto\s*&?|[\w:<>]+(?:\s*[&*])?)\s*\b{sym}\s*(?:\(|=|;)"
 
 
 def _declaration_line_idx(lines: list[str], symbol: str) -> int | None:
@@ -2704,15 +2718,21 @@ def _brace_depths(lines: list[str]) -> list[int]:
 
 
 def _same_function(lines: list[str], a: int, b: int) -> bool:
-    """True when lines a and b sit in the same function body — no
-    top-level (depth-0) line between them. The 0126 lesson: `auto& cache`
-    in an EARLIER function neither hoists (wrong function to move from)
-    nor blocks the insert (a different scope's declaration is not THIS
-    scope's)."""
+    """True when a declaration at line ``a`` would still be IN SCOPE at
+    line ``b`` — no line between them closes below the declaration's own
+    enclosing depth. The s27 original keyed on depth-0 lines, which is
+    namespace-blind: in `namespace duckdb { ... }` the entire file sits
+    at depth >= 1 and function boundaries never reach 0, so ANY two
+    lines tested same-function (pilot4 0126: line 34 vs 375, different
+    functions). The enclosing-depth drop is also the C++ visibility
+    rule itself: a local declared inside an if-block (depth 3) is out
+    of scope once the block closes (back to 2), and a namespace-scope
+    declaration (depth 1) stays visible across the functions between."""
     depths = _brace_depths(lines)
     lo, hi = min(a, b), max(a, b)
+    base = depths[lo - 1] if lo > 0 else 0
     for i in range(lo, hi + 1):
-        if depths[i] <= 0:
+        if depths[i] < base:
             return False
     return True
 
@@ -2743,7 +2763,8 @@ def hoist_local_declaration(buffer: str, symbol: str) -> str | None:
 
 
 def inject_local_block(
-    buffer: str, block_lines: list[str], symbol: str,
+    buffer: str, block_lines: list[str], symbol: str, *,
+    use_idx_hint: int | None = None,
 ) -> str | None:
     """S28-197 v3: transplant a CONTIGUOUS DECLARATION BLOCK (the
     declaring line plus its referenced locals' declaring lines, bounded)
@@ -2751,13 +2772,18 @@ def inject_local_block(
     insert's own arguments were undeclared (state -> tokens, depth >= 3
     vs a budget of 2) — the block moves together, exactly as the real
     resolution moved it. None when the block is already present or the
-    symbol has no use site."""
+    symbol has no use site. v3.4 ``use_idx_hint``: insert before the
+    FAILING use (compiler-named), not the first mention — see
+    ``inject_local_declaration``."""
     if not block_lines or any("\n" in ln for ln in block_lines):
         return None
     lines = (buffer or "").splitlines()
     first_norm = block_lines[0].strip().replace(" ", "")
     use_pat = re.compile(rf"\b{re.escape(symbol)}\b")
     use_idx = None
+    if use_idx_hint is not None and 0 <= use_idx_hint < len(lines) \
+            and use_pat.search(lines[use_idx_hint]):
+        use_idx = use_idx_hint
     window = "\n".join(lines)
     for i, ln in enumerate(lines):
         if ln.strip().replace(" ", "") == first_norm and all(
