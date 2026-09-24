@@ -224,3 +224,26 @@ def test_expand_block_bounded_and_terminates():
     side += "\nMatchState state(v19);\n"
     block = expand_declaration_block(side, "MatchState state(v19);", "state")
     assert len(block) <= 5  # bounded despite the chain
+
+
+def test_expand_window_reaches_the_member_block():
+    """The 0127 pilot read: the referenced locals sit as the enclosing
+    scope's member block 8-11 lines ABOVE the use — the ±5 window
+    missed them (block_lines=1). The ±12 window reaches them."""
+    from capybase.verification import expand_declaration_block
+    lines = ["struct C {"]
+    lines += [f"  int filler{i};" for i in range(8)]
+    lines += [
+        "  vector<MatcherSuggestion> suggestions;",
+        "  ParseResultAllocator parse_allocator;",
+        "  idx_t max_token_index = 0;",
+        "  TokenIterator token_iterator(tokens);",
+        "  MatchState state(token_iterator, suggestions, parse_allocator, max_token_index);",
+    ]
+    side = "\n".join(lines)
+    block = expand_declaration_block(
+        side, "MatchState state(token_iterator, suggestions, parse_allocator, max_token_index);", "state")
+    assert any("suggestions;" in ln for ln in block)
+    assert any("parse_allocator;" in ln for ln in block)
+    assert any("max_token_index" in ln for ln in block)
+    assert len(block) <= 5

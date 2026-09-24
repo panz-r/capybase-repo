@@ -2765,7 +2765,13 @@ def expand_declaration_block(
     if not referenced:
         return [decl_line]
     block = [decl_line]
-    for i in range(max(0, idx - max_lines), min(len(lines), idx + max_lines + 1)):
+    # S28-197 v3.1 (the 0127 pilot read): the referenced locals often sit
+    # as the enclosing scope's MEMBER BLOCK 8-11 lines above the use — a
+    # ±max_lines window missed them (block_lines=1, the transplant degraded
+    # to the single-line insert and the chain survived). The WALK window
+    # widens to ±12; the BLOCK cap (max_lines) still governs termination.
+    _walk = max(12, max_lines)
+    for i in range(max(0, idx - _walk), min(len(lines), idx + _walk + 1)):
         if i == idx:
             continue
         ln = lines[i]
