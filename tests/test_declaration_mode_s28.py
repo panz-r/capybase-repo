@@ -151,3 +151,76 @@ def test_not_declared_class_skips_line_replace_under_flag(monkeypatch):
     kinds = [p.get("kind") for e, p in orch.journal.events
              if e == "symbol_inject_applied"]
     assert "line_replace" not in kinds
+
+
+# ---------------------------------------------------------------------------
+# S28-197 v2: the hoist variant
+# ---------------------------------------------------------------------------
+
+def test_hoist_moves_decl_above_use():
+    from capybase.verification import hoist_local_declaration
+    buf = ("int main(){\n"
+           "  tokenizer.TokenizeInput();\n"
+           "  Tokenizer tokenizer(behavior);\n"
+           "}\n")
+    out = hoist_local_declaration(buf, "tokenizer")
+    lines = out.splitlines()
+    decl_i = next(i for i, l in enumerate(lines) if "Tokenizer tokenizer" in l)
+    use_i = next(i for i, l in enumerate(lines) if "TokenizeInput" in l)
+    assert decl_i < use_i
+    assert len(lines) == 4  # a move: line count unchanged
+
+
+def test_hoist_declines_when_ordered_or_absent():
+    from capybase.verification import hoist_local_declaration
+    ordered = ("int main(){\n"
+               "  Tokenizer tokenizer(behavior);\n"
+               "  tokenizer.TokenizeInput();\n}\n")
+    assert hoist_local_declaration(ordered, "tokenizer") is None
+    assert hoist_local_declaration("int main(){\n}\n", "tokenizer") is None
+
+
+# ---------------------------------------------------------------------------
+# S28-197 v3: the block transplant
+# ---------------------------------------------------------------------------
+
+def test_block_insert_moves_the_whole_block():
+    from capybase.verification import inject_local_block
+    buf = "int main(){\n  state.Match();\n}\n"
+    block = ["auto tokens = lex();",
+             "MatchState state(tokens, suggestions);"]
+    out = inject_local_block(buf, block, "state")
+    lines = out.splitlines()
+    assert lines[1].strip() == "auto tokens = lex();"
+    assert lines[2].strip() == "MatchState state(tokens, suggestions);"
+    assert lines[3].strip() == "state.Match();"
+
+
+def test_block_already_present_dedupes():
+    from capybase.verification import inject_local_block
+    block = ["auto tokens = lex();",
+             "MatchState state(tokens, suggestions);"]
+    buf = "int main(){\n" + "\n".join(block) + "\n  state.Match();\n}\n"
+    assert inject_local_block(buf, block, "state") is None
+
+
+def test_expand_block_collects_referenced_locals():
+    from capybase.verification import expand_declaration_block
+    side = ("int main(){\n"
+            "  auto tokens = TokenizeAll();\n"
+            "  auto suggestions = allocator.Make();\n"
+            "  MatchState state(tokens, suggestions);\n"
+            "  state.Match();\n"
+            "}\n")
+    block = expand_declaration_block(side, "MatchState state(tokens, suggestions);", "state")
+    assert any("auto tokens" in ln for ln in block)
+    assert any("auto suggestions" in ln for ln in block)
+    assert len(block) <= 5
+
+
+def test_expand_block_bounded_and_terminates():
+    from capybase.verification import expand_declaration_block
+    side = "\n".join(f"auto v{i} = f(v{i-1});" for i in range(20))
+    side += "\nMatchState state(v19);\n"
+    block = expand_declaration_block(side, "MatchState state(v19);", "state")
+    assert len(block) <= 5  # bounded despite the chain

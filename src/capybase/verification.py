@@ -2677,6 +2677,109 @@ def inject_local_declaration(
     return "\n".join(lines) + ("\n" if (buffer or "").endswith("\n") else "")
 
 
+_DECL_SHAPE_TEMPLATE = r"^\s*(?:auto\s*&?|[\w:<>]+(?:\s*[&*])?)\s*{sym}\s*(?:\(|=|;)"
+
+
+def _declaration_line_idx(lines: list[str], symbol: str) -> int | None:
+    """Index of the first line that DECLARES ``symbol`` (the declaration
+    shape: `Type sym(`, `Type sym =`, `Type sym;`, `auto& sym =`)."""
+    pat = re.compile(_DECL_SHAPE_TEMPLATE.format(sym=re.escape(symbol)))
+    for i, ln in enumerate(lines):
+        if pat.match(ln):
+            return i
+    return None
+
+
+def hoist_local_declaration(buffer: str, symbol: str) -> str | None:
+    """S28-197 v2: MOVE an existing declaration above the symbol's first
+    use — the out-of-order subclass (0126: `auto& cache = GetCache();`
+    existed BELOW the use; inserting a second declaration conflicted).
+    A move, not an insert: no new content enters the file. None when no
+    declaration exists or it is already above the first use."""
+    lines = (buffer or "").splitlines()
+    decl_idx = _declaration_line_idx(lines, symbol)
+    if decl_idx is None:
+        return None
+    use_pat = re.compile(rf"\b{re.escape(symbol)}\b")
+    for i, ln in enumerate(lines):
+        if i == decl_idx:
+            continue
+        if use_pat.search(ln):
+            if i > decl_idx:
+                return None  # already ordered
+            decl_line = lines.pop(decl_idx)
+            lines.insert(i, decl_line)
+            return "\n".join(lines) + ("\n" if (buffer or "").endswith("\n") else "")
+    return None
+
+
+def inject_local_block(
+    buffer: str, block_lines: list[str], symbol: str,
+) -> str | None:
+    """S28-197 v3: transplant a CONTIGUOUS DECLARATION BLOCK (the
+    declaring line plus its referenced locals' declaring lines, bounded)
+    before the symbol's first use. The 0127 lesson: the single-line
+    insert's own arguments were undeclared (state -> tokens, depth >= 3
+    vs a budget of 2) — the block moves together, exactly as the real
+    resolution moved it. None when the block is already present or the
+    symbol has no use site."""
+    if not block_lines or any("\n" in ln for ln in block_lines):
+        return None
+    lines = (buffer or "").splitlines()
+    first_norm = block_lines[0].strip().replace(" ", "")
+    use_pat = re.compile(rf"\b{re.escape(symbol)}\b")
+    use_idx = None
+    window = "\n".join(lines)
+    for i, ln in enumerate(lines):
+        if ln.strip().replace(" ", "") == first_norm and all(
+                any(b.strip() == l.strip() for l in lines[i:i + len(block_lines)])
+                for b in block_lines):
+            return None  # block already present
+        if use_idx is None and use_pat.search(ln):
+            use_idx = i
+    if use_idx is None or window.count(block_lines[0].strip()) > 0 and any(
+            block_lines[0].strip() in ln for ln in lines):
+        return None
+    out = lines[:use_idx] + list(block_lines) + lines[use_idx:]
+    return "\n".join(out) + ("\n" if (buffer or "").endswith("\n") else "")
+
+
+def expand_declaration_block(
+    side_text: str, decl_line: str, symbol: str, *, max_lines: int = 5,
+) -> list[str]:
+    """S28-197 v3: expand a declaring line into its contiguous
+    declaration block from the side — the declaring line plus the
+    contiguous lines above/below it (within the bound) that themselves
+    declare locals referenced in the declaring line's arguments. The
+    bounded walk terminates on cycles by the line cap."""
+    lines = (side_text or "").splitlines()
+    idx = next((i for i, ln in enumerate(lines)
+                if ln.strip() == decl_line.strip()), None)
+    if idx is None:
+        return [decl_line]
+    # locals referenced in the declaration (constructor args / initializer)
+    arg_pat = re.compile(r"\b([a-z_][a-z0-9_]*)\b")
+    keywords = {symbol, "auto", "const", "static", "true", "false", "nullptr"}
+    referenced = {t for t in arg_pat.findall(decl_line)
+                  if t not in keywords and not t[0].isupper()}
+    if not referenced:
+        return [decl_line]
+    block = [decl_line]
+    for i in range(max(0, idx - max_lines), min(len(lines), idx + max_lines + 1)):
+        if i == idx:
+            continue
+        ln = lines[i]
+        if any(re.match(_DECL_SHAPE_TEMPLATE.format(sym=re.escape(sym)), ln)
+               for sym in referenced):
+            if ln not in block:
+                block.append(ln)
+        if len(block) >= max_lines:
+            break
+    # preserve the side's order
+    side_order = [ln for ln in lines if ln in block]
+    return side_order if side_order else [decl_line]
+
+
 def find_replacement_line(
     buffer: str, error_text: str, language: str | None,
     *parent_texts: str,
