@@ -2677,12 +2677,18 @@ def inject_local_declaration(
             and pat.search(lines[use_idx_hint]):
         use_idx = use_idx_hint
     for i, ln in enumerate(lines):
-        if ln.strip().replace(" ", "") == norm:
-            return None  # already declared
         if use_idx is None and pat.search(ln):
             use_idx = i
     if use_idx is None:
         return None
+    # v3.5 scope-aware dedup (the pilot4 0127 read): an identical
+    # declaration in a DONOR function must not block the insert — only
+    # a declaration in the failing use's own scope does (each function
+    # carries its own local; the side's pattern).
+    for i, ln in enumerate(lines):
+        if ln.strip().replace(" ", "") == norm and _same_function(
+                lines, i, use_idx):
+            return None  # already declared in this scope
     lines.insert(use_idx, s)
     return "\n".join(lines) + ("\n" if (buffer or "").endswith("\n") else "")
 
@@ -2778,23 +2784,36 @@ def inject_local_block(
     if not block_lines or any("\n" in ln for ln in block_lines):
         return None
     lines = (buffer or "").splitlines()
-    first_norm = block_lines[0].strip().replace(" ", "")
     use_pat = re.compile(rf"\b{re.escape(symbol)}\b")
     use_idx = None
     if use_idx_hint is not None and 0 <= use_idx_hint < len(lines) \
             and use_pat.search(lines[use_idx_hint]):
         use_idx = use_idx_hint
-    window = "\n".join(lines)
-    for i, ln in enumerate(lines):
-        if ln.strip().replace(" ", "") == first_norm and all(
-                any(b.strip() == l.strip() for l in lines[i:i + len(block_lines)])
-                for b in block_lines):
-            return None  # block already present
-        if use_idx is None and use_pat.search(ln):
-            use_idx = i
-    if use_idx is None or window.count(block_lines[0].strip()) > 0 and any(
-            block_lines[0].strip() in ln for ln in lines):
+    if use_idx is None:
+        for i, ln in enumerate(lines):
+            if use_pat.search(ln):
+                use_idx = i
+                break
+    if use_idx is None:
         return None
+    # v3.5 (the pilot4 0127 read): presence keys on the ANCHOR — the
+    # block line that declares the symbol — and is scope-aware. The
+    # v3 key keyed on block_lines[0], which after side-order
+    # preservation is the first GENERIC local (`vector<MatcherToken>
+    # tokens;`): a donor function's identical local nulled the whole
+    # transplant, and the single-line fallback then re-inserted that
+    # generic line (or declined on it) — the symbol's declaration
+    # never moved. Only an anchor IN THE USE'S OWN SCOPE blocks.
+    anchor = next((ln for ln in block_lines
+                   if re.match(_DECL_SHAPE_TEMPLATE.format(
+                       sym=re.escape(symbol)), ln)), None)
+    if anchor is None:
+        return None
+    a_norm = anchor.strip().replace(" ", "")
+    for i, ln in enumerate(lines):
+        if (ln.strip().replace(" ", "") == a_norm
+                and _same_function(lines, i, use_idx)):
+            return None  # already declared in this scope
     out = lines[:use_idx] + list(block_lines) + lines[use_idx:]
     return "\n".join(out) + ("\n" if (buffer or "").endswith("\n") else "")
 
@@ -2805,40 +2824,49 @@ def expand_declaration_block(
     """S28-197 v3: expand a declaring line into its contiguous
     declaration block from the side — the declaring line plus the
     contiguous lines above/below it (within the bound) that themselves
-    declare locals referenced in the declaring line's arguments. The
-    bounded walk terminates on cycles by the line cap."""
+    declare locals referenced in the declaring line's arguments.
+
+    v3.5 (the pilot4 0127 read): the walk is CONTIGUOUS in both
+    directions from the anchor and the anchor is kept as its RAW side
+    line. The v3.1 window walked a ±12 range and rebuilt the block by
+    side membership — which (a) let a same-text local from ANOTHER
+    function enter the block, and (b) dropped the anchor itself
+    whenever the side line carried leading whitespace: the anchor was
+    stored stripped (from find_symbol_declaration_lines) and the
+    membership rebuild compared raw lines against it, so
+    ``MatchState state(...);`` never matched its own tab-prefixed
+    copy — the "block" shipped without the symbol's declaration."""
     lines = (side_text or "").splitlines()
     idx = next((i for i, ln in enumerate(lines)
                 if ln.strip() == decl_line.strip()), None)
     if idx is None:
         return [decl_line]
+    raw_decl = lines[idx]
     # locals referenced in the declaration (constructor args / initializer)
     arg_pat = re.compile(r"\b([a-z_][a-z0-9_]*)\b")
     keywords = {symbol, "auto", "const", "static", "true", "false", "nullptr"}
-    referenced = {t for t in arg_pat.findall(decl_line)
+    referenced = {t for t in arg_pat.findall(raw_decl)
                   if t not in keywords and not t[0].isupper()}
     if not referenced:
-        return [decl_line]
-    block = [decl_line]
-    # S28-197 v3.1 (the 0127 pilot read): the referenced locals often sit
-    # as the enclosing scope's MEMBER BLOCK 8-11 lines above the use — a
-    # ±max_lines window missed them (block_lines=1, the transplant degraded
-    # to the single-line insert and the chain survived). The WALK window
-    # widens to ±12; the BLOCK cap (max_lines) still governs termination.
-    _walk = max(12, max_lines)
-    for i in range(max(0, idx - _walk), min(len(lines), idx + _walk + 1)):
-        if i == idx:
-            continue
-        ln = lines[i]
-        if any(re.match(_DECL_SHAPE_TEMPLATE.format(sym=re.escape(sym)), ln)
-               for sym in referenced):
-            if ln not in block:
-                block.append(ln)
-        if len(block) >= max_lines:
-            break
-    # preserve the side's order
-    side_order = [ln for ln in lines if ln in block]
-    return side_order if side_order else [decl_line]
+        return [raw_decl]
+
+    def _declares(ln: str) -> bool:
+        return any(re.match(_DECL_SHAPE_TEMPLATE.format(sym=re.escape(s)), ln)
+                   for s in referenced)
+
+    # v3.5: contiguous walk — nearest neighbours ABOVE first (the C++
+    # local-declaration convention), then below, capped by max_lines.
+    block = [raw_decl]
+    i = idx - 1
+    while i >= 0 and len(block) < max_lines and _declares(lines[i]):
+        block.insert(0, lines[i])
+        i -= 1
+    j = idx + 1
+    while (j < len(lines) and len(block) < max_lines
+           and _declares(lines[j])):
+        block.append(lines[j])
+        j += 1
+    return block
 
 
 def find_replacement_line(

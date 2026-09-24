@@ -418,3 +418,117 @@ def test_verbatim_use_keeps_the_declaration_class(monkeypatch):
              if e == "symbol_inject_applied"]
     assert "declaration_local" in kinds
     assert "line_replace" not in kinds
+
+
+# ---------------------------------------------------------------------------
+# S28-197 v3.5: the pilot4 completion reads — the anchor dropped from the
+# block, the donor-function presence blocking the transplant
+# ---------------------------------------------------------------------------
+
+SIDE_0127 = """
+void donor(vector<MatcherToken> &tokens) {
+}
+vector<AutoCompleteSuggestion> Generate(AutoCompleteCatalogProvider &provider) {
+\tauto &parser_cache = provider.GetParserCache();
+\tvector<MatcherToken> tokens;
+\tvector<MatcherSuggestion> suggestions;
+\tParseResultAllocator parse_allocator;
+\tidx_t max_token_index = 0;
+\tMatchState state(tokens, suggestions, parse_allocator, max_token_index);
+\tvector<UnicodeSpace> unicode_spaces;
+\tAutoCompleteTokenizerBehavior behavior(sql, state);
+\ttokenizer.TokenizeInput();
+}
+"""
+
+BUFFER_0127 = """void OnLastToken(const Tokenizer &t, TokenizeState state, string w) {
+}
+vector<AutoCompleteSuggestion> Generate(AutoCompleteCatalogProvider &provider) {
+\tauto &parser_cache = provider.GetParserCache();
+\tvector<MatcherToken> tokens;
+\tvector<MatcherSuggestion> suggestions;
+\tParseResultAllocator parse_allocator;
+\tvector<UnicodeSpace> unicode_spaces;
+\tstring clean_sql;
+\tconst string &sql_ref = sql;
+\tAutoCompleteTokenizerBehavior behavior(sql_ref, state);
+\ttokenizer.TokenizeInput();
+}
+"""
+
+
+def test_expand_keeps_the_anchor_and_stays_contiguous():
+    """pilot4 0127: the v3.1 walk rebuilt the block by side membership,
+    and the stripped anchor never matched its own tab-prefixed side
+    line — the shipped 'block' was 4 generic locals with NO symbol
+    declaration. A same-text local in a donor function (line 3 here)
+    must also stay OUT (contiguity)."""
+    from capybase.verification import expand_declaration_block
+    decl = ("MatchState state(tokens, suggestions, parse_allocator, "
+            "max_token_index);")
+    block = expand_declaration_block(SIDE_0127, decl, "state")
+    # side order: referenced locals first, the anchor LAST (its ctor
+    # arguments need the locals declared first) — raw, tab-prefixed.
+    assert block[-1].strip() == decl
+    assert block[-1].startswith("\t")
+    assert any("max_token_index = 0" in b for b in block)
+    assert len(block) == 5                     # contiguous 199..203 shape
+    assert all("donor" not in b for b in block)
+
+
+def test_transplant_not_blocked_by_donor_generic_local():
+    """pilot4 0127: the v3 presence guard keyed on block_lines[0] — the
+    first GENERIC local, which the buffer's donor function already had
+    — so the whole transplant returned None and the rung fell through
+    to derived prototypes. v3.5 keys on the anchor, scope-aware."""
+    from capybase.verification import expand_declaration_block, inject_local_block
+    decl = ("MatchState state(tokens, suggestions, parse_allocator, "
+            "max_token_index);")
+    block = expand_declaration_block(SIDE_0127, decl, "state")
+    out = inject_local_block(
+        BUFFER_0127, block, "state", use_idx_hint=10)
+    assert out is not None
+    nl = out.splitlines()
+    # the 5-line block sits before the failing use (0-based 10):
+    # four locals then the anchor, then the use line
+    assert nl[14].strip() == decl
+    assert nl[15].strip().startswith("AutoCompleteTokenizerBehavior")
+    # the donor copies remain; the transplant added the missing pair
+    assert sum(1 for ln in nl if "vector<MatcherToken> tokens;" in ln) == 2
+    assert sum(1 for ln in nl if ln.strip().startswith("MatchState state(")) == 1
+
+
+def test_transplant_blocked_by_same_scope_anchor():
+    """The complementary pin: when the use's OWN scope already declares
+    the symbol, the transplant must still decline (no duplicates)."""
+    from capybase.verification import expand_declaration_block, inject_local_block
+    decl = ("MatchState state(tokens, suggestions, parse_allocator, "
+            "max_token_index);")
+    block = expand_declaration_block(SIDE_0127, decl, "state")
+    buf = BUFFER_0127.replace(
+        "\tvector<UnicodeSpace> unicode_spaces;",
+        "\tvector<UnicodeSpace> unicode_spaces;\n\t" + decl)
+    assert inject_local_block(buf, block, "state", use_idx_hint=11) is None
+
+
+def test_single_line_dedup_scope_aware():
+    """inject_local_declaration's dedup had the same buffer-global
+    flaw: an identical line in a DONOR function returned None (the
+    insert never happened). Only a same-scope copy declines now."""
+    buf = ("void donor() {\n"
+           "  ParserCache cache;\n"
+           "  cache.warm();\n"
+           "}\n"
+           "void failing() {\n"
+           "  cache.GetTokenizer();\n"
+           "}\n")
+    out = inject_local_declaration(buf, "ParserCache cache;", "cache",
+                                   use_idx_hint=5)
+    assert out is not None
+    assert out.splitlines()[5].strip() == "ParserCache cache;"
+    same_scope = ("void failing() {\n"
+                  "  ParserCache cache;\n"
+                  "  cache.GetTokenizer();\n"
+                  "}\n")
+    assert inject_local_declaration(
+        same_scope, "ParserCache cache;", "cache", use_idx_hint=2) is None
