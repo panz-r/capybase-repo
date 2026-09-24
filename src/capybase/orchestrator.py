@@ -14387,21 +14387,24 @@ class Orchestrator:
                     _declaration_line_idx, _same_function,
                 )
                 _spliced_lines = spliced.split("\n")
+                # S28-197 v3.3 (the pilot3 read): the guard keys on the
+                # FAILING USE — the error's own file:line — not the first
+                # mention (0126's side declares cache in THREE functions;
+                # the first mention sits in the decl's own function, so
+                # v3.2's any-use guard skipped the insert and the legacy
+                # tail fired at file scope where the TYPE wasn't visible).
+                _err_m = re.search(rf"[^\s:]*{re.escape(path)}:(\d+):\d+", msgs) or \
+                    re.search(r":(\d+):\d+: error:", msgs)
+                _fail_line = (int(_err_m.group(1)) - 1
+                              if _err_m and 0 < int(_err_m.group(1)) <= len(_spliced_lines)
+                              else None)
                 _existing = _declaration_line_idx(_spliced_lines, symbol)
                 if _existing is not None:
-                    # S28-197 v3.2 (the pilot2 0126 read): a declaration
-                    # in a DIFFERENT FUNCTION neither hoists nor blocks —
-                    # the use's scope still needs its own local, so the
-                    # insert proceeds (0126: `auto& cache` at :44 vs the
-                    # use at :375 crossed a function boundary and BOTH
-                    # v2 paths declined, leaving the legacy conflicting
-                    # insert).
-                    _first_use = next(
-                        (i for i, ln in enumerate(_spliced_lines)
-                         if i != _existing and re.search(
-                             rf"\b{re.escape(symbol)}\b", ln)), None)
-                    if _first_use is not None and _same_function(
-                            _spliced_lines, _existing, _first_use):
+                    # a declaration in the FAILING USE's own scope blocks;
+                    # every other function's declaration does not (each
+                    # function carries its own local — the side's pattern).
+                    if (_fail_line is not None and _same_function(
+                            _spliced_lines, _existing, _fail_line)):
                         continue  # same-scope declaration exists: skip
 
                 for decl in decls:
