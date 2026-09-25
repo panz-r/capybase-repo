@@ -175,6 +175,7 @@ def main() -> int:
     prompt_mon: dict[str, dict] = {}
     golden_path: dict[str, dict] = {}
     shattered: dict[str, int] = {}
+    shattered_warned: dict[str, int] = {}
     for case_id, d in _iter_journals(args.flights or ""):
         et = d.get("event_type") or ""
         journal_counts[et] = journal_counts.get(et, 0) + 1
@@ -223,6 +224,11 @@ def main() -> int:
                     pass
         elif et == "shattered_repair_accept":
             shattered[case_id] = shattered.get(case_id, 0) + 1
+            # S28-248: the rescue accepts on `passed` alone — count the
+            # accepts that carried advisory warnings (the 0113 bypass
+            # population).
+            if p.get("warnings"):
+                shattered_warned[case_id] = shattered_warned.get(case_id, 0) + 1
         if et in ("llm_skipped_oversized", "llm_skipped_oversized_prompt"):
             oversized_cases.add(case_id)
         elif et == "class_member_split_candidate":
@@ -258,6 +264,7 @@ def main() -> int:
         "golden_path_total_hit_prompts": sum(
             v["hits"] for v in golden_path.values()),
         "shattered_repair_accepts": dict(sorted(shattered.items())),
+        "shattered_repair_accepts_warned": dict(sorted(shattered_warned.items())),
     }
     report["journal_events"] = journal_counts
     report["oversized_cohort"] = sorted(oversized_cases)

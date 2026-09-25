@@ -18351,10 +18351,22 @@ class Orchestrator:
                                         self._journal_validation(
                                             unit, _sh_cand, _sh_val)
                                         if _sh_val.passed:
+                                            # S28-248: the rescue accepts on
+                                            # `passed` alone — journal the
+                                            # warnings so the harvest can size
+                                            # how often warned content enters
+                                            # via this bypass (0113: the same
+                                            # both_sides_represented warning
+                                            # the main loop rejected one draw
+                                            # earlier). Telemetry-first; any
+                                            # parity gate rides a later flag.
                                             self.journal.emit(
                                                 "shattered_repair_accept",
                                                 {"unit_id": unit.unit_id,
-                                                 "candidate_id": _sh_cand.candidate_id},
+                                                 "candidate_id": _sh_cand.candidate_id,
+                                                 "warnings": [
+                                                     getattr(w, "validator", "")
+                                                     for w in (_sh_val.warnings or [])]},
                                                 step_index=self.step,
                                                 path=unit.path,
                                                 unit_id=unit.unit_id)
