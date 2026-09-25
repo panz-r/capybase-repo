@@ -1,13 +1,14 @@
 """S28-233/243 (queue item 4) — the terminal-path arms.
 
-0052's trial15 ground truth: all sibling units resolve, one unit
-exhausts (the no-progress guard on the unterminated docstring seam),
-and the file's escalated exit returns BEFORE Phase 2 — the beam's
-arms are structurally unreachable there (zero file_validated /
-whole_file_repair events in the session journal). The terminal
-engagement runs at that exit: substrate = accepted splices + the
-escalated unit's best attempt; the pystring closer first; the arm's
-whole-file output re-validated before it may rescue.
+0052's trial15 ground truth: the session is the per-unit loop only —
+zero file_validated / whole_file_repair events; the escalated exit
+returns BEFORE Phase 2 and the beam's arms are structurally
+unreachable there. The terminal engagement runs at that exit, ONCE
+per file, with the FULL near-miss assembly as substrate (the S28-257
+pilot: a partial substrate splices a fragment of the file and the
+seam is invisible to it — six no_imbalance declines). The pystring
+closer runs first; its whole-file output is re-validated before it
+may rescue.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ class _FakeJournal:
         self.events.append((et, payload))
 
 
-def _orchestrator(monkeypatch, gate_passed: bool):
+def _orchestrator(gate_passed: bool):
     orch = object.__new__(Orchestrator)
     orch.journal = _FakeJournal()
     orch.step = 1
@@ -75,73 +76,77 @@ def _orchestrator(monkeypatch, gate_passed: bool):
     return orch
 
 
-def _esc_outcome():
-    """The exhausted unit: attempts carry the seam defect; the last
-    validation names the unterminated string."""
-    u = _unit("sklearn/svm/classes.py:1:5", (2, 7))
-    attempts = [_cand("    '''Fit the model.\n    x = 1\n", "a1")]
-    validation = SimpleNamespace(hard_failures=[SimpleNamespace(
+_PYSTR_FAIL = SimpleNamespace(
+    message="SyntaxError: unterminated triple-quoted string literal "
+            "(detected at line 2)")
+
+
+def _near_miss_substrate():
+    """The FULL near-miss assembly: accepted splices + every exhausted
+    unit's best attempt (the S28-257 pilot's substrate fix)."""
+    esc_unit = _unit("sklearn/svm/classes.py:1:5", (2, 7))
+    esc_attempt = _cand("    '''Fit the model.\n    x = 1\n", "a1")
+    esc_failures = [SimpleNamespace(
         message="SyntaxError: unterminated triple-quoted string literal "
-                "(detected at line 2)")])
-    return SimpleNamespace(unit=u, attempts=attempts,
-                           validation=validation)
-
-
-def _accepted():
-    """Two sibling units already resolved (the 0052 shape)."""
-    return [
+                "(detected at line 2)")]
+    substrate = [
         (_unit("sklearn/svm/classes.py:1:0", (0, 2)),
          _cand("def fit(self):\n", "s0")),
         (_unit("sklearn/svm/classes.py:1:6", (7, 9)),
          _cand("    '''\n    return 1\n", "s6")),
+        (esc_unit, esc_attempt),
     ]
+    return substrate, esc_failures
 
 
 def test_terminal_arms_rescue_when_the_gate_passes(monkeypatch):
-    orch = _orchestrator(monkeypatch, gate_passed=True)
-    accepted = _accepted()
-    # the arm splices the seam defect into the buffer and closes it —
-    # stub the arm to return the closed whole file
+    orch = _orchestrator(gate_passed=True)
+    substrate, failures = _near_miss_substrate()
     import capybase.orchestrator as om
 
     def _fake_arm(failures, original, acc, idx):
-        assert idx == 2  # the escalated unit is the substrate's last
-        wf_u = _unit("sklearn/svm/classes.py:1:5", None)
-        wf_u = wf_u.model_copy(update={"marker_span": None,
-                                       "unit_kind": "whole_file"})
-        return [(wf_u, _cand("def fit(self):\n    '''Fit the model.\n"
-                             "    x = 1\n    '''\n    return 1\n",
-                             "a1:pystringfix"))], "repaired"
+        assert idx == len(acc) - 1  # the last substrate entry
+        assert any("unterminated" in (getattr(f, "message", "") or "")
+                   for f in failures)
+        wf_u = _unit("sklearn/svm/classes.py:1:5", None).model_copy(
+            update={"marker_span": None, "unit_kind": "whole_file"})
+        fixed = ("def fit(self):\n    '''Fit the model.\n"
+                 "    x = 1\n    '''\n    return 1\n")
+        return [(wf_u, _cand(fixed, "a1:pystringfix"))], "repaired"
 
     monkeypatch.setattr(om, "_try_deterministic_pystring_repair", _fake_arm)
-    out = orch._terminal_path_arms("sklearn/svm/classes.py", accepted,
-                                   _esc_outcome())
+    out = orch._terminal_path_arms("sklearn/svm/classes.py", substrate,
+                                   [_PYSTR_FAIL])
     assert out is not None
     assert out[0][1].resolved_text.startswith("def fit(self):")
     kinds = [e[0] for e in orch.journal.events]
-    assert "terminal_arms_engaged" in kinds
+    assert kinds.count("terminal_arms_engaged") == 1  # ONCE per file
     assert "terminal_arm_applied" in kinds
 
 
 def test_terminal_arms_decline_on_non_string_failures(monkeypatch):
-    orch = _orchestrator(monkeypatch, gate_passed=True)
+    orch = _orchestrator(gate_passed=True)
+    substrate, _ = _near_miss_substrate()
     import capybase.orchestrator as om
 
     def _fake_arm(failures, original, acc, idx):
         return None, "not_string_failure"
 
     monkeypatch.setattr(om, "_try_deterministic_pystring_repair", _fake_arm)
-    out = orch._terminal_path_arms("sklearn/svm/classes.py", _accepted(),
-                                   _esc_outcome())
+    out = orch._terminal_path_arms(
+        "sklearn/svm/classes.py", substrate,
+        [SimpleNamespace(message="SyntaxError: invalid syntax")])
     assert out is None
-    kinds = [e[0] for e in orch.journal.events]
-    assert "terminal_arms_declined" in kinds
+    declined = [p for et, p in orch.journal.events
+                if et == "terminal_arms_declined"]
+    assert declined and declined[0]["reason"] == "not_string_failure"
 
 
 def test_terminal_arms_decline_when_the_gate_rejects(monkeypatch):
     """The rescue must re-validate: a gate-rejected arm output never
     lands."""
-    orch = _orchestrator(monkeypatch, gate_passed=False)
+    orch = _orchestrator(gate_passed=False)
+    substrate, failures = _near_miss_substrate()
     import capybase.orchestrator as om
 
     def _fake_arm(failures, original, acc, idx):
@@ -150,17 +155,16 @@ def test_terminal_arms_decline_when_the_gate_rejects(monkeypatch):
         return [(wf_u, _cand("def fit(self):\n", "a1:pystringfix"))], "repaired"
 
     monkeypatch.setattr(om, "_try_deterministic_pystring_repair", _fake_arm)
-    out = orch._terminal_path_arms("sklearn/svm/classes.py", _accepted(),
-                                   _esc_outcome())
+    out = orch._terminal_path_arms("sklearn/svm/classes.py", substrate,
+                                   [_PYSTR_FAIL])
     assert out is None
     declined = [p for et, p in orch.journal.events
                 if et == "terminal_arms_declined"]
     assert declined and declined[0]["reason"] == "gate_rejected"
 
 
-def test_terminal_arms_decline_without_a_usable_attempt():
-    orch = _orchestrator(None, gate_passed=True)
-    esc = _esc_outcome()
-    esc.attempts = []
-    assert orch._terminal_path_arms("sklearn/svm/classes.py", _accepted(),
-                                    esc) is None
+def test_terminal_arms_decline_on_an_empty_substrate():
+    orch = _orchestrator(gate_passed=True)
+    assert orch._terminal_path_arms(
+        "sklearn/svm/classes.py", [],
+        [SimpleNamespace(message="SyntaxError: unterminated")]) is None

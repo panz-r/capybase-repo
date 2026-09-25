@@ -10335,58 +10335,47 @@ class Orchestrator:
         # chains); never escalates.
         return StepResult(step_index=self.step, escalated=False, continued=True)
 
-    def _terminal_path_arms(self, path: str, accepted: list, esc_outcome):
+    def _terminal_path_arms(self, path: str, substrate: list,
+                            failures: list):
         """S28-233/243 (queue item 4): the deterministic arms at the
         session's TERMINAL escalation exit.
 
-        0052's trial15 shape: all sibling units resolve, one unit
-        exhausts (the no-progress guard), and the file's escalated exit
-        returns BEFORE Phase 2 — the beam's arms (and the S28-233 skip
-        census) are structurally unreachable there. This engagement
-        runs at that exit: substrate = the accepted splices + the
-        escalated unit's BEST attempt (its near-miss content), arms =
+        0052's pilot (S28-257) shaped this: the arms engage ONCE per
+        file, and the substrate is the FULL near-miss assembly — every
+        unit contributes its accepted resolution or, when it exhausted,
+        its best attempt — because a partial substrate splices only a
+        fragment of the file and the seam defect is invisible to it
+        (six no_imbalance declines on the pilot's first read). Arms:
         the pystring closer first (the scikit population's signature),
         and the arm's whole-file output is RE-VALIDATED by the gate
         before it may rescue. Zero new model requests. Returns the
         replacement ``accepted`` list (the whole-file candidate), or
         None to let the escalation stand."""
-        unit = esc_outcome.unit
-        best = None
-        for _c in reversed(esc_outcome.attempts or []):
-            if (getattr(_c, "resolved_text", "") or "").strip():
-                best = _c
-                break
-        if best is None or not accepted:
+        if not substrate:
             return None
-        _accepted = list(accepted) + [(unit, best)]
-        _original = unit.original_worktree_text
-        _failures = list(
-            getattr(getattr(esc_outcome, "validation", None),
-                    "hard_failures", None) or [])
         self.journal.emit(
             "terminal_arms_engaged",
-            {"path": path, "unit_id": unit.unit_id,
-             "substrate_units": len(_accepted),
-             "attempt_used": best.candidate_id},
-            step_index=self.step, path=path, unit_id=unit.unit_id,
+            {"path": path, "substrate_units": len(substrate)},
+            step_index=self.step, path=path,
         )
         # the pystring closer first — the scikit population's dominant
         # signature (unterminated triple-quoted string at the inter-unit
         # docstring seam)
         det, diag = _try_deterministic_pystring_repair(
-            _failures, _original, _accepted, len(_accepted) - 1)
+            failures, substrate[0][0].original_worktree_text,
+            substrate, len(substrate) - 1)
         if det is None:
             self.journal.emit(
                 "terminal_arms_declined",
                 {"path": path, "arm": "pystring", "reason": diag},
-                step_index=self.step, path=path, unit_id=unit.unit_id,
+                step_index=self.step, path=path,
             )
             return None
         _unit_new, _cand_new = det[0]
         try:
             _val = self.verification.verify_file(
-                path, unit.language, _original, [],
-                repo_root=str(self.git.repo),
+                path, _unit_new.language, _unit_new.original_worktree_text,
+                [], repo_root=str(self.git.repo),
                 whole_text=_cand_new.resolved_text,
             )
         except Exception:  # noqa: BLE001 — the gate is best-effort here
@@ -10399,14 +10388,14 @@ class Orchestrator:
                  "hard_failures": [
                      f.message[:120]
                      for f in ((_val.hard_failures[:2] if _val else []))]},
-                step_index=self.step, path=path, unit_id=unit.unit_id,
+                step_index=self.step, path=path,
             )
             return None
         self.journal.emit(
             "terminal_arm_applied",
             {"path": path, "arm": "pystring",
              "candidate_id": _cand_new.candidate_id},
-            step_index=self.step, path=path, unit_id=unit.unit_id,
+            step_index=self.step, path=path,
         )
         return det
 
@@ -11124,28 +11113,41 @@ class Orchestrator:
                 # TERMINAL-PATH ARMS — the deterministic arms engage at
                 # the session's terminal escalation exit (the per-unit
                 # loop's give-up), not only at Phase 2's repair loop
-                # (0052-class sessions end HERE: all sibling units
-                # accepted, one unit exhausted, Phase 2 never reached).
-                # Substrate: the accepted splices + the escalated unit's
-                # best attempt; the pystring closer first; every output
-                # re-validated on the whole file before it may rescue.
-                # Zero model requests.
+                # (0052-class sessions end HERE: Phase 2 never reached).
+                # ONCE per file; the substrate is the FULL near-miss
+                # assembly — every unit contributes its accepted
+                # resolution or, when exhausted, its best attempt (the
+                # S28-257 pilot: a partial substrate splices a fragment
+                # of the file and the seam is invisible to it). The
+                # pystring closer first; the output re-validated on the
+                # whole file before it may rescue. Zero model requests.
                 if getattr(
                         getattr(self.config, "future", None),
                         "enable_terminal_path_arms", False):
-                    for _esc in list(escalated_units):
-                        _det = self._terminal_path_arms(path, accepted, _esc)
-                        if _det is not None:
-                            accepted = _det
-                            accepted_by_path[path] = accepted
-                            escalated_units.remove(_esc)
-                            self.journal.emit(
-                                "terminal_path_rescued",
-                                {"path": path,
-                                 "unit_id": _esc.unit.unit_id},
-                                step_index=result.step_index, path=path,
-                            )
-                            break
+                    def _best_attempt(_o):
+                        for _c in reversed(_o.attempts or []):
+                            if (getattr(_c, "resolved_text", "") or "").strip():
+                                return _c
+                        return None
+                    _substrate = list(accepted) + [
+                        (_esc.unit, _ba) for _esc in escalated_units
+                        if (_ba := _best_attempt(_esc)) is not None]
+                    _esc_failures = []
+                    for _esc in escalated_units:
+                        _esc_failures.extend(
+                            getattr(getattr(_esc, "validation", None),
+                                    "hard_failures", None) or [])
+                    _det = self._terminal_path_arms(
+                        path, _substrate, _esc_failures)
+                    if _det is not None:
+                        accepted = _det
+                        accepted_by_path[path] = accepted
+                        escalated_units = []
+                        self.journal.emit(
+                            "terminal_path_rescued",
+                            {"path": path},
+                            step_index=result.step_index, path=path,
+                        )
                 # Wholesale winner floor — escalation rescue (clap-0004
                 # class): a wholesale-rewrite file whose cascade gave up
                 # still has its correct whole-file answer in the merge index
