@@ -2878,25 +2878,71 @@ def expand_declaration_block(
     return block
 
 
+def _token_skeleton_ok(bad: str, best: str, floor: float = 0.3) -> bool:
+    """S28-241.3(c): the replacement must share a token skeleton with the
+    replaced line beyond the raw ratio floor. Jaccard on identifier
+    tokens — the 0127 garbage (line 1 replaced by a function header
+    dissimilar to everything) scores ~0 and declines; a true
+    counterpart of the same statement shares most tokens and passes."""
+    import re as _re_t
+    toks_a = set(_re_t.findall(r"[A-Za-z_]\w*", bad))
+    toks_b = set(_re_t.findall(r"[A-Za-z_]\w*", best))
+    if not toks_a or not toks_b:
+        return False
+    return (len(toks_a & toks_b) / len(toks_a | toks_b)) >= floor
+
+
 def find_replacement_line(
     buffer: str, error_text: str, language: str | None,
     *parent_texts: str,
+    file_path: str | None = None,
 ) -> tuple[int, str] | None:
     """C1b REPLACE mode: find the corrupted line and its parent replacement.
 
     For type-default/corrupted-line errors (``type defaults to 'int'``,
     ``expected identifier``), the correct line often exists verbatim in a
     parent side. Returns (buffer_line_index, replacement_line) or None.
-    Nothing invented — the replacement must appear verbatim in a parent."""
+    Nothing invented — the replacement must appear verbatim in a parent.
+
+    S28-241.3 attribution guards (the 0127 regression: an included-header
+    error anchored the BUFFER's line 1 and the rung replaced it with an
+    unrelated function header):
+    (a) when ``file_path`` is given, the error's own file:line:col must
+        name THE CONFLICT FILE (stem match) — included-header and
+        sibling-file errors skip the rung entirely;
+    (b) the anchor is that error's line — never a first-match from
+        another file's include chain;
+    (c) the replacement must clear the token-skeleton floor
+        (:func:`_token_skeleton_ok`).
+    """
     import difflib as _dl
     import re as _re_c1b
 
+    def _stem(p: str) -> str:
+        # basename + extension strip via string ops (the sandboxed os
+        # module is restricted; only path tails are needed here)
+        tail = p.replace("\\", "/").rsplit("/", 1)[-1]
+        return _re_c1b.sub(r"\.[^.]+$", "", tail)
+
     lines = buffer.split("\n")
-    # Locate the error line (file:line:col or line:N patterns)
-    m = _re_c1b.search(r":(\d+):\d+", error_text)
-    if not m:
-        return None
-    err_line = int(m.group(1)) - 1  # 0-based
+    # Locate the error line — attributed (a): among ALL file:line:col
+    # matches in the error text, only those naming the conflict file
+    # may anchor the buffer.
+    err_line = None
+    matches = list(_re_c1b.finditer(r"(\S+?):(\d+):\d+", error_text))
+    if file_path:
+        want = _stem(file_path)
+        for m in matches:
+            if _stem(m.group(1)) == want:
+                err_line = int(m.group(2)) - 1  # 0-based
+                break
+        if err_line is None:
+            return None  # the errors name other files — not ours to fix
+    else:
+        m = _re_c1b.search(r":(\d+):\d+", error_text)
+        if not m:
+            return None
+        err_line = int(m.group(1)) - 1
     if err_line < 0 or err_line >= len(lines):
         return None
     bad = lines[err_line]
@@ -2916,7 +2962,8 @@ def find_replacement_line(
             continue
         ratio = _dl.SequenceMatcher(
             None, bad.strip(), best.strip(), autojunk=False).ratio()
-        if 0.3 < ratio < 1.0 and best.strip() and best.strip() != bad.strip():
+        if (0.3 < ratio < 1.0 and best.strip() and best.strip() != bad.strip()
+                and _token_skeleton_ok(bad, best)):
             return (err_line, best)
     return None
 

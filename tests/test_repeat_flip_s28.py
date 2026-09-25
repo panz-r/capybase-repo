@@ -125,6 +125,37 @@ def test_unverified_relabel_on_undecidable_oracle():
 
 
 # ---------------------------------------------------------------------------
+# S28-253: build-what-you-ship's fresh-gate read
+# ---------------------------------------------------------------------------
+
+def test_fresh_gate_read_off_by_default():
+    _M._SHIP_GATE_READ = False
+    r = _row(compiles=True, marker_free=True, matches_oracle=0.995)
+    assert _M._verdict_chain(r) == "ESCALATE"
+
+
+def test_fresh_gate_read_flips_a_harness_proven_ship():
+    """The fmt-0003 acceptance shape: the session escalated, but the
+    HARNESS's own build of the shipped buffer passes, marker-free, at
+    sim >= PASS — the row reads on the fresh gate."""
+    _M._SHIP_GATE_READ = True
+    try:
+        r = _row(compiles=True, marker_free=True, matches_oracle=0.995)
+        assert _M._verdict_chain(r) == "PASS"
+        # below the PASS bar the escalation stands (honest evidence)
+        r_low = _row(compiles=True, marker_free=True, matches_oracle=0.80)
+        assert _M._verdict_chain(r_low) == "ESCALATE"
+        # a failing gate is not a fresh pass — the escalation stands
+        r_fail = _row(compiles=False, marker_free=True, matches_oracle=0.995)
+        assert _M._verdict_chain(r_fail) == "ESCALATE"
+        # markers left in the shipped buffer — the escalation stands
+        r_marked = _row(compiles=True, marker_free=False, matches_oracle=0.995)
+        assert _M._verdict_chain(r_marked) == "ESCALATE"
+    finally:
+        _M._SHIP_GATE_READ = False
+
+
+# ---------------------------------------------------------------------------
 # S28-170(2): the repeat-flip predicate and the rank order
 # ---------------------------------------------------------------------------
 

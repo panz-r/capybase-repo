@@ -14603,7 +14603,8 @@ class Orchestrator:
         _replace = None if _skip_replace else find_replacement_line(
             spliced, msgs, language,
             sides.get("current", ""), sides.get("replayed", ""),
-            base_text or "")
+            base_text or "",
+            file_path=path)
         if _replace is not None:
             err_idx, replacement = _replace
             lines = spliced.split("\n")
@@ -18319,6 +18320,23 @@ class Orchestrator:
             np_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
             if np_threshold > 0:
                 sig = _hard_failure_signature(validation.hard_failures)
+                # S28-250.1 telemetry (the family-stop measurement): the
+                # SYMBOL-FREE family signature — (validator, error_class)
+                # per failure. Rotation (a different undeclared symbol
+                # every round) reads as progress to the guard because the
+                # symbol lives in the normalized message; this journaled
+                # field lets the next run measure how deep rotations
+                # actually run before any family stop is gated.
+                if validation.hard_failures:
+                    self.journal.emit(
+                        "cegis_family_signature",
+                        {"family": sorted({
+                            f"{f.validator}:{_error_class(f.message)}"
+                            for f in validation.hard_failures})},
+                        step_index=self.step,
+                        path=unit.path,
+                        unit_id=unit.unit_id,
+                    )
                 # A needs_human refusal produces a non-empty signature
                 # (needs_human + non_empty_resolution). The no-progress guard
                 # would fire on two identical refusals BEFORE the recovery-retry

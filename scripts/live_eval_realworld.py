@@ -421,6 +421,11 @@ _KEEP_BEST_REPEATS = os.environ.get("CAPYBASE_KEEP_BEST", "") == "1"
 _UNVERIFIED_RELABEL = os.environ.get(
     "CAPYBASE_UNVERIFIED_RELABEL", "") == "1"
 
+# S28-253: build-what-you-ship's fresh-gate read (same pilot flag as the
+# session-side probe) — escalated + the HARNESS build passes + marker-
+# free + sim >= PASS reads PASS.
+_SHIP_GATE_READ = os.environ.get("CAPYBASE_SHIP_GATE_PROBE", "") == "1"
+
 
 @dataclass
 class Case:
@@ -2475,6 +2480,20 @@ def _verdict_chain(r: "CaseResult") -> str:
     if getattr(r, "toolchain_dead", False):
         return "ESCALATE_TOOLCHAIN"
     if r.escalated:
+        # S28-253 (build-what-you-ship's fresh-gate read, same flag): an
+        # escalation whose SHIPPED buffer the HARNESS's own build passes,
+        # marker-free at sim >= PASS, reads PASS — the escalation reason
+        # cited the session's stale/poisoned gate (fmt-0003: the session
+        # probe failed in 0.6s on cmake state while the harness build of
+        # the same content passed in 6.7s with oracle PASS). The
+        # acceptance rerun named this: the session gate cannot be the
+        # authority for its own poisoned environment; the harness build
+        # can. Order: ahead of the UNVERIFIED doors — a passing harness
+        # build is stronger evidence than either undecidable signal.
+        if (_SHIP_GATE_READ
+                and r.compiles and r.marker_free
+                and (r.matches_oracle or 0.0) >= PASS_THRESHOLD):
+            return "PASS"
         if getattr(r, "compile_evidence_missing", False):
             # S28-170(1): the environment could not judge the merge (the
             # gate build timed out and the engine proposed FOR REVIEW on
