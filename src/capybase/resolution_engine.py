@@ -2573,13 +2573,32 @@ def _seam_aware_note(
     scan = _seam_scan_text(unit, candidate_text)
     if not scan:
         return ""
+    # string-seam: the python paren-mismatch family, and (S28-234) the
+    # unterminated triple-quote signature — the validator's own
+    # imbalance locator names the opener line directly, and its
+    # message ("detected at line N") carries NO :line:col pair, so
+    # this branch runs BEFORE the line-parsed guard.
+    if lang.startswith("py") and (
+            "unterminated triple-quoted string" in msgs
+            or "unterminated string literal" in msgs):
+        from capybase.verification import _py_string_imbalance
+        imb = _py_string_imbalance(scan)
+        if imb:
+            op_line = scan.split("\n")[imb[0] - 1] if imb[0] - 1 < len(
+                scan.split("\n")) else ""
+            return (
+                f"SEAM CONTEXT (splice seam): your text leaves a {imb[1]} "
+                f"string literal UNTERMINATED — opened at line {imb[0]}: "
+                f"`{op_line.strip()[:80]}` — everything after it is string "
+                f"content. Close it (or remove the stray opener).")
+        return ""
     line_m = re.search(r":(\d+):\d+", msgs)
     if not line_m:
         return ""
     line_idx = int(line_m.group(1)) - 1
     if not (0 <= line_idx < scan.count("\n") + 1):
         return ""
-    # string-seam: the python paren-mismatch family
+    # string-seam (paren-mismatch variant): the python bracket scan
     if lang.startswith("py") and "does not match opening parenthesis" in msgs:
         op = _nearest_unclosed_opener(scan, line_idx, lang)
         if op:

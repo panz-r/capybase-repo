@@ -197,3 +197,25 @@ def test_retry_prompt_carries_the_seam_note(monkeypatch):
         assert "SEAM CONTEXT" in prompt
     finally:
         re_mod._SEAM_AWARE_ENABLED = False
+
+
+def test_unterminated_string_signature_fires(monkeypatch):
+    """Seam v3 (S28-234): 0052's signature — 'unterminated triple-quoted
+    string (detected at line N)' has no :line:col pair and needs the
+    imbalance locator, not the bracket scan."""
+    from capybase.verification import _py_string_imbalance
+    re_mod._SEAM_AWARE_ENABLED = True
+    try:
+        unit = _unit("python")
+        cand = ('class E:\n    def fit(self, X):\n        """Docs\n'
+                '        return X\n')
+        assert _py_string_imbalance(cand) is not None
+        f = SimpleNamespace(
+            message="SyntaxError: unterminated triple-quoted string literal "
+                    "(detected at line 4)",
+            validator="v", detail={})
+        note = re_mod._seam_aware_note(unit, [f], cand)
+        assert "UNTERMINATED" in note and '"""' in note
+        assert "opened at line 3" in note
+    finally:
+        re_mod._SEAM_AWARE_ENABLED = False

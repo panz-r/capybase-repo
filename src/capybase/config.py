@@ -1034,6 +1034,10 @@ class FutureConfig(BaseModel):
     # (pilot-gated, default OFF) — the doubt is tested against the
     # pristine sides before an escalation shelves the candidate.
     enable_sides_check_alignment: bool = False
+    # S28-233: synthesize the whole-file beam's substrate from the
+    # wholesale-winner floor when every per-unit candidate was rejected
+    # (the arms are otherwise structurally unreachable — pilot6's 0052).
+    enable_beam_sides_substrate: bool = False
     # Declaration restoration (S28-197, pilot-gated — the corrected
     # S28-178): when a whole-file failure names an UNDECLARED symbol,
     # insert the pristine side's DECLARING LINE before the symbol's

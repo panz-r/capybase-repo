@@ -12168,6 +12168,26 @@ class Orchestrator:
                         # winner is still the best available whole answer.
                         _floor = self._wholesale_winner_floor(
                             path, language, units, buffer=None)
+                        # S28-233's A/B (flag-gated, default OFF): when
+                        # EVERY per-unit candidate was rejected, synthesize
+                        # the beam's substrate from the floor — the arms
+                        # (pystring closer et al) get their chance on the
+                        # best whole answer instead of being unreachable.
+                        # The synthesis CONSUMES the floor (the beam's
+                        # accepted flows through the normal path below).
+                        if (_floor is not None and not accepted
+                                and getattr(
+                                    getattr(self.config, "future", None),
+                                    "enable_beam_sides_substrate", False)):
+                            accepted = _floor
+                            accepted_by_path[path] = accepted
+                            _floor = None
+                            self.journal.emit(
+                                "beam_substrate_synthesized",
+                                {"path": path,
+                                 "units": len(accepted)},
+                                step_index=self.step, path=path,
+                            )
                     if _floor is not None:
                         accepted = _floor
                         accepted_by_path[path] = accepted
