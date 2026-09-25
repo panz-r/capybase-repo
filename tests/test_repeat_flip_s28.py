@@ -231,3 +231,13 @@ def test_promote_keeps_prior_flip_history():
     assert [f["session_id"] for f in kept.repeat_flips] == ["s0", "kept2"]
     assert kept.session_id == "s1"
     assert _M._verdict_rank("SOMETHING_NEW") == 0  # unknown verdicts sort low
+
+
+def test_equal_rank_equal_sim_is_not_a_flip():
+    """The S28-264 trial catch: two identical GU repeats must not
+    promote — the trial's 0039 spurious promotion (the predicate read
+    r.verdict before the loop assigned it) is barred at the predicate
+    level by this pin."""
+    r = _row(verdict="GATE_UNAVAILABLE", matches_oracle=0.0,
+             best_repeat_verdict="GATE_UNAVAILABLE", best_repeat_sim=0.0)
+    assert not _M._is_repeat_flip(r)

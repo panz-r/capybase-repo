@@ -3683,6 +3683,12 @@ def main():
                 print(f"      [majority: {_maj} (verdicts: {','.join(_verdicts)})]",
                       end=" ")
                 r, verdict = _kept, _maj
+            # The kept row exhibits the majority verdict — assigned BEFORE
+            # any predicate reads it (the S28-264 trial catch: the
+            # promotion's _is_repeat_flip read r.verdict while it was
+            # still unassigned on the records[0] path, rank 0, and fired
+            # a spurious promotion on every first-run-kept row).
+            r.verdict = _maj
             # S28-239.2/240.1 (queue item 2, CAPYBASE_KEEP_BEST=1):
             # keep-the-best — the kept row flips to its best repeat's
             # outcome; the demoted record rides the row.
