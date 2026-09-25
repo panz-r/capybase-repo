@@ -1552,7 +1552,17 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
         if proc.returncode == 0:
             return True
         stderr = (proc.stderr or "") + (proc.stdout or "")
-        _LAST_C_BUILD_DIAG[case.id] = stderr[:400]
+        # S28-250.3 (queue item 9, S28-242.1's harvest note): noisy
+        # builds bury the diagnostic — redis's `#warning` storm from the
+        # system include chain filled the 400-char head before the
+        # error appeared. Store the gcc `error:` lines FIRST (bounded),
+        # falling back to the head for failures no compiler diagnostic
+        # describes (non-compile tool failures).
+        _error_lines = [
+            ln for ln in stderr.splitlines()
+            if " error:" in ln or ln.startswith("error:")]
+        _diag = "\n".join(_error_lines[:6]) if _error_lines else stderr
+        _LAST_C_BUILD_DIAG[case.id] = _diag[:400]
         err_lines = stderr.splitlines()
         # Linker error → compile passed; link is infrastructure.
         is_linker_error = any(
