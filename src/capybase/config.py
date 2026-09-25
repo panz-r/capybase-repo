@@ -1037,6 +1037,14 @@ class FutureConfig(BaseModel):
     # of prompts wasted on identical resubmissions). Feedback-only:
     # same repair rounds, zero new model requests.
     enable_anti_reroll_feedback: bool = False
+    # S28-239.1 (queue item 1): build-what-you-ship (pilot-gated,
+    # default OFF) — at the pre-escalation point for compile-gated
+    # files, ONE final gate probe on the SHIPPED buffer: a pass flips
+    # the stale compile-cited escalation to a fresh-gate row (fmt-0003:
+    # the shipped buffer compiled while the escalation cited an earlier
+    # buffer's error), a fail re-proves the escalation on fresh
+    # evidence. Zero new model requests (a warm build).
+    enable_ship_gate_final_probe: bool = False
     # S28-203: the sides-check alignment on the model's validator doubt
     # (pilot-gated, default OFF) — the doubt is tested against the
     # pristine sides before an escalation shelves the candidate.

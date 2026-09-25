@@ -11234,6 +11234,11 @@ class Orchestrator:
                 # total resolution + repair time per file, preventing the
                 # nested-retry budget explosion.
                 file_validation = None  # type: ignore[assignment]
+                # S28-239.1 (queue item 1): build-what-you-ship (pilot-gated,
+                # default OFF) — the pre-escalation final gate probe on the
+                # shipped buffer.
+                _ship_gate_enabled = getattr(
+                    self.config.future, "enable_ship_gate_final_probe", False)
                 # Causal attribution: track the failure signature across whole-
                 # file repair iterations so each repair mechanism's EFFECT can
                 # be recorded — did it actually change the failure shape, or
@@ -12787,6 +12792,63 @@ class Orchestrator:
                             result.reason = (
                                 f"whole-file validation failed for {path}: "
                                 + "; ".join(f.message for f in file_validation.hard_failures)
+                            )
+                        # S28-239.1 (queue item 1, pilot-gated): BUILD-WHAT-
+                        # YOU-SHIP — the escalation cites the LAST whole-file
+                        # validation, which may predate the buffer's final
+                        # state (fmt-0003: the shipped buffer compiled clean
+                        # while the escalation cited an era-header error from
+                        # an earlier buffer; trial15: 9/10 escalated
+                        # compile-gated rows shipped unproven). ONE final
+                        # gate probe on the SHIPPED buffer before the
+                        # escalation is finalized: a pass flips the
+                        # compile-cited escalation to a fresh-gate row; a
+                        # fail re-proves the escalation on fresh evidence.
+                        # Zero new model requests (a warm build; the
+                        # single-flight registry bounds concurrency).
+                        if (_ship_gate_enabled
+                                and language in ("c", "cpp", "c++")
+                                and (buffer or "").strip()):
+                            import time as _sg_time
+                            _sg_t0 = _sg_time.monotonic()
+                            try:
+                                _sg_pristine = None
+                                try:
+                                    _sg_sides, _ = self._micro_stage_sides(path)
+                                    _sg_pristine = [
+                                        t for t in _sg_sides.values() if t.strip()]
+                                except Exception:  # noqa: BLE001 — advisory
+                                    _sg_pristine = None
+                                _sg_val = self.verification.verify_file(
+                                    path, language, original, spans_and_texts,
+                                    repo_root=str(self.git.repo),
+                                    whole_text=buffer,
+                                    pristine_side_texts=_sg_pristine,
+                                )
+                            except Exception:  # noqa: BLE001 — probe is best-effort
+                                _sg_val = None
+                            _sg_outcome = (
+                                "pass" if (_sg_val is not None and _sg_val.passed)
+                                else "fail" if _sg_val is not None else "error")
+                            if _sg_outcome == "pass":
+                                result.escalated = False
+                                result.reason = (
+                                    f"ship gate fresh pass post-exhaustion for "
+                                    f"{path} (compiles; model rounds exhausted)")
+                            elif _sg_outcome == "fail" and _sg_val.hard_failures:
+                                result.reason = (
+                                    f"whole-file validation failed for {path} "
+                                    f"(fresh pre-escalation gate): "
+                                    + "; ".join(
+                                        f.message
+                                        for f in _sg_val.hard_failures[:3]))
+                            self.journal.emit(
+                                "ship_gate_final_probe",
+                                {"path": path, "outcome": _sg_outcome,
+                                 "duration_s": round(
+                                     _sg_time.monotonic() - _sg_t0, 1),
+                                 "flipped": not result.escalated},
+                                step_index=self.step, path=path,
                             )
                         # s27-71 (fifth-pass A3): same as the Phase-1 exit —
                         # reconcile before recording (earlier-staged files'

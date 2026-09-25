@@ -415,6 +415,12 @@ _LAST_C_BUILD_DIAG: dict[str, str] = {}
 # row's repeat_flips field.
 _KEEP_BEST_REPEATS = os.environ.get("CAPYBASE_KEEP_BEST", "") == "1"
 
+# S28-244 (queue item 10): the UNVERIFIED relabel (pilot-gated, default
+# OFF; CAPYBASE_UNVERIFIED_RELABEL=1) — escalated + oracle-undecidable
+# (None) + sim >= 0.80 reads UNVERIFIED, completing S28-192.
+_UNVERIFIED_RELABEL = os.environ.get(
+    "CAPYBASE_UNVERIFIED_RELABEL", "") == "1"
+
 
 @dataclass
 class Case:
@@ -1266,6 +1272,10 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # next armed rerun opts in via env.
     if os.environ.get("CAPYBASE_ANTI_REROLL", "") == "1":
         cfg.future.enable_anti_reroll_feedback = True
+    # S28-239.1 pilot gate: build-what-you-ship (the pre-escalation
+    # final gate probe) is default OFF; the next armed rerun opts in.
+    if os.environ.get("CAPYBASE_SHIP_GATE_PROBE", "") == "1":
+        cfg.future.enable_ship_gate_final_probe = True
     # S28-203 pilot gate: the sides-check alignment on the validator
     # doubt is default OFF; the screening rerun opts in via env.
     if os.environ.get("CAPYBASE_SIDES_ALIGNMENT", "") == "1":
@@ -1535,7 +1545,7 @@ def _py_compiles(text: str) -> bool:
         except Exception: pass
 
 
-def _c_builds(repo: Path, case: Case) -> bool | None:
+def _c_builds(repo: Path, case: Case, timeout_s: float = 300) -> bool | None:
     """Run the C build command against the materialized temp repo tree.
 
     The orchestrator already wrote the resolved file into ``repo`` (which holds
@@ -1567,7 +1577,7 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
     if case.id in _C_BUILD_TIMED_OUT:
         return None
     try:
-        proc = _run_shell_tree(cmd, cwd=str(repo), timeout=300)
+        proc = _run_shell_tree(cmd, cwd=str(repo), timeout=timeout_s)
         if proc.returncode == 0:
             return True
         stderr = (proc.stderr or "") + (proc.stdout or "")
@@ -1989,18 +1999,21 @@ def _oracle_include_roots(repo: Path, case: "Case") -> list[str]:
     return roots
 
 
-def _oracle_builds(repo: Path, case: Case, crate_source: Path | None) -> bool | None:
+def _oracle_builds(repo: Path, case: Case, crate_source: Path | None,
+                   runner_build_passed: bool | None = None) -> bool | None:
     """S28-191(1): per-case memo around the probe — repeats read the
     cache (the oracle text is iteration-invariant; the toolchain-probe
-    precedent)."""
+    precedent). ``runner_build_passed`` feeds S28-241.2's cap choice."""
     if case.id in _ORACLE_PROBE_CACHE:
         return _ORACLE_PROBE_CACHE[case.id]
-    result = _oracle_builds_uncached(repo, case, crate_source)
+    result = _oracle_builds_uncached(repo, case, crate_source,
+                                     runner_build_passed=runner_build_passed)
     _ORACLE_PROBE_CACHE[case.id] = result
     return result
 
 
-def _oracle_builds_uncached(repo: Path, case: Case, crate_source: Path | None) -> bool | None:
+def _oracle_builds_uncached(repo: Path, case: Case, crate_source: Path | None,
+                            runner_build_passed: bool | None = None) -> bool | None:
     """Does the ORACLE (expected_resolved) pass the same gate the merge faced?
 
     Writes expected_resolved into the materialized tree and runs the gate the
@@ -2011,6 +2024,13 @@ def _oracle_builds_uncached(repo: Path, case: Case, crate_source: Path | None) -
     classification: a sim >= 0.95 merge the gate rejected is a sandbox
     artifact, not a resolver failure, when the human resolution fails the
     same gate.
+
+    S28-241.2 (queue item 8): the probe's build cap is 300s only when the
+    RUNNER build passed (the tree demonstrably builds; the oracle probe
+    gets the full envelope); otherwise 120s — an na outcome is
+    undecidable at any cap, and the trial's 7 x 300s na-burns all sat on
+    content-failed trees (1.5-5s runner failures), so 120s carries the
+    same information at 40% of the wall.
     """
     target = repo / case.path
     saved = target.read_bytes() if target.exists() else None
@@ -2025,7 +2045,9 @@ def _oracle_builds_uncached(repo: Path, case: Case, crate_source: Path | None) -
             # (designed for ABSENT gates, not unfinished ones).
             if case.id in _C_BUILD_TIMED_OUT:
                 return None
-            _full = _c_builds(repo, case)
+            _full = _c_builds(
+                repo, case,
+                timeout_s=(300 if runner_build_passed else 120))
             if _full is False:
                 return False
             if _full is None:
@@ -2459,6 +2481,18 @@ def _verdict_chain(r: "CaseResult") -> str:
             # missing compile evidence) — the S28-161 UNVERIFIED class at
             # the runner level, excluded from capability denominators.
             return "UNVERIFIED"
+        # S28-244 (queue item 10, pilot-gated via CAPYBASE_UNVERIFIED_RELABEL):
+        # escalated + the oracle probe UNDECIDABLE (None — post-S28-192(c)
+        # a timeout reads None, not False) + sim >= the S28-144 floor
+        # (0.80): the environment could not judge the merge, so the row
+        # reads UNVERIFIED rather than ESCALATE — completing S28-192's
+        # original intent; the harvest's failure counts stop absorbing
+        # the environment's blind spot. The label history (GU -> ESCALATE
+        # at constant sim across the hygiene fix) is the argument.
+        if (_UNVERIFIED_RELABEL
+                and getattr(r, "oracle_builds", None) is None
+                and (r.matches_oracle or 0.0) >= 0.80):
+            return "UNVERIFIED"
         verdict = "ESCALATE"
     elif r.marker_free and r.compiles:
         if r.matches_oracle >= PASS_THRESHOLD:
@@ -2860,7 +2894,8 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
                 or _gate_failed_clean_buffer):
             try:
                 oracle_builds_result = _timed_harness_build(
-                    "oracle_probe", _oracle_builds, repo, case, crate_source)
+                    "oracle_probe", _oracle_builds, repo, case, crate_source,
+                    runner_build_passed=(c_builds_result is True))
                 _harness_builds[-1]["outcome"] = (
                     "pass" if oracle_builds_result is True
                     else "fail" if oracle_builds_result is False else "na")

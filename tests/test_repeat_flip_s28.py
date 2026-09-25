@@ -96,6 +96,35 @@ def test_escalated_without_the_guard_stays_escalate():
 
 
 # ---------------------------------------------------------------------------
+# S28-244 (queue item 10): the UNVERIFIED relabel
+# ---------------------------------------------------------------------------
+
+def test_unverified_relabel_off_by_default():
+    _M._UNVERIFIED_RELABEL = False
+    r = _row(oracle_builds=None, matches_oracle=0.99)
+    assert _M._verdict_chain(r) == "ESCALATE"
+
+
+def test_unverified_relabel_on_undecidable_oracle():
+    _M._UNVERIFIED_RELABEL = True
+    try:
+        # the S28-244 shape: escalated, oracle probe timeout-undecidable
+        # (None post-S28-192(c)), sim above the S28-144 floor
+        r = _row(oracle_builds=None, matches_oracle=0.994)
+        assert _M._verdict_chain(r) == "UNVERIFIED"
+        # below the floor the honest label stays ESCALATE
+        r_low = _row(oracle_builds=None, matches_oracle=0.60)
+        assert _M._verdict_chain(r_low) == "ESCALATE"
+        # a SOUND oracle False at high sim is S28-144's GU door — the
+        # existing branch; None never had a door, which is what the
+        # relabel fixes
+        r_false = _row(oracle_builds=False, matches_oracle=0.994)
+        assert _M._verdict_chain(r_false) == "GATE_UNAVAILABLE"
+    finally:
+        _M._UNVERIFIED_RELABEL = False
+
+
+# ---------------------------------------------------------------------------
 # S28-170(2): the repeat-flip predicate and the rank order
 # ---------------------------------------------------------------------------
 

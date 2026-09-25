@@ -63,12 +63,40 @@ def test_oracle_probe_cached_per_case(monkeypatch):
     _M._ORACLE_PROBE_CACHE.pop("case-z", None)
     calls = []
     monkeypatch.setattr(_M, "_oracle_builds_uncached",
-                        lambda repo, case, cs: calls.append(case.id) or "R")
+                        lambda repo, case, cs, runner_build_passed=None:
+                        calls.append(case.id) or "R")
     case = SimpleNamespace(id="case-z")
     assert _M._oracle_builds(Path("/tmp"), case, None) == "R"
     assert _M._oracle_builds(Path("/tmp"), case, None) == "R"
     assert calls == ["case-z"]  # the second repeat read the memo
     _M._ORACLE_PROBE_CACHE.pop("case-z", None)
+
+
+def test_oracle_cap_escalates_only_on_passed_runner(monkeypatch, tmp_path):
+    """S28-241.2 (queue item 8): the oracle probe's build cap is 300s
+    only when the RUNNER build passed; otherwise 120s (an na is
+    undecidable at any cap — the trial's 7 x 300s na-burns sat on
+    content-failed trees)."""
+    seen = {}
+
+    def _fake_c_builds(repo, case, timeout_s=300):
+        seen["timeout_s"] = timeout_s
+        return False  # a failing gate ends the probe before the fallback
+
+    monkeypatch.setattr(_M, "_c_builds", _fake_c_builds)
+    target = tmp_path / "a" / "b.cpp"
+    target.parent.mkdir()
+    target.write_text("int main(){}")
+    case = SimpleNamespace(id="case-cap", language="cpp", path="a/b.cpp",
+                           expected_resolved="int main(){}")
+    _M._oracle_builds_uncached(tmp_path, case, None,
+                               runner_build_passed=False)
+    assert seen["timeout_s"] == 120
+    _M._ORACLE_PROBE_CACHE.pop("case-cap", None)
+    _M._oracle_builds_uncached(tmp_path, case, None,
+                               runner_build_passed=True)
+    assert seen["timeout_s"] == 300
+    _M._ORACLE_PROBE_CACHE.pop("case-cap", None)
 
 
 def test_timed_out_tree_gate_blocks_the_oracle_probe(monkeypatch):
