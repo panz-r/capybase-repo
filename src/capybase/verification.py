@@ -3847,7 +3847,7 @@ def _try_balance_braces(text: str, language: str | None = None) -> str | None:
     return None
 
 
-def _try_balance_preprocessor(text: str) -> str | None:
+def _try_balance_preprocessor(text: str, decline: list | None = None) -> str | None:
     r"""Deterministically repair a single C preprocessor ``#if/#endif`` imbalance.
 
     The entity-splitting + splice pipeline can produce a whole-file
@@ -3875,8 +3875,19 @@ def _try_balance_preprocessor(text: str) -> str | None:
     stray directives the PDA can't unambiguously resolve) so the caller falls
     through to the LLM repair path. Strings/comments are masked first so a
     directive inside a string isn't counted or touched.
+
+    S28-262: when ``decline`` (a list) is passed, the decline REASON is
+    appended to it on every None exit — the coherence failure's detail
+    journals it, turning each declined imbalance into a classified shape
+    (php-0005's whack-a-mole: the LLM repair moved the imbalance 3471
+    -> 3472 and the balancer declined the new buffer; the reason names
+    which guard fired so the extension targets the measured shapes).
     """
+    if decline is not None:
+        decline.clear()
     if not text:
+        if decline is not None:
+            decline.append("empty")
         return None
     # Reuse the PDA to classify the imbalance, but walk the masked physical
     # lines directly (not the logical-line view) so edits map to real lines.
@@ -3915,6 +3926,8 @@ def _try_balance_preprocessor(text: str) -> str | None:
             for j in range(neg_line + 1, len(physical))
         )
         if not has_content_after:
+            if decline is not None:
+                decline.append("truncated_slice")
             return None  # truncated slice → defer to the model
         # Extra #endif(s): depth dipped below zero. Collect ALL consecutive
         # directive-only #endif lines from the divergence point onward,
@@ -3938,11 +3951,17 @@ def _try_balance_preprocessor(text: str) -> str | None:
                 break  # hit real code → stop collecting stray directives
             i += 1
         if not to_remove or deficit > 0:
+            if decline is not None:
+                decline.append(
+                    "stray_collection_failed" if to_remove
+                    else "divergence_line_has_code")
             return None  # couldn't collect enough bare #endif lines
         candidate = [l for j, l in enumerate(lines) if j not in set(to_remove)]
         result = "\n".join(candidate)
         if _preprocessor_imbalance_line(result) is None:
             return result
+        if decline is not None:
+            decline.append("revalidation_failed_multi")  # a SECOND imbalance remains
         return None
 
     if depth > 0:
@@ -3976,7 +3995,19 @@ def _try_balance_preprocessor(text: str) -> str | None:
         result = "\n".join(candidate)
         if _preprocessor_imbalance_line(result) is None:
             return result
+        if decline is not None:
+            decline.append("revalidation_failed_insert")
         return None
+
+    # S28-262: the PDA flags #else/#elif without a matching #if, but the
+    # depth walk above only counts OPEN/CLOSE — an #else-imbalance lands
+    # here looking "already balanced". Name it so the census can count
+    # the shape (single-edit unfixable by construction).
+    for line in physical:
+        if _PP_ELSE_RE.match(line):
+            if decline is not None:
+                decline.append("else_without_if")
+            break
 
     # Already balanced.
     return None
@@ -6361,12 +6392,15 @@ class VerificationEngine:
             if pp_line is not None:
                 # Sprint-21 coherence-repair rung (preprocessor arm —
                 # sqlite-0040's #endif class).
-                _repaired_pp = _try_balance_preprocessor(whole)
+                _pp_decline: list = []
+                _repaired_pp = _try_balance_preprocessor(
+                    whole, decline=_pp_decline)
                 if _repaired_pp is not None and _preprocessor_imbalance_line(
                         _repaired_pp) is None:
                     whole = _repaired_pp
                     pp_line = None
                     features["coherence_repair_applied"] = True
+                _pp_decline_reason = (_pp_decline[-1] if _pp_decline else None)
             if pp_line is not None:
                 hard.append(
                     VerificationFailure(
@@ -6384,6 +6418,13 @@ class VerificationEngine:
                             # the census can count repair-eligible vs
                             # genuinely-ambiguous imbalance failures.
                             "preprocessor_repair_declined": True,
+                            # S28-262: WHICH guard declined — the classified
+                            # shape the extension targets (php-0005's
+                            # whack-a-mole moved the imbalance and declined
+                            # with no reason recorded; now every decline
+                            # names its guard).
+                            "preprocessor_repair_decline_reason": (
+                                _pp_decline_reason),
                         },
                     )
                 )
