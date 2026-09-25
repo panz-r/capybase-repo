@@ -18001,11 +18001,44 @@ class Orchestrator:
                 if _ef is not None:
                     return _ef
 
+            # S28-203: the SIDES-CHECK ALIGNMENT on the model's validator
+            # doubt (pilot-gated, default OFF). The doubt is TESTABLE:
+            # run the failing check on the PRISTINE sides. Sides fail it
+            # too -> the check is inapplicable for this region's content
+            # family (the S28-105 doctrine at the engine) — the forced
+            # escalation would shelve near-oracle content on
+            # non-discriminative evidence. Sides pass -> the splice broke
+            # the property and the doubt was wrong — the failure belongs
+            # to the seam family's feedback, not a shelve. Either way the
+            # suspicion flag no longer force-escalates: the candidate
+            # takes the normal evidence-driven ladder (journal events
+            # distinguish the branches; 'unknown' keeps the escalation
+            # exactly as before).
+            _decide_suspect = cand.suspected_validator_error
+            if (_decide_suspect
+                    and not getattr(validation, "passed", False)
+                    and getattr(getattr(self.config, "future", None),
+                                "enable_sides_check_alignment", False)):
+                try:
+                    from capybase.verification import sides_check_alignment
+                    _align = sides_check_alignment(unit, validation)
+                except Exception:
+                    _align = "unknown"
+                if _align in ("inapplicable", "applicable"):
+                    self.journal.emit(
+                        f"sides_check_{_align}",
+                        {"unit_id": unit.unit_id,
+                         "failure_validators": [
+                             getattr(f, "validator", "")
+                             for f in (validation.hard_failures or [])]},
+                        step_index=self.step, path=unit.path,
+                        unit_id=unit.unit_id)
+                    _decide_suspect = False
             decision = self.risk.decide(
                 validation,
                 retry_count=retry_count,
                 failure_kind=cand.failure_kind,
-                suspected_validator_error=cand.suspected_validator_error,
+                suspected_validator_error=_decide_suspect,
                 consensus_entropy=(
                     consensus_report.entropy if consensus_report else None
                 ),

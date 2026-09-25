@@ -8243,3 +8243,59 @@ def _try_close_unterminated_string(
     if _py_string_imbalance(repaired) is not None:
         return None
     return repaired
+
+
+def sides_check_alignment(unit, result) -> str:
+    """S28-203: the SIDES-CHECK ALIGNMENT — test the model's validator
+    doubt deterministically. When the candidate self-reports
+    ``suspected_validator_error``, run the failing check class on the
+    PRISTINE side texts (the sides-as-oracle proxy):
+
+    - BOTH sides fail the check  -> "inapplicable": the check cannot
+      pass for this region's content family (the S28-105 doctrine at
+      the engine) — an escalation here would shelve near-oracle
+      content on non-discriminative evidence.
+    - BOTH sides pass            -> "applicable": the sides are clean,
+      so the SPLICE broke the property — the doubt was wrong, and the
+      failure belongs to the seam family's feedback (S28-189), not a
+      forced shelve.
+    - anything else (one side empty, mixed outcomes, a check class the
+      alignment does not carry) -> "unknown": the caller keeps the
+      existing escalation unchanged.
+
+    Pure: the python validator family only (string imbalance + AST
+    syntax — the suspicion population's dominant checks); zero model
+    requests. The c/cpp compile class stays with the harness's
+    whole-side probes (the same idea, already built)."""
+    lang = (getattr(unit, "language", "") or "").lower()
+    if not lang.startswith("py"):
+        return "unknown"
+    cur = getattr(getattr(unit, "current", None), "text", "") or ""
+    rep = getattr(getattr(unit, "replayed", None), "text", "") or ""
+    if not cur or not rep:
+        return "unknown"
+    failures = list(getattr(result, "hard_failures", None) or [])
+    msgs = "\n".join(str(getattr(f, "message", "") or "") for f in failures)
+    lowered = msgs.lower()
+
+    if ("triple-quoted string" in lowered or "string imbalance" in lowered
+            or "does not match opening parenthesis" in lowered
+            or "was never closed" in lowered):
+        cur_bad = _py_string_imbalance(cur) is not None
+        rep_bad = _py_string_imbalance(rep) is not None
+    elif "syntaxerror" in lowered or "syntax" in lowered or "invalid" in lowered:
+        def _parses(t: str) -> bool:
+            try:
+                ast.parse(t)
+                return True
+            except (SyntaxError, ValueError):
+                return False
+        cur_bad = not _parses(cur)
+        rep_bad = not _parses(rep)
+    else:
+        return "unknown"
+    if cur_bad and rep_bad:
+        return "inapplicable"
+    if not cur_bad and not rep_bad:
+        return "applicable"
+    return "unknown"

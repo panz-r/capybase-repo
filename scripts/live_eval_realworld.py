@@ -1235,6 +1235,10 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # default OFF; the screening rerun opts in via env.
     if os.environ.get("CAPYBASE_SEAM_FEEDBACK", "") == "1":
         cfg.future.enable_seam_aware_feedback = True
+    # S28-203 pilot gate: the sides-check alignment on the validator
+    # doubt is default OFF; the screening rerun opts in via env.
+    if os.environ.get("CAPYBASE_SIDES_ALIGNMENT", "") == "1":
+        cfg.future.enable_sides_check_alignment = True
     # S28-183 pilot gate: the repair-edit delimiter guard is default OFF
     # (census-gated decline); the screening rerun opts in via env.
     if os.environ.get("CAPYBASE_REPAIR_GUARD", "") == "1":

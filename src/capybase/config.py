@@ -1030,6 +1030,10 @@ class FutureConfig(BaseModel):
     # OFF) — the splice-seam context reveal (string-seam + scope-seam).
     # Feedback-only: same repair rounds, zero new model requests.
     enable_seam_aware_feedback: bool = False
+    # S28-203: the sides-check alignment on the model's validator doubt
+    # (pilot-gated, default OFF) — the doubt is tested against the
+    # pristine sides before an escalation shelves the candidate.
+    enable_sides_check_alignment: bool = False
     # Declaration restoration (S28-197, pilot-gated — the corrected
     # S28-178): when a whole-file failure names an UNDECLARED symbol,
     # insert the pristine side's DECLARING LINE before the symbol's
