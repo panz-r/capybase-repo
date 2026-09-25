@@ -304,6 +304,67 @@ def _whitespace_equal(a: str, b: str) -> bool:
     return " ".join((a or "").split()) == " ".join((b or "").split())
 
 
+def _try_boundary_glue(text: str) -> str | None:
+    """S28-259/260 (the boundary-glue arm): the cross-unit docstring-seam
+    deterministic repair.
+
+    0052's concrete shape: adjacent units make OPPOSITE string-state
+    assumptions at their boundary — one emits docstring-body content
+    (its region sits inside the class docstring), the next RE-OPENS
+    with ``\"\"\"`` (correct only after a CLOSED docstring). The
+    assembled near-miss file fails py_compile while the string-scanner
+    sees no imbalance, so the pystring closer declines. This arm tries
+    the two mechanical glue variants at the tokenizer's detected line
+    and lets py_compile judge:
+
+    * **delete the stray opener**: strip the triple-quote tokens from
+      the detected line (the fragment's `\"\"\"` that duplicates the
+      still-open docstring — 0052's line 172);
+    * **insert a closer** before the detected line (the mirror case:
+      the predecessor left the string open).
+
+    Both variants failing is the S28-242 truncated-tail cascade — the
+    arm declines rather than looping. Returns the repaired text or
+    None. Compile-judged end to end; zero model requests.
+    """
+    from capybase.verification import _compile_python
+
+    def _compiles(t: str) -> bool:
+        return _compile_python(t)[0]
+
+    if _compiles(text):
+        return None  # nothing to fix
+    # the error line: compile() directly — the SyntaxError object carries
+    # .lineno even when _compile_python's rendered message does not
+    # (S28-259's reconstruction: 'invalid syntax' with no line info)
+    detected = None
+    try:
+        compile(text, "<assembled>", "exec")
+    except SyntaxError as _se:
+        detected = _se.lineno
+    except (ValueError, TypeError):
+        return None
+    if not detected:
+        return None
+    lines = text.split("\n")
+    if not (1 <= detected <= len(lines)):
+        return None
+    idx = detected - 1
+    line = lines[idx]
+    # variant A: delete the stray triple-quote opener(s) on the line
+    if '"""' in line or "'''" in line:
+        candidate = "\n".join(
+            lines[:idx] + [line.replace('"""', "").replace("'''", "")]
+            + lines[idx + 1:])
+        if candidate != text and _compiles(candidate):
+            return candidate
+    # variant B: insert a closer before the detected line
+    candidate = "\n".join(lines[:idx] + ['"""'] + lines[idx:])
+    if candidate != text and _compiles(candidate):
+        return candidate
+    return None
+
+
 def _hard_failure_signature(failures) -> frozenset:
     """A multiset signature of a candidate's hard failures for the no-progress
     guard (Fix C). Returns ``frozenset(Counter(...).items())`` — a hashable
@@ -10378,9 +10439,11 @@ class Orchestrator:
         unit contributes its accepted resolution or, when it exhausted,
         its best attempt — because a partial substrate splices only a
         fragment of the file and the seam defect is invisible to it
-        (six no_imbalance declines on the pilot's first read). Arms:
-        the pystring closer first (the scikit population's signature),
-        and the arm's whole-file output is RE-VALIDATED by the gate
+        (six no_imbalance declines on the pilot's first read). TWO
+        rungs, in order — the pystring closer (the scanner-visible
+        imbalance family), then the S28-259 boundary-glue arm (the
+        cross-unit docstring-glue class the scanner cannot see) — and
+        every rung's whole-file output is RE-VALIDATED by the gate
         before it may rescue. Zero new model requests. Returns the
         replacement ``accepted`` list (the whole-file candidate), or
         None to let the escalation stand."""
@@ -10391,46 +10454,96 @@ class Orchestrator:
             {"path": path, "substrate_units": len(substrate)},
             step_index=self.step, path=path,
         )
-        # the pystring closer first — the scikit population's dominant
-        # signature (unterminated triple-quoted string at the inter-unit
+        _original = substrate[0][0].original_worktree_text
+        try:
+            _spliced = _resolved_buffer(_original, substrate)
+        except Exception:  # noqa: BLE001 — splice may fail on bad spans
+            _spliced = None
+
+        def _gate(text: str):
+            """The whole-file gate both rungs must pass to rescue."""
+            try:
+                return self.verification.verify_file(
+                    path, substrate[0][0].language, _original, [],
+                    repo_root=str(self.git.repo),
+                    whole_text=text,
+                )
+            except Exception:  # noqa: BLE001 — the gate is best-effort
+                return None
+
+        def _gate_ok(text: str, arm: str) -> bool:
+            _val = _gate(text)
+            if _val is None or not _val.passed:
+                self.journal.emit(
+                    "terminal_arms_declined",
+                    {"path": path, "arm": arm, "reason": "gate_rejected",
+                     "hard_failures": [
+                         f.message[:120] for f in (
+                             (_val.hard_failures[:2] if _val else []))]},
+                    step_index=self.step, path=path,
+                )
+                return False
+            return True
+
+        # rung 1: the pystring closer — the scanner-visible imbalance
+        # family (unterminated triple-quoted string at the inter-unit
         # docstring seam)
         det, diag = _try_deterministic_pystring_repair(
-            failures, substrate[0][0].original_worktree_text,
-            substrate, len(substrate) - 1)
-        if det is None:
+            failures, _original, substrate, len(substrate) - 1)
+        if det is not None:
+            # det's candidate is already whole_file-stamped and carries
+            # the arm's own provenance — only the gate is shared here.
+            if _gate_ok(det[0][1].resolved_text or "", "pystring"):
+                self.journal.emit(
+                    "terminal_arm_applied",
+                    {"path": path, "arm": "pystring",
+                     "candidate_id": det[0][1].candidate_id},
+                    step_index=self.step, path=path,
+                )
+                return det
+        else:
             self.journal.emit(
                 "terminal_arms_declined",
                 {"path": path, "arm": "pystring", "reason": diag},
                 step_index=self.step, path=path,
             )
-            return None
-        _unit_new, _cand_new = det[0]
-        try:
-            _val = self.verification.verify_file(
-                path, _unit_new.language, _unit_new.original_worktree_text,
-                [], repo_root=str(self.git.repo),
-                whole_text=_cand_new.resolved_text,
-            )
-        except Exception:  # noqa: BLE001 — the gate is best-effort here
-            _val = None
-        if _val is None or not _val.passed:
+        # rung 2: the boundary-glue arm — the cross-unit docstring-glue
+        # class the scanner cannot see (S28-259's reconstruction: the
+        # near-miss assembly fails py_compile while the scanner is
+        # silent)
+        if _spliced:
+            _glue = _try_boundary_glue(_spliced)
+            if _glue is not None:
+                if _gate_ok(_glue, "boundary_glue"):
+                    wf_unit = substrate[0][0].model_copy(
+                        update={"marker_span": None,
+                                "unit_kind": "whole_file"})
+                    wf_cand = CandidateResolution(
+                        candidate_id=(substrate[0][1].candidate_id or
+                                      substrate[0][0].unit_id)
+                        + ":boundary_glue",
+                        unit_id=substrate[0][0].unit_id,
+                        model_name="deterministic",
+                        resolved_text=_glue,
+                        prompt_version="deterministic_boundary_glue",
+                        provenance="deterministic_boundary_glue",
+                        self_reported_confidence=0.0,
+                        explanation=("terminal-path boundary-glue repair"),
+                    )
+                    self.journal.emit(
+                        "terminal_arm_applied",
+                        {"path": path, "arm": "boundary_glue",
+                         "candidate_id": wf_cand.candidate_id},
+                        step_index=self.step, path=path,
+                    )
+                    return [(wf_unit, wf_cand)]
             self.journal.emit(
                 "terminal_arms_declined",
-                {"path": path, "arm": "pystring",
-                 "reason": "gate_rejected",
-                 "hard_failures": [
-                     f.message[:120]
-                     for f in ((_val.hard_failures[:2] if _val else []))]},
+                {"path": path, "arm": "boundary_glue",
+                 "reason": "no_compiling_variant"},
                 step_index=self.step, path=path,
             )
-            return None
-        self.journal.emit(
-            "terminal_arm_applied",
-            {"path": path, "arm": "pystring",
-             "candidate_id": _cand_new.candidate_id},
-            step_index=self.step, path=path,
-        )
-        return det
+        return None
 
     def _journal_inject_outcome(self, path: str, hard_failures) -> None:
         """S28-260 (0126's misfire investigate): resolve a pending

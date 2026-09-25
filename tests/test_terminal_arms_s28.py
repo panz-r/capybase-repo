@@ -183,3 +183,74 @@ def test_whitespace_equal():
     # content deltas are not
     assert not _whitespace_equal("a = 1\n", "a = 2\n")
     assert not _whitespace_equal("", "x = 1\n")
+
+
+# ---------------------------------------------------------------------------
+# S28-259/260: the boundary-glue arm (terminal-arms rung 2)
+# ---------------------------------------------------------------------------
+
+def test_boundary_glue_variants():
+    from capybase.orchestrator import _try_boundary_glue
+    # the shallow stray-opener shape: a `"""` line whose opener swallows
+    # the rest — stripping it restores code
+    seam = ('def f():\n'
+            '    return 1\n'
+            '"""x = 2\n'
+            'y = 3\n')
+    assert _compile_check(seam) is False
+    fixed = _try_boundary_glue(seam)
+    assert fixed is not None and _compile_check(fixed) is True
+    # the mirror case: an unterminated opener — the inserted closer
+    # compiles
+    open_seam = "def f():\n    '''Doc = doc\n    x = 2\n"
+    fixed2 = _try_boundary_glue(open_seam)
+    assert fixed2 is not None and _compile_check(fixed2) is True
+    # a compiling file declines
+    assert _try_boundary_glue("def f():\n    return 1\n") is None
+
+
+def test_boundary_glue_declines_the_cascade():
+    """The S28-242 cascade (verified against 0052's reconstruction,
+    S28-259): the defect is upstream of the error line and no single
+    quote-token edit compiles — the arm must decline rather than loop
+    or mis-repair."""
+    from capybase.orchestrator import _try_boundary_glue
+    cascade = ("def fit(self):\n"
+               "    '''Fit the model.\n"
+               "    class_weight : {dict, 'auto'}, optional\n"
+               '    """Set the parameter C of class i\n'
+               "    SVC(C=1.0)\n"
+               '    """\n'
+               "    return 1\n")
+    assert _compile_check(cascade) is False
+    assert _try_boundary_glue(cascade) is None
+
+
+def _compile_check(text: str) -> bool:
+    from capybase.verification import _compile_python
+    return _compile_python(text)[0]
+
+
+def test_terminal_arms_rung2_rescues_the_glue_class(monkeypatch):
+    """The pystring closer declines (scanner-silent) and rung 2's glue
+    variant rescues — the 0052 pilot's next-read expectation."""
+    orch = _orchestrator(gate_passed=True)
+    substrate, failures = _near_miss_substrate()
+    import capybase.orchestrator as om
+
+    def _fake_arm(failures, original, acc, idx):
+        return None, "not_string_failure"
+
+    monkeypatch.setattr(om, "_try_deterministic_pystring_repair", _fake_arm)
+    monkeypatch.setattr(om, "_resolved_buffer",
+                        lambda original, acc: "def fit(self):\n")
+    monkeypatch.setattr(om, "_try_boundary_glue",
+                        lambda text: "def fit(self):\n    return 1\n")
+    out = orch._terminal_path_arms(
+        "sklearn/svm/classes.py", substrate,
+        [SimpleNamespace(message="SyntaxError: invalid syntax")])
+    assert out is not None
+    assert out[0][1].provenance == "deterministic_boundary_glue"
+    applied = [p for et, p in orch.journal.events
+               if et == "terminal_arm_applied"]
+    assert applied and applied[0]["arm"] == "boundary_glue"
