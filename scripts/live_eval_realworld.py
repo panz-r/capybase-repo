@@ -405,6 +405,16 @@ _C_BUILD_TIMED_OUT: set[str] = set()
 # build's output head lands here per case and rides the row.
 _LAST_C_BUILD_DIAG: dict[str, str] = {}
 
+# S28-239.2/240.1 (queue item 2): KEEP-THE-BEST promotion (pilot-gated,
+# default OFF; CAPYBASE_KEEP_BEST=1). At the scoring tail, a kept row
+# whose best repeat beats it (by verdict rank, or sim within the rank)
+# copies that repeat's outcome fields over its own — the repeats are
+# already paid, so the promotion is zero-request, and the harvest's
+# per-case rows stop understating the system (trial15: 4/15 rows kept a
+# worse verdict than an existing repeat). The demoted record rides the
+# row's repeat_flips field.
+_KEEP_BEST_REPEATS = os.environ.get("CAPYBASE_KEEP_BEST", "") == "1"
+
 
 @dataclass
 class Case:
@@ -576,6 +586,11 @@ class CaseResult:
     stability: str = ""
     best_repeat_verdict: str = ""
     best_repeat_sim: float | None = None
+    # S28-239.2/240.1 (queue item 2): keep-the-best's demoted record —
+    # when the promotion promoted an already-paid best repeat over the
+    # kept row, the kept row's (verdict, sim, reason, session_id) rides
+    # here so the demotion stays auditable in the results JSON.
+    repeat_flips: list = None
     # S28-170(1): the engine's acceptance_trust proposed FOR REVIEW on
     # "compile evidence missing" AND a gate build timed out — the
     # escalation is an environment artifact (the tree could not be
@@ -1247,6 +1262,10 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # default OFF; the screening rerun opts in via env.
     if os.environ.get("CAPYBASE_SEAM_FEEDBACK", "") == "1":
         cfg.future.enable_seam_aware_feedback = True
+    # S28-247.2 pilot gate: the anti-reroll line is default OFF; the
+    # next armed rerun opts in via env.
+    if os.environ.get("CAPYBASE_ANTI_REROLL", "") == "1":
+        cfg.future.enable_anti_reroll_feedback = True
     # S28-203 pilot gate: the sides-check alignment on the validator
     # doubt is default OFF; the screening rerun opts in via env.
     if os.environ.get("CAPYBASE_SIDES_ALIGNMENT", "") == "1":
@@ -2293,6 +2312,30 @@ def _is_repeat_flip(r: "CaseResult") -> bool:
     if best != kept:
         return best > kept
     return (r.best_repeat_sim or 0.0) > (r.matches_oracle or 0.0) + 0.005
+
+
+def _promote_best_repeat(r: "CaseResult", kept_verdict: str,
+                         records: list, best_i: int) -> str:
+    """S28-239.2/240.1 (queue item 2): copy the best repeat's outcome
+    fields (verdict, sim, reason, session_id) over the kept row's,
+    recording the demoted record on ``r.repeat_flips``. Zero new model
+    requests — the repeats are already paid; the harvest's per-case rows
+    stop understating the system (trial15: 4/15 rows kept a worse
+    verdict than an existing repeat). Returns the promoted verdict."""
+    best = records[best_i]
+    prev = list(r.repeat_flips or [])
+    prev.append({
+        "verdict": kept_verdict,
+        "matches_oracle": r.matches_oracle,
+        "reason": r.reason,
+        "session_id": r.session_id,
+    })
+    r.repeat_flips = prev
+    r.matches_oracle = best.matches_oracle
+    r.reason = best.reason
+    r.session_id = best.session_id
+    r.verdict = r.best_repeat_verdict
+    return r.best_repeat_verdict
 
 
 def _compile_evidence_missing(events) -> bool:
@@ -3451,6 +3494,16 @@ def main():
                 print(f"      [majority: {_maj} (verdicts: {','.join(_verdicts)})]",
                       end=" ")
                 r, verdict = _kept, _maj
+            # S28-239.2/240.1 (queue item 2, CAPYBASE_KEEP_BEST=1):
+            # keep-the-best — the kept row flips to its best repeat's
+            # outcome; the demoted record rides the row.
+            if _KEEP_BEST_REPEATS and _is_repeat_flip(r):
+                _kept_sim = r.matches_oracle
+                _new_verdict = _promote_best_repeat(r, _maj, _records, _best_i)
+                verdict = _new_verdict
+                print(f"\n      [keep-the-best: promoted repeat {_new_verdict} "
+                      f"sim={r.matches_oracle:.3f} over kept {_maj} "
+                      f"sim={_kept_sim:.3f}]", end=" ")
         print(f"{verdict}  {r.elapsed:.0f}s  sim={r.matches_oracle:.2f}  {r.reason[:60]}")
         if verdict == "PASS":
             pass_ct += 1

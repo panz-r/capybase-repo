@@ -1030,6 +1030,13 @@ class FutureConfig(BaseModel):
     # OFF) — the splice-seam context reveal (string-seam + scope-seam).
     # Feedback-only: same repair rounds, zero new model requests.
     enable_seam_aware_feedback: bool = False
+    # S28-247.2 (queue item 11): the anti-reroll line (pilot-gated,
+    # default OFF) — on a repair round whose failed candidate is
+    # byte-identical to an earlier attempt, the repair prompt carries an
+    # explicit change-the-approach instruction (trial15: 13 draws/~19%
+    # of prompts wasted on identical resubmissions). Feedback-only:
+    # same repair rounds, zero new model requests.
+    enable_anti_reroll_feedback: bool = False
     # S28-203: the sides-check alignment on the model's validator doubt
     # (pilot-gated, default OFF) — the doubt is tested against the
     # pristine sides before an escalation shelves the candidate.

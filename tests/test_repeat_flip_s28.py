@@ -128,4 +128,46 @@ def test_rank_order():
             > _M._verdict_rank("GATE_UNAVAILABLE")
             > _M._verdict_rank("ESCALATE")
             > _M._verdict_rank("ORACLE_DIVERGENT"))
+
+
+# ---------------------------------------------------------------------------
+# S28-239.2/240.1 (queue item 2): keep-the-best promotion
+# ---------------------------------------------------------------------------
+
+def test_promote_copies_outcome_and_journals_the_demoted():
+    kept = _row(verdict="ESCALATE", matches_oracle=0.803,
+                best_repeat_verdict="PASS", best_repeat_sim=0.951,
+                reason="kept row's failure", session_id="kept-sess")
+    best = _M.CaseResult(id="x", language="cpp", dataset="d")
+    best.matches_oracle = 0.951
+    best.reason = "the better repeat"
+    best.session_id = "best-sess"
+    kept_verdict = _M._promote_best_repeat(
+        kept, "ESCALATE", [best], 0)
+    assert kept_verdict == "PASS"
+    assert kept.verdict == "PASS"
+    assert kept.matches_oracle == 0.951
+    assert kept.reason == "the better repeat"
+    assert kept.session_id == "best-sess"
+    demoted = kept.repeat_flips[0]
+    assert demoted["verdict"] == "ESCALATE"
+    assert demoted["matches_oracle"] == 0.803
+    assert demoted["session_id"] == "kept-sess"
+    # the promoted row no longer reads as a flip (the queue drains)
+    assert not _M._is_repeat_flip(kept)
+
+
+def test_promote_keeps_prior_flip_history():
+    kept = _row(verdict="PASS", matches_oracle=0.90,
+                best_repeat_verdict="PASS", best_repeat_sim=0.995,
+                session_id="kept2")
+    kept.repeat_flips = [{"verdict": "ESCALATE", "matches_oracle": 0.5,
+                          "reason": "older", "session_id": "s0"}]
+    best = _M.CaseResult(id="x", language="cpp", dataset="d")
+    best.matches_oracle = 0.995
+    best.reason = "r"
+    best.session_id = "s1"
+    _M._promote_best_repeat(kept, "PASS", [best], 0)
+    assert [f["session_id"] for f in kept.repeat_flips] == ["s0", "kept2"]
+    assert kept.session_id == "s1"
     assert _M._verdict_rank("SOMETHING_NEW") == 0  # unknown verdicts sort low

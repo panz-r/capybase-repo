@@ -2258,6 +2258,7 @@ def retry_prompt_with_trims(
     attempt: int = 0,
     near_miss: bool = True,
     seam_candidate_text: str | None = None,
+    anti_reroll_repeats: int = 0,
 ) -> tuple[str, list[dict]]:
     """THE retry prompt (single implementation — audit-2 D1).
 
@@ -2292,6 +2293,7 @@ def retry_prompt_with_trims(
     # the duckdb loops retry fresh-gen, so the note rides here too.
     _seam_note = _seam_aware_note(unit, failures, seam_candidate_text)
     _side_note_r = _side_convention_note(unit, failures)
+    _anti_reroll_r = _anti_reroll_note(anti_reroll_repeats)
     prompt = f"""Your previous merge attempt was rejected. Fix it.
 
 {inner}
@@ -2301,6 +2303,7 @@ def retry_prompt_with_trims(
 {_decl_guard}
 {_side_note_r}
 {_seam_note}
+{_anti_reroll_r}
 Address every failure above; do not repeat the mistake.
 """
     return prompt, parts["trims"]
@@ -2466,6 +2469,47 @@ _SEAM_AWARE_ENABLED = False
 def set_seam_aware_feedback(enabled: bool) -> None:
     global _SEAM_AWARE_ENABLED
     _SEAM_AWARE_ENABLED = bool(enabled)
+
+
+#: S28-247.2 (queue item 11): the anti-reroll line — pilot-gated,
+#: default OFF. On a reused round (the model's submission
+#: byte-identical to an earlier attempt that failed the same checks —
+#: trial15: 13 draws/~19% of prompts wasted post-token-spend) the next
+#: prompt carries an explicit change-the-approach instruction. Rides
+#: the repair/retry rounds that already happen — zero new model
+#: requests.
+_ANTI_REROLL_ENABLED = False
+
+
+def set_anti_reroll_feedback(enabled: bool) -> None:
+    global _ANTI_REROLL_ENABLED
+    _ANTI_REROLL_ENABLED = bool(enabled)
+
+
+def _anti_reroll_note(repeats: int) -> str:
+    """The anti-reroll instruction, or "" when the flag is off / the
+    round is not a reroll. ``repeats`` > 0 = the failed candidate
+    byte-identically repeats an earlier attempt."""
+    if not _ANTI_REROLL_ENABLED or repeats < 1:
+        return ""
+    return (
+        f"ANTI-REROLL: your previous submission was byte-identical to an "
+        f"earlier attempt ({repeats}x now) and failed the SAME checks — "
+        "identical output cannot pass. Change the APPROACH, not the "
+        "formatting: resolve differently (different structure, different "
+        "side preference, different strategy).")
+
+
+def _anti_reroll_repeats(text: str, prior_texts: list[str]) -> int:
+    """1 when ``text`` byte-identically repeats an entry of
+    ``prior_texts`` (an earlier attempt), else 0. Callers must pass the
+    prior-attempt list BEFORE appending the current text (the append
+    dedups consecutive repeats and would self-match). Consecutive
+    rerolls deliberately read the same (the dedup bounds the memory);
+    the D1b prior-attempt memory carries the round history."""
+    if not text or text not in prior_texts:
+        return 0
+    return 1
 
 
 #: S28-204: statement openers — a fragment HEAD with one of these at
@@ -2760,6 +2804,7 @@ def build_repair_prompt(
     attempt: int = 0,
     *,
     prior_attempt_summaries: list[str] | None = None,
+    anti_reroll_repeats: int = 0,
 ) -> str:
     """Targeted repair: send the broken candidate back for surgical fixing.
 
@@ -2922,6 +2967,7 @@ YOUR PREVIOUS ATTEMPT (needs fixing):
 {_decl_guard}
 {_side_note}
 {_seam_note}
+{_anti_reroll_note(anti_reroll_repeats)}
 HOW YOUR CODE IS TESTED: your snippet is spliced back into the full file and the
 entire file is compiled. If the file has OTHER unresolved conflict hunks (a
 multi-hunk conflict), the compiler may trip over those — NOT your snippet. If the
@@ -3910,18 +3956,31 @@ class ResolutionEngine:
                             "CHANGES SINCE LAST ATTEMPT:\n" + "\n".join(_diff_lines))
                 # The journal mirror and the model path both call this builder per
                 # round — append-once per round (dedup against the last entry).
+                _prior_texts_pre_append = list(prevs)
+                # S28-247.2: the failed candidate byte-identically repeating
+                # an earlier attempt is the reroll signal — computed against
+                # the PRE-APPEND list (the append dedups and would
+                # self-match on a first attempt).
+                _anti_reroll_n = _anti_reroll_repeats(
+                    prev_candidate.resolved_text, _prior_texts_pre_append)
                 if not prevs or prevs[-1] != prev_candidate.resolved_text:
                     prevs.append(prev_candidate.resolved_text)
                 del prevs[:-12]
                 prompt = build_repair_prompt(
                     unit, context, prev_candidate, failures, attempt=attempt,
-                    prior_attempt_summaries=prior_summaries or None, budget=_budget)
+                    prior_attempt_summaries=prior_summaries or None, budget=_budget,
+                    anti_reroll_repeats=_anti_reroll_n)
                 prof_tag = active_profile().tag()
                 if prof_tag:
                     pv = PROMPT_REPAIR + prof_tag
                 return prompt, pv, prompt_trims
             if failures:
                 pv = PROMPT_RETRY
+                # S28-247.2: the anti-reroll note is REPAIR-PATH ONLY —
+                # the retry rounds never append to _repair_prev_texts, so
+                # identity cannot be judged soundly here (the trial's 13
+                # reuse events are all repair-loop rounds, where the note
+                # does ride).
                 prompt, prompt_trims = retry_prompt_with_trims(
                     unit, context, failures, budget=_budget, attempt=attempt,
                     near_miss=_seed_ok,

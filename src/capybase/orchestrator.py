@@ -5387,6 +5387,13 @@ class Orchestrator:
         from capybase.resolution_engine import set_seam_aware_feedback
         set_seam_aware_feedback(
             getattr(config.future, "enable_seam_aware_feedback", False))
+        # S28-247.2 (queue item 11): the anti-reroll line (pilot-gated,
+        # default OFF) — the repair prompt's change-the-approach
+        # instruction on byte-identical resubmissions. Same rounds, zero
+        # new model requests.
+        from capybase.resolution_engine import set_anti_reroll_feedback
+        set_anti_reroll_feedback(
+            getattr(config.future, "enable_anti_reroll_feedback", False))
         self.verification = VerificationEngine.default(_val_cfg)
         # Sprint-19 P3: the session build-state tracker journals every
         # build probe/transition into the flight journal (the 300s silent
