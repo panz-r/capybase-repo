@@ -129,3 +129,37 @@ def test_verdict_chain_reads_the_gu_door():
     r2.toolchain_dead = True
     r2.era_header_dead = True
     assert _M._verdict_chain(r2) == "ESCALATE_TOOLCHAIN"
+
+
+# ---------------------------------------------------------------------------
+# S28-261: the v2 discriminator — compiler-evidence-backed
+# ---------------------------------------------------------------------------
+
+def test_v2_fires_on_signature_level_drift(tmp_path):
+    """The 0113 shape: the symbol NAME exists elsewhere in the tree (the
+    v1 name-grep declines) but the compiler proved THIS use invalid on
+    its type — and the ORACLE repeats the same use spelling."""
+    repo = _git_init(tmp_path, {
+        "include/peg.h": "struct Tokenizer { void TokenizeInput(); };\n",
+        "src/other.cpp": "int main() { return 0; }\n",
+    })
+    case = _case(tmp_path, expected_resolved=(
+        "if (!compiled_grammar->GetTokenizer().TokenizeInput(b)) {\n"))
+    screen = _M._era_header_screen(repo, case, _probe(_0113_SIG, _0113_SIG))
+    assert screen["era_header_dead"] is True
+    assert screen["oracle_repeats_invalid"] == ["GetTokenizer"]
+
+
+def test_v2_declines_when_the_oracle_calls_a_bare_name(tmp_path):
+    """No member-use spelling in the oracle (a bare call is a different
+    binding) — the v2 discriminator declines even though the sides'
+    errors name the symbol (the tree defines the name, so v1 declines
+    too)."""
+    repo = _git_init(tmp_path, {
+        "include/peg.h": "GetTokenizer();\n",
+        "src/other.cpp": "int main() { return 0; }\n",
+    })
+    case = _case(tmp_path, expected_resolved="GetTokenizer();\n")
+    screen = _M._era_header_screen(repo, case, _probe(_0113_SIG, _0113_SIG))
+    assert screen["era_header_dead"] is False
+    assert screen["oracle_repeats_invalid"] == []

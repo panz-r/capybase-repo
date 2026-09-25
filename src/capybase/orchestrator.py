@@ -10432,6 +10432,34 @@ class Orchestrator:
         )
         return det
 
+    def _journal_inject_outcome(self, path: str, hard_failures) -> None:
+        """S28-260 (0126's misfire investigate): resolve a pending
+        declaration inject against the newest whole-file validation.
+        ``persisted`` = the injected symbol is still named by a
+        symbol-error (the declaration form/scope was ineffective —
+        0126: `cache` declared, still 'not declared' one build later);
+        ``cleared`` = the error is gone. Journal-only: the declaration
+        arm's tuning rests on this distribution."""
+        pend = getattr(self, "_pending_inject_outcome", None)
+        if not pend or pend.get("path") != path:
+            return
+        self._pending_inject_outcome = None
+        sym = pend.get("symbol") or ""
+        msgs = [getattr(f, "message", "") or "" for f in (hard_failures or [])]
+        persisted = any(
+            sym in m and any(k in m for k in (
+                "no member", "not declared", "does not name",
+                "undeclared", "unknown type name"))
+            for m in msgs)
+        self.journal.emit(
+            "symbol_inject_outcome",
+            {"path": path, "unit_id": pend.get("unit_id"),
+             "symbol": sym,
+             "outcome": "persisted" if persisted else "cleared"},
+            step_index=self.step, path=path,
+            unit_id=pend.get("unit_id"),
+        )
+
     def run(self) -> StepResult:
         """Full auto loop: resolve → stage → test → continue, with retries."""
         # Preflight.
@@ -11500,6 +11528,11 @@ class Orchestrator:
                         except Exception:  # noqa: BLE001 — provenance is best-effort
                             _gate_buf_key = None
                     _ff = file_validation.features or {}
+                    # S28-260 (0126's misfire investigate): resolve the
+                    # pending declaration inject against THIS validation —
+                    # did the injected symbol's error clear or persist?
+                    self._journal_inject_outcome(
+                        path, file_validation.hard_failures)
                     self.journal.emit(
                         "file_validated",
                         {
@@ -14716,6 +14749,14 @@ class Orchestrator:
                              "block_lines": len(block), "path": path},
                             step_index=self.step, path=path,
                             unit_id=unit.unit_id)
+                        # S28-260 (0126's misfire investigate): stash the
+                        # inject so the next file-level validation can
+                        # journal whether the symbol's error actually
+                        # cleared — the per-inject measurement the
+                        # declaration iterations never had.
+                        self._pending_inject_outcome = {
+                            "path": path, "unit_id": unit.unit_id,
+                            "symbol": symbol}
                         return [(wf_unit, wf_cand)]
         # C1b REPLACE mode: for corrupted-line errors, try replacing the
         # corrupted line with its parent counterpart (verbatim, LCS-anchored).

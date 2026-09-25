@@ -1982,24 +1982,40 @@ def _era_header_screen(repo: Path, case: "Case",
         return None
     probes = probe.get("probes") or {}
     symbols: list[str] = []
+    oracle_repeats: list[str] = []
+    _no_member = re.compile(r"no member named\s+[‘']?([A-Za-z_]\w*)")
+    _no_decl = re.compile(
+        r"no declaration matches\s+[‘']?[\w:<> ]*?([A-Za-z_]\w*)\s*\(")
+    oracle_text = case.expected_resolved or ""
     for side in ("current", "replayed"):
         for ln in (probes.get(side) or {}).get("sig") or []:
-            for pat in _ERA_SYMBOL_PATTERNS:
-                m = pat.search(ln or "")
-                if m:
-                    sym = m.group(1).split("::")[-1]
-                    if len(sym) >= 4 and sym not in symbols:
-                        symbols.append(sym)
+            ln = ln or ""
+            m = _no_member.search(ln) or _no_decl.search(ln)
+            if not m:
+                continue
+            sym = m.group(1).split("::")[-1]
+            if len(sym) < 4:
+                continue
+            if sym not in symbols:
+                symbols.append(sym)
+            # S28-261: the v2 discriminator — the compiler proved this
+            # use invalid on its type; when the ORACLE's own text
+            # repeats the same use spelling, the oracle cannot compile
+            # in this tree (the 0113 signature-level drift: the symbol
+            # NAME exists elsewhere, so the v1 name-grep alone
+            # declines). Census (trial15 cpp rows): fires on exactly
+            # the six era rows, declines the three fixable classes.
+            if (sym not in oracle_repeats
+                    and re.search(rf"[.>\-]{{1,2}}{sym}\s*\(", oracle_text)):
+                oracle_repeats.append(sym)
     missing = [s for s in symbols[:8]
                if not _tree_defines_symbol(repo, s)]
-    if not missing:
-        return {"era_header_dead": False, "missing_symbols": [],
-                "oracle_uses_missing": []}
     oracle_uses = [s for s in missing
-                   if s in (case.expected_resolved or "")]
-    return {"era_header_dead": bool(oracle_uses),
+                   if s in oracle_text]
+    return {"era_header_dead": bool(oracle_uses or oracle_repeats),
             "missing_symbols": missing,
-            "oracle_uses_missing": oracle_uses}
+            "oracle_uses_missing": oracle_uses,
+            "oracle_repeats_invalid": oracle_repeats}
 
 
 def _mark_era_header_dead(res: "CaseResult", screen: dict,
@@ -2010,11 +2026,19 @@ def _mark_era_header_dead(res: "CaseResult", screen: dict,
     res.elapsed = time.time() - t0
     res.escalated = True
     res.era_header_dead = True
+    _uses = screen.get("oracle_uses_missing") or []
+    _repeats = screen.get("oracle_repeats_invalid") or []
     res.reason = (
         "era-header pre-screen: conflict-file APIs absent from the tree "
-        f"({', '.join(screen.get('oracle_uses_missing') or [])}) — the "
-        "oracle itself references them, so no in-file resolution can pass "
-        "this gate (S28-243.2)")
+        f"({', '.join(_uses)}) — the oracle itself references them; "
+        f"invalid uses the oracle repeats ({', '.join(_repeats)}); no "
+        "in-file resolution can pass this gate (S28-243.2)"
+    ) if _uses else (
+        "era-header pre-screen: the oracle repeats API uses the compiler "
+        f"proved invalid on the sides ({', '.join(_repeats)}) — the "
+        "oracle cannot compile in this tree; no in-file resolution can "
+        "pass this gate (S28-243.2)"
+    )
     return res
 
 
