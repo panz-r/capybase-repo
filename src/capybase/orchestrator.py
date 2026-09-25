@@ -295,6 +295,15 @@ def _empty_terminal_grant_due(outcome) -> bool:
     return False
 
 
+def _whitespace_equal(a: str, b: str) -> bool:
+    """S28-259.2 (anti-reroll v2): True when two texts differ only in
+    whitespace — a whitespace-only resubmission is a reroll by any
+    honest definition (0113's pilot session: a -8/+0 blank-only
+    'repair' that passed the fragment validators and wasted the rescue
+    + the gate round)."""
+    return " ".join((a or "").split()) == " ".join((b or "").split())
+
+
 def _hard_failure_signature(failures) -> frozenset:
     """A multiset signature of a candidate's hard failures for the no-progress
     guard (Fix C). Returns ``frozenset(Counter(...).items())`` — a hashable
@@ -2931,8 +2940,6 @@ def _try_deterministic_pystring_repair(
         spliced = _resolved_buffer(original, accepted)
     except Exception:  # noqa: BLE001 - splice may fail on bad spans
         return None, "splice_exception"
-    if _py_string_imbalance(spliced) is None:
-        return None, "no_imbalance"
     detected = None
     import re as _re
     for f in failures:
@@ -2941,7 +2948,25 @@ def _try_deterministic_pystring_repair(
         if m:
             detected = int(m.group(1))
             break
-    repaired = _try_close_unterminated_string(spliced, detected_line=detected)
+    # S28-259.1: the SCANNER is not the authority — the pilot's 0052
+    # reconstruction fails py_compile while the scanner sees no
+    # imbalance (the cross-unit docstring-glue class). When the
+    # failures carry a detected line, the compile-judged form runs even
+    # when the scanner is silent; py_compile decides.
+    imb = _py_string_imbalance(spliced)
+    if imb is None and detected is None:
+        return None, "no_imbalance"
+    if imb is None:
+        # S28-259.1: scanner-silent + a detected line — the compile is
+        # the arbiter of the DEFECT too: a buffer that already compiles
+        # has nothing to fix (a stale failure message must not trigger
+        # a stray-opener insert).
+        from capybase.verification import _compile_python
+        if _compile_python(spliced)[0]:
+            return None, "no_imbalance"
+    repaired = None
+    if imb is not None:
+        repaired = _try_close_unterminated_string(spliced, detected_line=detected)
     if repaired is None and detected is not None:
         # S28-80's python-authority rule (parity with the splice-level
         # form): the scanner's line-parity can disagree with python's real
@@ -2956,8 +2981,16 @@ def _try_deterministic_pystring_repair(
                 repaired = _candidate
     if repaired is None:
         return None, "balance_failed"
-    if _py_string_imbalance(repaired) is not None:
+    # S28-259.1: the revalidation authority follows the gate's — when
+    # the scanner was silent on the input, a compiling candidate is
+    # accepted even if the scanner still reads an imbalance (py_compile
+    # is the judge; the beam's own gate re-validates downstream).
+    if imb is not None and _py_string_imbalance(repaired) is not None:
         return None, "revalidation_failed"
+    if imb is None:
+        from capybase.verification import _compile_python as _cp2
+        if not _compile_python(repaired)[0]:
+            return None, "revalidation_failed"
     wf_unit = unit.model_copy(update={"marker_span": None, "unit_kind": "whole_file"})
     wf_cand = CandidateResolution(
         candidate_id=(getattr(_old_cand, "candidate_id", unit.unit_id) or unit.unit_id) + ":pystringfix",
@@ -18568,6 +18601,27 @@ class Orchestrator:
                                     )
                                     for _sh_cand in _shattered:
                                         if not (_sh_cand.resolved_text or "").strip():
+                                            continue
+                                        # S28-259.2 (anti-reroll v2): a
+                                        # WHITESPACE-ONLY resubmission is a
+                                        # reroll — the bytes differ, the
+                                        # content does not. Declining it
+                                        # saves the gate round (0113's
+                                        # pilot session 1: a -8/+0
+                                        # blank-only 'repair').
+                                        if (
+                                            _sh_target is not None
+                                            and _whitespace_equal(
+                                                _sh_cand.resolved_text,
+                                                _sh_target.resolved_text)
+                                        ):
+                                            self.journal.emit(
+                                                "shattered_rescue_whitespace_only",
+                                                {"unit_id": unit.unit_id,
+                                                 "candidate_id": _sh_cand.candidate_id},
+                                                step_index=self.step,
+                                                path=unit.path,
+                                                unit_id=unit.unit_id)
                                             continue
                                         _sh_val = self.verification.verify(
                                             unit, _sh_cand)

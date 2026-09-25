@@ -168,3 +168,18 @@ def test_terminal_arms_decline_on_an_empty_substrate():
     assert orch._terminal_path_arms(
         "sklearn/svm/classes.py", [],
         [SimpleNamespace(message="SyntaxError: unterminated")]) is None
+
+
+# ---------------------------------------------------------------------------
+# S28-259.2: anti-reroll v2 — the whitespace-normalized identity
+# ---------------------------------------------------------------------------
+
+def test_whitespace_equal():
+    from capybase.orchestrator import _whitespace_equal
+    # blank-only deltas are rerolls
+    assert _whitespace_equal("a = 1\n\n\nb = 2\n", "a = 1\nb = 2\n")
+    # indentation-only deltas are rerolls
+    assert _whitespace_equal("    x = f(1, 2)\n", "x = f(1, 2)\n")
+    # content deltas are not
+    assert not _whitespace_equal("a = 1\n", "a = 2\n")
+    assert not _whitespace_equal("", "x = 1\n")
