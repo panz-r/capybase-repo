@@ -173,3 +173,27 @@ def test_repair_prompt_carries_the_seam_note(monkeypatch):
         assert "SEAM CONTEXT" in prompt
     finally:
         re_mod._SEAM_AWARE_ENABLED = False
+
+
+def test_retry_prompt_carries_the_seam_note(monkeypatch):
+    """Seam v2 (S28-227/229): the note rides the FRESH-GEN retry carrier
+    too — the python_syntax stall family retries here, never reaching
+    the targeted repair path (pilot6: zero carriers for the note)."""
+    from capybase.resolution_engine import build_retry_prompt
+    from capybase.conflict_model import ContextBundle
+    re_mod._SEAM_AWARE_ENABLED = True
+    try:
+        unit = _unit("cpp")
+        ctx = ContextBundle(primary_text="x")
+        f = SimpleNamespace(
+            message="y.cpp:2:1: error: expected unqualified-id before 'for'",
+            validator="compile", detail={})
+        prompt = build_retry_prompt(
+            unit, ctx, [f], None,
+            seam_candidate_text=(
+                "namespace ns {\n"
+                "for (;;) { }\n"
+                "}\n"))
+        assert "SEAM CONTEXT" in prompt
+    finally:
+        re_mod._SEAM_AWARE_ENABLED = False

@@ -2588,11 +2588,15 @@ def find_symbol_declaration_lines(
                 elif re.match(
                         rf"(struct|union|enum)\s+{re.escape(symbol)}\s*;$", s):
                     out.append(s)
-                elif not re.search(r"[({]", s) and idents[-1] == symbol:
-                    # plain variable declaration: ``Type *name;`` — the
+                elif (not re.search(r"[({]", s) and idents[-1] == symbol
+                      and idents[0].lower() not in _NON_DECL_KEYWORDS):
+                    # plain variable declaration: ``Type name;`` — the
                     # redis-0002 shape (a dropped local's declaration is
                     # injectable verbatim; initializers stay excluded via
-                    # the '=' check above).
+                    # the '=' check above). S28-230: the FIRST identifier
+                    # must not be a control-flow keyword — "return rule;"
+                    # matched as a declaration of `rule` and the injection
+                    # ladder inserted the statement as garbage (duckdb-0063).
                     out.append(s)
     return out[:4]
 
@@ -2697,6 +2701,11 @@ def inject_local_declaration(
 # backtracks to absorb an underscore prefix and `local_cache = ...`
 # matches as a declaration of `cache` (pilot4 0126: the false _existing
 # guard then skipped the insert for the failing function's own local).
+_NON_DECL_KEYWORDS = frozenset((
+    "return", "break", "continue", "goto", "case", "default", "else",
+    "do", "delete", "new", "throw", "co_return", "co_await", "co_yield"))
+
+
 _DECL_SHAPE_TEMPLATE = r"^\s*(?:auto\s*&?|[\w:<>]+(?:\s*[&*])?)\s*\b{sym}\s*(?:\(|=|;)"
 
 

@@ -2257,6 +2257,7 @@ def retry_prompt_with_trims(
     budget: TokenBudget | None = None,
     attempt: int = 0,
     near_miss: bool = True,
+    seam_candidate_text: str | None = None,
 ) -> tuple[str, list[dict]]:
     """THE retry prompt (single implementation — audit-2 D1).
 
@@ -2283,6 +2284,10 @@ def retry_prompt_with_trims(
     # closing instruction ("Output the ```json block last" / "code block
     # first, then json") — the former wrapper tail hardcoded the v6 wording
     # (a layout leak under markdown_code profiles).
+    # S28-227/229 seam v2: the seam context reveal rides the FRESH-GEN
+    # retry too (the python_syntax stall family lives in this loop, not
+    # the targeted repair path — pilot6: zero carriers for the note).
+    _seam_note = _seam_aware_note(unit, failures, seam_candidate_text)
     prompt = f"""Your previous merge attempt was rejected. Fix it.
 
 {inner}
@@ -2290,6 +2295,7 @@ def retry_prompt_with_trims(
 ### validator feedback (previous attempt failed these checks)
 {feedback}
 {_decl_guard}
+{_seam_note}
 Address every failure above; do not repeat the mistake.
 """
     return prompt, parts["trims"]
@@ -2300,9 +2306,11 @@ def build_retry_prompt(
     context: ContextBundle,
     failures: Iterable[VerificationFailure],
     budget: TokenBudget | None = None,
+    seam_candidate_text: str | None = None,
 ) -> str:
     """The retry prompt (string form — wraps :func:`retry_prompt_with_trims`)."""
-    return retry_prompt_with_trims(unit, context, failures, budget=budget)[0]
+    return retry_prompt_with_trims(unit, context, failures, budget=budget,
+                                   seam_candidate_text=seam_candidate_text)[0]
 
 
 PROMPT_RECOVERY = "cegis_recovery.v1"
@@ -2637,21 +2645,54 @@ def _side_convention_note(unit, failures) -> str:
             m = _re.search(pat, msg)
             if m and m.group(1) not in syms:
                 syms.append(m.group(1))
+    # S28-230: the grep runs on COMMENT-MASKED text (the canonical
+    # lexer) so prose like "all that will get us out is a $" cannot
+    # pose as the symbol's declaration (duckdb-0129's noise
+    # attachment) — but the ATTACHED lines are the raw side lines.
+    from capybase.verification import _mask_strings_and_comments
+    cur_masked = _mask_strings_and_comments(cur, unit.language or "")
+    rep_masked = _mask_strings_and_comments(rep, unit.language or "")
     notes: list[str] = []
+    one_sided: list[str] = []
     for sym in syms[:3]:
         pat = _re.compile(rf"^.*\b{_re.escape(sym)}\b.*$", _re.MULTILINE)
-        cl = [ln.strip() for ln in pat.findall(cur) if len(ln.strip()) < 200][:2]
-        rl = [ln.strip() for ln in pat.findall(rep) if len(ln.strip()) < 200][:2]
+        # document order (findall order); the mask only EXCLUDES
+        # comment-only matches — sorting by length buried the
+        # informative constructor-initializer lines under trivial
+        # identical member-access lines (the 0127 regression).
+        cl = [raw.strip() for m, raw in
+              zip(pat.findall(cur_masked), pat.findall(cur))
+              if m.strip() and len(m.strip()) < 200][:2]
+        rl = [raw.strip() for m, raw in
+              zip(pat.findall(rep_masked), pat.findall(rep))
+              if m.strip() and len(m.strip()) < 200][:2]
         if cl and rl and cl != rl:
             notes.append(
                 f"  - {sym}:\n    CURRENT side:  {' ; '.join(cl)}\n"
                 f"    REPLAYED side: {' ; '.join(rl)}")
-    if not notes:
-        return ""
-    return ("### side convention note\nThe failing symbol is declared "
-            "DIFFERENTLY in the two sides — do not mix conventions:\n"
-            + "\n".join(notes)
-            + "\nMatch the convention the rest of the file already uses.\n")
+        elif (cl or rl) and not (cl and rl):
+            # S28-229 (duckdb-0126's removal shape): the symbol exists in
+            # exactly ONE side — the other era removed it. The correct
+            # merge drops or rewires the use; show the surviving side's
+            # own call sites as the replacement pattern.
+            side, lines_, label = (
+                ("CURRENT", cl, "removed in REPLAYED") if cl
+                else ("REPLAYED", rl, "removed in CURRENT"))
+            one_sided.append(
+                f"  - {sym}: this API exists ONLY in the {side} side "
+                f"({label}):\n"
+                + "".join(f"      {ln}\n" for ln in lines_))
+    if notes:
+        return ("### side convention note\nThe failing symbol is declared "
+                "DIFFERENTLY in the two sides — do not mix conventions:\n"
+                + "\n".join(notes)
+                + "\nMatch the convention the rest of the file already uses.\n")
+    if one_sided:
+        return ("### api removal note\nOne side's era REMOVED this API — "
+                "uses of it cannot survive the merge. Drop the use or "
+                "rewire it to the surviving side's replacement:\n"
+                + "\n".join(one_sided))
+    return ""
 
 
 def _missing_symbol_decl_guard(failures) -> str:
@@ -3859,7 +3900,10 @@ class ResolutionEngine:
                 pv = PROMPT_RETRY
                 prompt, prompt_trims = retry_prompt_with_trims(
                     unit, context, failures, budget=_budget, attempt=attempt,
-                    near_miss=_seed_ok)
+                    near_miss=_seed_ok,
+                    seam_candidate_text=(
+                        getattr(prev_candidate, "resolved_text", None)
+                        if prev_candidate else None))
                 prof_tag = active_profile().tag()
                 if _factoring_active(unit):
                     pv += "#f"

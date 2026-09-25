@@ -91,3 +91,67 @@ def test_member_shape_is_recognized():
         re_mod.set_side_consistent_feedback(False)
     assert note is not None and "make" in note
 
+
+
+# ---------------------------------------------------------------------------
+# S28-230: the comment mask + the one-sided removal note
+# ---------------------------------------------------------------------------
+
+def _mk_unit(path, lang, cur, rep):
+    return ConflictUnit(
+        session_id="s", step_index=0, path=path, language=lang,
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=""),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=cur),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=rep),
+        original_worktree_text="", marker_span=(0, 0))
+
+
+def test_note_ignores_comment_prose(monkeypatch):
+    """duckdb-0129's noise: the word 'get' inside a // comment posed as
+    the replayed side's declaration. The mask blanks comments first."""
+    monkeypatch.setattr(re_mod, "_SIDE_CONVENTION_ENABLED", True)
+    unit = _mk_unit("a.cpp", "cpp",
+                    "void f(Helper h) {\n  h.get();\n}\n",
+                    "// all that will get us out is a $\nvoid f(Helper h) {\n}\n")
+    f = SimpleNamespace(message="error: 'class Helper' has no member named 'get'",
+                        validator="v", detail={})
+    note = re_mod._side_convention_note(unit, [f])
+    assert "will get us out" not in (note or "")
+
+
+def test_one_sided_removal_note(monkeypatch):
+    """duckdb-0126's removal shape: the failing member exists in only
+    ONE side — the note names the removal and shows the surviving
+    side's own call sites."""
+    monkeypatch.setattr(re_mod, "_SIDE_CONVENTION_ENABLED", True)
+    unit = _mk_unit("p.cpp", "cpp",
+                    "void f(Cache c) {\n  c.GetTokenizer().Run();\n}\n",
+                    "void f(Cache c) {\n  c.Run();\n}\n")
+    f = SimpleNamespace(message="error: 'struct Cache' has no member named 'GetTokenizer'",
+                        validator="v", detail={})
+    note = re_mod._side_convention_note(unit, [f])
+    assert "api removal note" in note
+    assert "ONLY in the CURRENT side" in note
+
+
+def test_both_sides_note_still_fires(monkeypatch):
+    """The original S28-180 contract is unchanged by the mask."""
+    monkeypatch.setattr(re_mod, "_SIDE_CONVENTION_ENABLED", True)
+    unit = _mk_unit("p.cpp", "cpp",
+                    "void f() {\n  state.tokens.clear();\n}\n",
+                    "void g(vector<T> tokens) {\n  tokens.clear();\n}\n")
+    f = SimpleNamespace(message="error: 'struct S' has no member named 'tokens'",
+                        validator="v", detail={})
+    note = re_mod._side_convention_note(unit, [f])
+    assert "side convention note" in (note or "")
+
+
+def test_finder_guard_rejects_control_flow(monkeypatch):
+    """duckdb-0063: 'return rule;' matched the plain-variable branch —
+    the injection ladder inserted the statement as garbage."""
+    from capybase.verification import find_symbol_declaration_lines
+    cur = "optional_ptr<Rule> rule;\n"
+    rep = "void f() {\n  return rule;\n}\n"
+    d = find_symbol_declaration_lines("rule", "cpp", cur, rep, "")
+    assert d == ["optional_ptr<Rule> rule;"]
