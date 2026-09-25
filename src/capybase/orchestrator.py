@@ -14797,6 +14797,39 @@ class Orchestrator:
         units = [u for u, _ in accepted]
         language = units[0].language if units else None
 
+        # S28-245 (queue item 3): stash the WHOLE-FILE sides on the units
+        # (the _try_structural_resolve precedent) — the repair-path units
+        # reach the side/API notes without a stash, and the fragments the
+        # notes would grep are 3-10 lines while the failing symbols'
+        # declarations live in the FILE (trial15: the armed notes fired
+        # zero times on the duckdb loops for exactly this). Inert
+        # metadata unless the side-note flag is on; the note prefers the
+        # stash and falls back to the fragments.
+        # S28-234 gap 2 (queue item 5): stash the ASSEMBLED buffer too —
+        # the failure's line numbers are in assembly coordinates, which
+        # prefix+fragment scan text cannot resolve (s0005's paren-mismatch
+        # family). The seam note prefers it; inert unless the seam flag
+        # is on.
+        _asm_buffer = None
+        try:
+            _asm_buffer = _resolved_buffer(original, accepted)
+        except Exception:  # noqa: BLE001 — splice may fail on bad spans
+            _asm_buffer = None
+        if (units and "whole_file_sides" not in (
+                units[0].structural_metadata or {})):
+            try:
+                _wf_sides, _wf_base = _true_stage_sides(self.git, path)
+                _stash = {**_wf_sides, "base": _wf_base}
+                for _u in units:
+                    _u.structural_metadata.setdefault(
+                        "whole_file_sides", _stash)
+            except Exception:  # noqa: BLE001 — the stash is advisory
+                pass
+        if units and _asm_buffer:
+            for _u in units:
+                _u.structural_metadata.setdefault(
+                    "assembled_buffer", _asm_buffer)
+
         # C4 (sprint-22): per-(step, path) tried-repair registry keyed by
         # failure signature. A deterministic repair that already FAILED for
         # this exact signature never re-runs (axum-0013: the model re-resolve

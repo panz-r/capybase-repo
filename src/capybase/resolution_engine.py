@@ -2585,10 +2585,16 @@ def _fragment_opens_statement(text: str | None) -> bool:
 
 
 def _seam_scan_text(unit: ConflictUnit, candidate_text: str | None) -> str:
-    """The text the seam scans run on: the SPLICED file's shape — the
-    worktree pre-context before the unit's marker span, then the
-    candidate. For whole-file units the pre-context is empty and the
-    candidate IS the file."""
+    """The text the seam scans run on. S28-234 gap 2 (queue item 5): the
+    ASSEMBLED buffer — stashed by the whole-file repair — is preferred,
+    because the failure's line numbers are in assembly coordinates that
+    prefix+fragment scan text cannot resolve (s0005: the paren whose
+    opener sits outside the 3-10-line fragment). Fallback: the SPLICED
+    file's shape — the worktree pre-context before the unit's marker
+    span, then the candidate."""
+    asm = (unit.structural_metadata or {}).get("assembled_buffer")
+    if asm:
+        return asm
     ws = unit.original_worktree_text or ""
     span = getattr(unit, "marker_span", None)
     pre = ""
@@ -2704,6 +2710,15 @@ def _side_convention_note(unit, failures) -> str:
         return ""
     cur = unit.current.text or ""
     rep = unit.replayed.text or ""
+    # S28-245 (queue item 3): prefer the WHOLE-FILE sides stashed on the
+    # unit by the orchestrator — the unit fragments are 3-10 lines and
+    # the failing symbols' declarations live in the FILE (trial15: the
+    # armed notes fired zero times on the duckdb loops for exactly
+    # this). The fragments stay the fallback; the stash carries the
+    # same "current"/"replayed" keys as the sides themselves.
+    _wf_sides = (unit.structural_metadata or {}).get("whole_file_sides") or {}
+    cur = _wf_sides.get("current") or cur
+    rep = _wf_sides.get("replayed") or rep
     if not cur or not rep:
         return ""
     syms: list[str] = []
