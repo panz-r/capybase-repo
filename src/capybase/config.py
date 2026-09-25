@@ -1045,6 +1045,15 @@ class FutureConfig(BaseModel):
     # buffer's error), a fail re-proves the escalation on fresh
     # evidence. Zero new model requests (a warm build).
     enable_ship_gate_final_probe: bool = False
+    # S28-233/243 (queue item 4): the terminal-path arms (pilot-gated,
+    # default OFF) — when a file's per-unit loop ends with an exhausted
+    # unit (the session's terminal escalation exit, upstream of Phase
+    # 2), the deterministic arms engage on the assembled buffer
+    # (accepted splices + the escalated unit's best attempt): the
+    # pystring closer first, re-validated on the whole file before
+    # acceptance. Zero new model requests. Fixture: 0052's trial15
+    # sessions (12 draws, zero arm events, Phase 2 never reached).
+    enable_terminal_path_arms: bool = False
     # S28-203: the sides-check alignment on the model's validator doubt
     # (pilot-gated, default OFF) — the doubt is tested against the
     # pristine sides before an escalation shelves the candidate.
