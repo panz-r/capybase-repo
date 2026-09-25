@@ -398,6 +398,13 @@ _ORACLE_PROBE_CACHE: dict[str, bool | None] = {}
 # (the content cannot be discriminated by a build that never finishes).
 _C_BUILD_TIMED_OUT: set[str] = set()
 
+# S28-225 (the S28-217 follow-up): the harness's build verdicts carry no
+# OUTPUT on the row — the fmt-0003 slice contradiction (one slice's
+# runner build PASS on the tree, the next slice's 0.6s FAIL) cannot be
+# attributed without the failing TU / cmake state. The last failing
+# build's output head lands here per case and rides the row.
+_LAST_C_BUILD_DIAG: dict[str, str] = {}
+
 
 @dataclass
 class Case:
@@ -1537,6 +1544,7 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
         if proc.returncode == 0:
             return True
         stderr = (proc.stderr or "") + (proc.stdout or "")
+        _LAST_C_BUILD_DIAG[case.id] = stderr[:400]
         err_lines = stderr.splitlines()
         # Linker error → compile passed; link is infrastructure.
         is_linker_error = any(
@@ -2749,6 +2757,8 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
                 "pass" if c_builds_result is True
                 else "fail" if c_builds_result is False
                 else _harness_builds[-1].get("outcome", "na"))
+            if c_builds_result is False and case.id in _LAST_C_BUILD_DIAG:
+                _harness_builds[-1]["diag"] = _LAST_C_BUILD_DIAG[case.id]
         # WS1c oracle-build-check — only for cases heading to a non-clean
         # verdict (cost: one tree build / two cargo runs per failing case;
         # clean passes never need reclassification). The predicate mirrors
