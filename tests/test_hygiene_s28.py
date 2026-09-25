@@ -226,3 +226,17 @@ def test_ship_gate_unproven_census(monkeypatch):
     # the field serializes with the row
     res.ship_gate_unproven = True
     assert res.__dict__["ship_gate_unproven"] is True
+
+
+def test_source_pin_beam_skip_census():
+    """S28-233: the beam-skip census emit exists and precedes the
+    `if accepted:` guard — the empty-accepted population (0052's shape:
+    every per-unit candidate rejected, the assembled buffer failing on
+    the inter-unit seam) is journaled instead of silently skipped."""
+    import capybase.orchestrator as orch_mod
+    from pathlib import Path
+    src = Path(orch_mod.__file__).read_text()
+    assert "whole_file_beam_skipped" in src
+    i_skip = src.index("whole_file_beam_skipped")
+    i_guard = src.index("if accepted:", i_skip)
+    assert i_skip < i_guard

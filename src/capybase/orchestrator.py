@@ -12111,6 +12111,24 @@ class Orchestrator:
                     # depend on correct fault attribution. 6 of 7 repair-failed
                     # cases in the v3 C corpus were at sim >= 0.95 (model output
                     # correct) — the deterministic pass may close them.
+                    if not accepted:
+                        # S28-233 (the CARRIER-2 census): the beam's arms
+                        # (pystring closer, block dedup, symbol injection)
+                        # are unreachable when EVERY per-unit candidate was
+                        # rejected — the dominant python seam population's
+                        # exact shape (0052: 12 draws, 18 rejections, the
+                        # assembled buffer failing on the inter-unit
+                        # docstring seam, zero arm events). The skip is
+                        # journaled so the census sizes it before any
+                        # contract extension (the arms splice via the
+                        # accepted candidates; an empty accepted list
+                        # needs a sides/portfolio substrate instead).
+                        self.journal.emit(
+                            "whole_file_beam_skipped",
+                            {"reason": "no_accepted_candidates",
+                             "path": path},
+                            step_index=self.step, path=path,
+                        )
                     if accepted:
                         # When file_validation is None (Exit A), there are no
                         # fresh hard_failures to feed; use the last-known
