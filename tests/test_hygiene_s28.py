@@ -185,3 +185,44 @@ def test_operator_eq_pattern_captured():
         if m and m.group(1) not in syms:
             syms.append(m.group(1))
     assert "operator=" in syms
+
+
+def test_ship_gate_unproven_census(monkeypatch):
+    """S28-232: escalated c/cpp rows with no passing probe after the
+    last acceptance carry ship_gate_unproven=True — the fmt-0003
+    pattern on every row, computable from the journal events."""
+    from types import SimpleNamespace as NS
+
+    def _ev(seq, etype, outcome=None):
+        return NS(seq=seq, event_type=etype,
+                  payload=({"outcome": outcome} if outcome else {}))
+
+    case = NS(id="c1", language="cpp")
+    res = _M.CaseResult(id="c1", language="cpp", dataset="d")
+    res.escalated = True
+    events = [
+        _ev(10, "build_probe", "fail"),
+        _ev(20, "candidate_accepted"),
+        _ev(30, "build_probe", "fail"),   # strangers' probes after accept
+        _ev(40, "build_probe", "fail"),
+    ]
+    last_accept = max((e.seq for e in events
+                       if e.event_type == "candidate_accepted"), default=None)
+    proved = any(e.event_type == "build_probe"
+                 and (e.payload or {}).get("outcome") == "pass"
+                 and e.seq > last_accept for e in events)
+    ship_unproven = (case.language in ("c", "cpp", "c++")
+                     and res.escalated and last_accept is not None
+                     and not proved)
+    assert ship_unproven is True
+
+    # a passing probe after acceptance disproves it
+    events.append(_ev(50, "build_probe", "pass"))
+    proved = any(e.event_type == "build_probe"
+                 and (e.payload or {}).get("outcome") == "pass"
+                 and e.seq > last_accept for e in events)
+    assert proved is True
+
+    # the field serializes with the row
+    res.ship_gate_unproven = True
+    assert res.__dict__["ship_gate_unproven"] is True

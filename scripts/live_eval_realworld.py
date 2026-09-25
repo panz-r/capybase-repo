@@ -604,6 +604,11 @@ class CaseResult:
     # distribution. Last acceptance_trust event wins.
     acceptance_tier: str | None = None
     acceptance_decision: str | None = None
+    # S28-232 (the S28-228 ship-gate census): escalated C/CPP rows where
+    # the session NEVER recorded a passing build probe after the last
+    # candidate_accepted — the acceptance shipped content whose
+    # buildability nothing in-session proved. Pure journal computation.
+    ship_gate_unproven: bool = False
     # FR2a flight recorder: the orchestrator's session_id (the per-case artifact
     # root under .rebase-agent/sessions/<session_id>/). Populated when
     # --preserve-flights copies the session dir out; None otherwise. The flight
@@ -2730,6 +2735,23 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         # S28-194: carry the engine's acceptance trust onto the row
         # (last acceptance_trust event wins — the splice_loser_dropped
         # capture pattern).
+        # S28-232: the ship-gate census — escalated compile-gated rows
+        # with no passing probe after the last acceptance shipped
+        # unproven content (the fmt-0003 pattern: acceptance at seq 29
+        # on a red last probe, then strangers' probes dominated the
+        # escalation reason).
+        if (case.language in ("c", "cpp", "c++") and res.escalated):
+            _last_accept_seq = max(
+                (getattr(e, "seq", -1) for e in _session_events
+                 if getattr(e, "event_type", None) == "candidate_accepted"),
+                default=None)
+            if _last_accept_seq is not None:
+                _proved_after = any(
+                    getattr(e, "event_type", None) == "build_probe"
+                    and (getattr(e, "payload", None) or {}).get("outcome") == "pass"
+                    and getattr(e, "seq", -1) > _last_accept_seq
+                    for e in _session_events)
+                res.ship_gate_unproven = not _proved_after
         for _e in _session_events:
             if getattr(_e, "event_type", None) == "acceptance_trust":
                 _p = getattr(_e, "payload", None) or {}
