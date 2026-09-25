@@ -426,6 +426,11 @@ _UNVERIFIED_RELABEL = os.environ.get(
 # free + sim >= PASS reads PASS.
 _SHIP_GATE_READ = os.environ.get("CAPYBASE_SHIP_GATE_PROBE", "") == "1"
 
+# S28-243.2 (queue item 6): the era-header pre-screen (pilot-gated,
+# default OFF; CAPYBASE_ERA_PRESCREEN=1) — setup-time GU for cases whose
+# oracle references tree-absent APIs (the duckdb near-oracle class).
+_ERA_PRESCREEN = os.environ.get("CAPYBASE_ERA_PRESCREEN", "") == "1"
+
 
 @dataclass
 class Case:
@@ -684,6 +689,11 @@ class CaseResult:
     # class). toolchain_probe carries the per-side rc/signature audit.
     toolchain_dead: bool = False
     toolchain_probe: dict = None
+    # S28-243.2 (queue item 6): the era-header pre-screen's door — the
+    # conflict file's TU needs APIs absent from the tree AND the oracle's
+    # own text uses them, so the pass criterion is unachievable in-place;
+    # classified at setup, before any model budget.
+    era_header_dead: bool = False
 
 
 def _engine_session_completed(flights_dir, case_id, live_root=None) -> bool:
@@ -1925,6 +1935,85 @@ def _mark_toolchain_dead(res: "CaseResult", probe: dict, t0: float) -> "CaseResu
     return res
 
 
+#: S28-254.3/S28-243.2 (queue item 6): the gcc error shapes that name a
+#: symbol the conflict file's TU needs. Mirrors the S28-245 side-note set.
+_ERA_SYMBOL_PATTERNS = (
+    re.compile(r"no member named\s+'?([A-Za-z_]\w*)"),
+    re.compile(r"no matching function for call to\s+'([\w:]+)"),
+    re.compile(r"no declaration matches\s+'?([\w:]+)"),
+    re.compile(r"'([A-Za-z_]\w*)' does not name a type"),
+    re.compile(r"unknown type name\s+'([A-Za-z_]\w*)"),
+    re.compile(r"use of undeclared identifier\s+'([A-Za-z_]\w*)"),
+)
+
+
+def _tree_defines_symbol(repo: Path, symbol: str) -> bool:
+    """True when ``symbol`` appears anywhere in the materialized tree
+    (fixed-string git grep — presence anywhere counts, so a miss is a
+    real miss; conservative against the S28-243.2 macro/default
+    false-positive risk)."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "grep", "-I", "-l", "-F", symbol,
+             "--", ".",],
+            capture_output=True, text=True, timeout=60)
+        return bool((out.stdout or "").strip())
+    except Exception:  # noqa: BLE001 — the grep is best-effort
+        return True  # inconclusive counts as present (never a false GU)
+
+
+def _era_header_screen(repo: Path, case: "Case",
+                       probe: dict) -> dict | None:
+    """S28-243.2 (queue item 6): the era-header pre-screen.
+
+    The toolchain probe already built BOTH pristine sides and holds
+    their failures. Extract the symbols those conflict-TU errors name;
+    a symbol absent from the ENTIRE tree is era-lost — and if the
+    ORACLE's own text uses it, the human resolution cannot compile in
+    this tree either: the case's pass criterion is unachievable
+    in-place (the S28-144 GU doctrine, evaluated at setup instead of
+    after the model budget). Returns the screen dict or None when
+    nothing is decidable."""
+    if not probe or probe.get("toolchain_dead"):
+        return None
+    probes = probe.get("probes") or {}
+    symbols: list[str] = []
+    for side in ("current", "replayed"):
+        for ln in (probes.get(side) or {}).get("sig") or []:
+            for pat in _ERA_SYMBOL_PATTERNS:
+                m = pat.search(ln or "")
+                if m:
+                    sym = m.group(1).split("::")[-1]
+                    if len(sym) >= 4 and sym not in symbols:
+                        symbols.append(sym)
+    missing = [s for s in symbols[:8]
+               if not _tree_defines_symbol(repo, s)]
+    if not missing:
+        return {"era_header_dead": False, "missing_symbols": [],
+                "oracle_uses_missing": []}
+    oracle_uses = [s for s in missing
+                   if s in (case.expected_resolved or "")]
+    return {"era_header_dead": bool(oracle_uses),
+            "missing_symbols": missing,
+            "oracle_uses_missing": oracle_uses}
+
+
+def _mark_era_header_dead(res: "CaseResult", screen: dict,
+                          t0: float) -> "CaseResult":
+    """S28-243.2's GU door: the case is era-mismatched at the conflict
+    file BEFORE any model budget — an unpassable case is not a resolver
+    outcome (the toolchain-probe doctrine)."""
+    res.elapsed = time.time() - t0
+    res.escalated = True
+    res.era_header_dead = True
+    res.reason = (
+        "era-header pre-screen: conflict-file APIs absent from the tree "
+        f"({', '.join(screen.get('oracle_uses_missing') or [])}) — the "
+        "oracle itself references them, so no in-file resolution can pass "
+        "this gate (S28-243.2)")
+    return res
+
+
 def _api_drift_probe(
     clone: Path, merge_sha: str, path: str,
     expected_current: str, expected_replayed: str,
@@ -2479,6 +2568,12 @@ def _verdict_chain(r: "CaseResult") -> str:
     the gate identically — the case is un-passable by construction."""
     if getattr(r, "toolchain_dead", False):
         return "ESCALATE_TOOLCHAIN"
+    if getattr(r, "era_header_dead", False):
+        # S28-243.2 (queue item 6): the pre-screen's GU door — the
+        # conflict file needs tree-absent APIs and the ORACLE uses them
+        # too, so the gate cannot judge any resolution here (the
+        # environment's era gap, not a resolver failure).
+        return "GATE_UNAVAILABLE"
     if r.escalated:
         # S28-253 (build-what-you-ship's fresh-gate read, same flag): an
         # escalation whose SHIPPED buffer the HARNESS's own build passes,
@@ -2762,6 +2857,18 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
             # Declined classification — still recorded for the audit trail
             # (the harvest census reads per-case probe outcomes).
             res.toolchain_probe = _cached_probe
+            # S28-243.2 (queue item 6, CAPYBASE_ERA_PRESCREEN=1): the
+            # era-header pre-screen — compose with the probe's held
+            # side-build failures; a case whose ORACLE references
+            # tree-absent APIs is unpassable in-place, classified BEFORE
+            # any model budget.
+            if _ERA_PRESCREEN:
+                _screen = _era_header_screen(repo, case, _cached_probe)
+                if _screen and _screen.get("era_header_dead"):
+                    res.harness_builds = _harness_builds or None
+                    res.toolchain_probe = {
+                        **(_cached_probe or {}), "era_header_screen": _screen}
+                    return _mark_era_header_dead(res, _screen, t0)
         cfg = _config_for(case, has_crate=crate_source is not None)
         if _RELAXED_FLOOR:
             cfg.future.enable_floor_relaxed_band = True
