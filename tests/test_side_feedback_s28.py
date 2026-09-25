@@ -155,3 +155,19 @@ def test_finder_guard_rejects_control_flow(monkeypatch):
     rep = "void f() {\n  return rule;\n}\n"
     d = find_symbol_declaration_lines("rule", "cpp", cur, rep, "")
     assert d == ["optional_ptr<Rule> rule;"]
+
+
+def test_side_note_rides_the_retry_carrier(monkeypatch):
+    """S28-237 (trial15): the side/API notes had the seam note's
+    carrier gap — the duckdb loops retry fresh-gen, so the note must
+    ride retry_prompt_with_trims as well."""
+    from capybase.resolution_engine import build_retry_prompt
+    from capybase.conflict_model import ContextBundle
+    monkeypatch.setattr(re_mod, "_SIDE_CONVENTION_ENABLED", True)
+    unit = _mk_unit("p.cpp", "cpp",
+                    "void f(Cache c) {\n  c.GetTokenizer().Run();\n}\n",
+                    "void f(Cache c) {\n  c.Run();\n}\n")
+    f = SimpleNamespace(message="error: 'struct Cache' has no member named 'GetTokenizer'",
+                        validator="v", detail={})
+    prompt = build_retry_prompt(unit, ContextBundle(primary_text="x"), [f])
+    assert "api removal note" in prompt

@@ -2287,7 +2287,11 @@ def retry_prompt_with_trims(
     # S28-227/229 seam v2: the seam context reveal rides the FRESH-GEN
     # retry too (the python_syntax stall family lives in this loop, not
     # the targeted repair path — pilot6: zero carriers for the note).
+    # S28-237 (the trial15 finding): the SIDE/API notes had the same
+    # carrier gap — 0127's era-mix residual is their proven content and
+    # the duckdb loops retry fresh-gen, so the note rides here too.
     _seam_note = _seam_aware_note(unit, failures, seam_candidate_text)
+    _side_note_r = _side_convention_note(unit, failures)
     prompt = f"""Your previous merge attempt was rejected. Fix it.
 
 {inner}
@@ -2295,6 +2299,7 @@ def retry_prompt_with_trims(
 ### validator feedback (previous attempt failed these checks)
 {feedback}
 {_decl_guard}
+{_side_note_r}
 {_seam_note}
 Address every failure above; do not repeat the mistake.
 """
