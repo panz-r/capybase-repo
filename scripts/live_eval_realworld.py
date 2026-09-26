@@ -2348,7 +2348,7 @@ def _oracle_builds_uncached(repo: Path, case: Case, crate_source: Path | None,
             import tempfile as _tfd
             try:
                 with _tfd.NamedTemporaryFile(
-                        suffix=".py", delete=False,
+                        mode="w", suffix=".py", delete=False,
                         encoding="utf-8") as _tf:
                     _tf.write(case.expected_resolved)
                     _tmp_py = _tf.name
