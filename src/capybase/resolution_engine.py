@@ -2269,7 +2269,10 @@ def retry_prompt_with_trims(
     in ``propose`` concatenated intro+data+contract+rules directly, silently
     ignoring ``instruction_position``).
     """
-    feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
+    # S28-281: coherence-unverified notes stay out of prompt bullets.
+    feedback = "\n".join(
+        _render_failure(f) for f in failures if f.validator != "coherence"
+    ) or "- (no specific failures reported)"
     # D5c (s27) declaration guard — the shared helper (also used by the
     # repair path). This guard previously lived only in the orchestrator's
     # journal-mirror copy of the retry prompt; the model never saw it.
@@ -2363,7 +2366,9 @@ def build_recovery_prompt(
             total=budget.total // 2,
             reserved_for_completion=budget.reserved_for_completion)
     feedback = (
-        "\n".join(_render_failure(f) for f in (failures or []))
+        # S28-281: coherence-unverified notes stay out of prompt bullets.
+        "\n".join(_render_failure(f) for f in (failures or [])
+                  if f.validator != "coherence")
         or "- (the previous attempt self-reported it could not merge; no specific validator failure)"
     )
     profile = active_profile()
@@ -2854,7 +2859,12 @@ def build_repair_prompt(
     filter — the block is omitted, preserving the prior behavior.
     """
     profile = active_profile()
-    feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
+    # S28-281: the coherence-unverified note is pipeline state, not a text
+    # defect — the model cannot act on it, so it never renders as a failure
+    # bullet (it keeps its fail-closed semantics in the verifier's `hard`).
+    feedback = "\n".join(
+        _render_failure(f) for f in failures if f.validator != "coherence"
+    ) or "- (no specific failures reported)"
     _decl_guard = _missing_symbol_decl_guard(failures)
     _side_note = _side_convention_note(unit, failures)
     _seam_note = _seam_aware_note(

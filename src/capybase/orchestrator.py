@@ -417,15 +417,20 @@ def _hard_failure_signature(failures) -> frozenset:
     Keys on failure shape, not candidate hashes, so it catches the empty-output
     transport loop (random UUIDs defeat the hash backstops; the content-hash
     checks are also gated on non-empty resolved_text) AND genuine stuck-on-one-
-    compiler-error cycling. ``failures`` is a list of VerificationFailure."""
+    compiler-error cycling. ``failures`` is a list of VerificationFailure.
+
+    S28-281 (trial36, polars-0015): validator="coherence" failures are
+    EXCLUDED — the coherence-unverified note is a statement about the
+    pipeline's provisional state, not a defect in the text, and it
+    flattened materially different candidates into one signature (a
+    round that DROPPED the coherence repair still normalized identical).
+    It keeps its fail-closed semantics in `hard` (verification.py)."""
     from collections import Counter
-    # P5 (sprint-23 batch E): prepend the error class to the normalized
-    # message so "symbol missing" → "type mismatch" registers as progress
-    # (different class prefix). Keeps the 2-tuple shape for backward compat.
     return frozenset(Counter(
         (f.validator,
          f"[{_error_class(f.message)}] {_normalize_failure_message(f.message)}")
         for f in failures
+        if f.validator != "coherence"
     ).items())
 
 
@@ -3218,11 +3223,42 @@ _FIXIT_RE = _fixit_re_mod.compile(
 )
 
 
+def _unescape_fixit_text(t: str) -> str:
+    """S28-279 (trial36, php-0116): gcc's -fdiagnostics-parseable-fixits
+    escapes the text field with standard C escapes — a multi-line hint
+    arrives as LITERAL backslash-n sequences, and splicing them raw glued
+    an include block into physical line 1 (jaccard 1.0 -> 0.9712 against
+    the oracle). Unescape the documented set; the splicer below handles
+    the resulting newlines as real line splits."""
+    if "\\" not in t:
+        return t
+    out: list[str] = []
+    i = 0
+    while i < len(t):
+        c = t[i]
+        if c == "\\" and i + 1 < len(t):
+            n = t[i + 1]
+            mapped = {"n": "\n", "t": "\t", "\\": "\\", '"': '"',
+                      "'": "'"}.get(n)
+            if mapped is not None:
+                out.append(mapped)
+                i += 2
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _count_gcc_errors(stderr: str) -> int:
+    return sum(1 for ln in stderr.splitlines() if "error:" in ln.lower())
+
+
 def _try_gcc_fixit_repair(
     failures: list,
     original: str,
     accepted: list[tuple[ConflictUnit, CandidateResolution]],
     fault_idx: int,
+    journal=None,
 ) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
     """Apply gcc's own structured fix-it hints to the whole-file buffer.
 
@@ -3297,7 +3333,7 @@ def _try_gcc_fixit_repair(
         sl, sc, el, ec, text = (
             int(m.group(1)), int(m.group(2)),
             int(m.group(3)), int(m.group(4)),
-            m.group(5),
+            _unescape_fixit_text(m.group(5)),
         )
         fixits.append((sl, sc, el, ec, text))
 
@@ -3318,6 +3354,16 @@ def _try_gcc_fixit_repair(
         if sl != el:
             continue
         col_end = max(0, ec - 1)
+        # S28-279: an unescaped fix-it may still carry REAL newlines (a
+        # multi-line insertion, e.g. gcc's missing-include hints). Splice
+        # the first line in place and insert the remainder as new lines;
+        # reverse-order application keeps earlier line numbers valid.
+        if "\n" in text:
+            parts = text.split("\n")
+            lines[line_idx] = line[:col_start] + parts[0] + line[col_end:]
+            for k, extra in enumerate(parts[1:], start=1):
+                lines.insert(line_idx + k, extra)
+            continue
         # Apply: replace [col_start:col_end] with text, or insert at col_start.
         new_line = line[:col_start] + text + line[col_end:]
         lines[line_idx] = new_line
@@ -3328,6 +3374,41 @@ def _try_gcc_fixit_repair(
 
     # Brace-balance safety check (same as _try_deterministic_cc_repair).
     if not _braces_balanced(repaired, lang):
+        return None
+
+    # S28-279(b), ERROR MONOTONICITY: a fix-it candidate is accepted only
+    # when its own gcc pass reports STRICTLY FEWER errors than the buffer
+    # we started from (zero counts as strictly fewer). php-0116's r1
+    # carried MORE errors than its byte-perfect r0 — the arm had applied
+    # parse-recovery guesses to an error class the standalone header gate
+    # cannot judge (S28-280) — and the corrupted buffer still became the
+    # accepted best attempt.
+    _orig_errs = _count_gcc_errors(stderr)
+    import tempfile as _tfd_mono
+    import subprocess as _sp_mono
+    with _tfd_mono.NamedTemporaryFile(
+            mode="w", suffix=suffix, delete=False, encoding="utf-8") as _tfm:
+        _tfm.write(repaired)
+        _mono_path = _tfm.name
+    try:
+        _mono = _sp_mono.run(
+            [cc, "-fsyntax-only", f"-std={std}", _mono_path],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:  # noqa: BLE001 — the guard is advisory
+        from pathlib import Path as _Pm
+        _Pm(_mono_path).unlink(missing_ok=True)
+        return None
+    from pathlib import Path as _Pm
+    _Pm(_mono_path).unlink(missing_ok=True)
+    _new_errs = _count_gcc_errors(_mono.stderr or "")
+    if _new_errs >= _orig_errs and _new_errs > 0:
+        if journal is not None:
+            journal("fixit_declined_reason", {
+                "reason": "no_error_improvement",
+                "errors_before": _orig_errs,
+                "errors_after": _new_errs,
+            })
         return None
 
     wf_unit = unit.model_copy(update={
@@ -12054,8 +12135,23 @@ class Orchestrator:
                                     )
                                     # Extract the most relevant error lines
                                     # (file:line:error patterns) for attribution
+                                    # S28-287 (redis-0032): when no line carries
+                                    # BOTH an error word and the conflict
+                                    # extension, fall back to ANY error line
+                                    # (driver summaries excluded) before the
+                                    # bare `build failed (cmd)` — the bare
+                                    # message blinded the tree-absent trigger
+                                    # AND five model draws.
+                                    _fallback_err = [
+                                        ln for ln in _build_output.splitlines()
+                                        if "error" in ln.lower()
+                                        and not ln.strip().startswith(("make[", "make:", "ninja:"))
+                                        and "error 1" not in ln.lower()
+                                        and "error 2" not in ln.lower()
+                                    ][:5]
                                     _msg = "; ".join(
                                         _merge_lines or _error_lines
+                                        or _fallback_err
                                     ) or f"build failed ({_build_cmd})"
                                     file_validation = _VR(
                                         candidate_id="build_test",
@@ -12364,6 +12460,16 @@ class Orchestrator:
                     # Attribute the failure to a unit and re-resolve it with the
                     # file-level failures as concrete repair feedback.
                     wf_retries += 1
+                    # S28-275(a): accumulate THIS file's rounds' failure lists —
+                    # the era cascade ROTATES which error surfaces first
+                    # (0126: `cache was not declared` then `ParserCache does
+                    # not name a type`), so a rung keyed on the CURRENT
+                    # round's list sees one shape per round. The union is the
+                    # trigger's honest input. Reset on the file's first retry.
+                    if wf_retries == 1:
+                        _wf_failure_history: list = []
+                    _wf_failure_history.extend(
+                        file_validation.hard_failures)
                     self.journal.emit(
                         "whole_file_repair",
                         {
@@ -12380,6 +12486,7 @@ class Orchestrator:
                             path, accepted, original, file_validation.hard_failures,
                             wall_deadline=_file_wall_deadline,
                             skip_deterministic=_det_unchanged,
+                            accumulated_failures=_wf_failure_history,
                         )
                     )
                     if accepted_opt is None:
@@ -14723,6 +14830,28 @@ class Orchestrator:
             changed = True
         return changed
 
+    def _journal_tree_absent_starvation(self, failures, symbol, path):
+        """S28-285 (duckdb-0126 case study): telemetry-first arbitration.
+
+        When the C1 declaration injection APPLIES on a symbol the
+        tree-absent deletion rung's trigger would ALSO have matched, the
+        rung never gets its turn (the injection returns before the
+        deterministic-beam section) — 0126 spent both repair rounds on
+        inject-then-fail for a TYPE no forward declaration can supply.
+        Journal the overlap so the census can size it before any
+        reordering; zero behavior change."""
+        try:
+            _absent, _hint = _failures_name_compiler_absent_member(failures)
+            if _absent is not None:
+                self.journal.emit(
+                    "tree_absent_starved_by_inject",
+                    {"path": path, "injected_symbol": symbol,
+                     "absent_symbol": _absent, "rename_hint": _hint},
+                    step_index=self.step, path=path,
+                )
+        except Exception:  # noqa: BLE001 — telemetry must not break the arm
+            pass
+
     def _try_symbol_injection_repair(
         self,
         path: str,
@@ -14851,6 +14980,7 @@ class Orchestrator:
                              "path": path},
                             step_index=self.step, path=path,
                             unit_id=unit.unit_id)
+                        self._journal_tree_absent_starvation(failures, symbol, path)
                         return [(wf_unit, wf_cand)]
                     # v2 guard: skip the insert when a declaration already
                     # exists anywhere (the conflicting-declaration shape).
@@ -14918,6 +15048,7 @@ class Orchestrator:
                         self._pending_inject_outcome = {
                             "path": path, "unit_id": unit.unit_id,
                             "symbol": symbol}
+                        self._journal_tree_absent_starvation(failures, symbol, path)
                         return [(wf_unit, wf_cand)]
         # C1b REPLACE mode: for corrupted-line errors, try replacing the
         # corrupted line with its parent counterpart (verbatim, LCS-anchored).
@@ -15109,6 +15240,7 @@ class Orchestrator:
         deterministic_only: bool = False,
         wall_deadline: float | None = None,
         skip_deterministic: bool = False,
+        accumulated_failures: list | None = None,
     ) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
         """Re-resolve the unit most likely at fault for a whole-file failure.
 
@@ -15458,8 +15590,19 @@ class Orchestrator:
                     getattr(self.config, "future", None),
                     "enable_tree_absent_deletion", False)
                     and f"treeabsent:{_sig}" not in _tried):
+                # S28-275(a): the era cascade ROTATES which error surfaces
+                # first, so the current round's list alone sees one shape
+                # per round — fall back to the ACCUMULATED union of the
+                # file's repair rounds before declining.
                 _absent, _rename_hint = _failures_name_compiler_absent_member(
                     failures)
+                _trigger_source = "current"
+                if _absent is None and accumulated_failures:
+                    _absent, _rename_hint = (
+                        _failures_name_compiler_absent_member(
+                            accumulated_failures))
+                    if _absent is not None:
+                        _trigger_source = "accumulated"
                 if _absent is None:
                     self.journal.emit(
                         "tree_absent_trigger_declined",
@@ -15513,6 +15656,7 @@ class Orchestrator:
                                     "tree_absent_deletion_applied",
                                     {"side": _sp_side, "path": path,
                                      "symbol": _absent,
+                                     "trigger_source": _trigger_source,
                                      "rename_hint": _rename_hint or None,
                                      "sig": _sig[:60]},
                                     step_index=self.step, path=path)
@@ -16011,6 +16155,10 @@ class Orchestrator:
             # doesn't suggest any fix-its.
             det = _try_gcc_fixit_repair(
                 failures, original, accepted, fault_idx,
+                journal=lambda _name, _pay: self.journal.emit(
+                    _name, _pay, step_index=self.step, path=path,
+                    unit_id=accepted[fault_idx][0].unit_id
+                    if 0 <= fault_idx < len(accepted) else None),
             )
             if det is not None:
                 unit_new, cand_new = det[0]

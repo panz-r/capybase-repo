@@ -3848,6 +3848,61 @@ def _try_balance_braces(text: str, language: str | None = None) -> str | None:
 
 
 def _try_balance_preprocessor(text: str, decline: list | None = None) -> str | None:
+    """Compose the single-edit balancer to a FIXPOINT (bounded).
+
+    S28-262/278 (the php-0005 measurement): the php_zip.c units each
+    carry half a directive pair, so the assembled buffer holds SEVERAL
+    imbalances and the single-edit balancer cleared only the first
+    (decline `revalidation_failed_multi` / `revalidation_failed_insert`).
+    The composition iterates {classify -> stray-removal -> positional-
+    insertion} up to 3 passes, each re-validated by
+    :func:`_preprocessor_imbalance_line`, until balanced. Each pass's
+    decline reasons are appended raw in order (the caller reads the last
+    entry, so a pass-0 decline is byte-compatible with the legacy
+    single-edit behavior); a multi-pass decline ends with
+    ``multi_imbalance_passes=N`` naming how many passes ran, and an
+    unreached fixpoint ends with ``composition_fixpoint_unreached``.
+    """
+    if decline is not None:
+        decline.clear()
+    if not text:
+        if decline is not None:
+            decline.append("empty")
+        return None
+    current = text
+    for attempt in range(3):
+        pass_decline: list = []
+        nxt = _try_balance_preprocessor_once(
+            current, pass_decline, allow_eof_fallback=attempt >= 1)
+        if nxt is None:
+            if pass_decline:
+                if decline is not None:
+                    decline.extend(pass_decline)
+                    if attempt > 0:
+                        decline.append(f"multi_imbalance_passes={attempt + 1}")
+                return None
+            # Classified as already balanced: `current` is the answer.
+            if attempt == 0:
+                return None  # legacy: nothing to balance in the input
+            return current
+        if pass_decline and nxt == current:
+            # A partial pass made no progress: stop rather than spin.
+            if decline is not None:
+                decline.extend(pass_decline)
+                if attempt > 0:
+                    decline.append(f"multi_imbalance_passes={attempt + 1}")
+            return None
+        current = nxt
+    if _preprocessor_imbalance_line(current) is None:
+        return current
+    if decline is not None:
+        decline.append("composition_fixpoint_unreached")
+    return None
+
+
+def _try_balance_preprocessor_once(
+        text: str, decline: list | None = None,
+        allow_eof_fallback: bool = False) -> str | None:
     r"""Deterministically repair a single C preprocessor ``#if/#endif`` imbalance.
 
     The entity-splitting + splice pipeline can produce a whole-file
@@ -3944,11 +3999,12 @@ def _try_balance_preprocessor(text: str, decline: list | None = None) -> str | N
             if _PP_CLOSE_RE.match(stripped) or _PP_CLOSE_RE.match(raw.strip()):
                 to_remove.append(i)
                 deficit -= 1
-            elif stripped == "":
-                i += 1  # skip blank lines between stray directives
-                continue
-            else:
-                break  # hit real code → stop collecting stray directives
+            # S28-262/278: real code between strays no longer aborts the
+            # collection — the php-0005 measurement showed the assembled
+            # buffer holds SEVERAL imbalances with code between them, and
+            # only bare #endif lines are ever removed, so scanning past
+            # code is safe. (Legacy behavior broke at the first code line
+            # and could never reach the second stray.)
             i += 1
         if not to_remove or deficit > 0:
             if decline is not None:
@@ -3960,9 +4016,12 @@ def _try_balance_preprocessor(text: str, decline: list | None = None) -> str | N
         result = "\n".join(candidate)
         if _preprocessor_imbalance_line(result) is None:
             return result
+        # S28-262/278: a SECOND imbalance remains — the composed wrapper
+        # re-enters this balancer on the partial result (bounded passes);
+        # the reason still records the shape for the census.
         if decline is not None:
-            decline.append("revalidation_failed_multi")  # a SECOND imbalance remains
-        return None
+            decline.append("revalidation_failed_multi")
+        return result
 
     if depth > 0:
         # Unclosed #if(s). Sprint-21 (b) — positional insertion, the mirror
@@ -3995,9 +4054,21 @@ def _try_balance_preprocessor(text: str, decline: list | None = None) -> str | N
         result = "\n".join(candidate)
         if _preprocessor_imbalance_line(result) is None:
             return result
+        # S28-262/278: the sibling-boundary insertion left an imbalance.
+        # Under composition (pass >= 1), the sibling heuristic had its
+        # chance — try the EOF close (the deficit opener is often the LAST
+        # #if in generated-code soup, where scope semantics are weak).
+        # Gated so the single-edit sqlite-0040 shape keeps its legacy
+        # sibling-only position.
+        if allow_eof_fallback:
+            eof_result = "\n".join(lines + suffix_lines)
+            if _preprocessor_imbalance_line(eof_result) is None:
+                return eof_result
+        # The insertion improved but an imbalance remains — the composed
+        # wrapper re-enters on the partial result.
         if decline is not None:
             decline.append("revalidation_failed_insert")
-        return None
+        return result
 
     # S28-262: the PDA flags #else/#elif without a matching #if, but the
     # depth walk above only counts OPEN/CLOSE — an #else-imbalance lands
@@ -7105,7 +7176,13 @@ class VerificationEngine:
                                     ln for ln in err_lines
                                     if not _is_driver_summary(ln)
                                 ] or err_lines
-                                _probe_tail = "; ".join(_probe_err_sel[-3:]) if _probe_err_sel else (msg or "")
+                                # S28-287 (redis-0032): HEAD-biased selection —
+                                # gcc's primary diagnostic precedes its caret/
+                                # source/caret render, and a tail slice can
+                                # keep only the caret (the `~~~` line with no
+                                # message), leaving the trigger and the model
+                                # nothing to match on.
+                                _probe_tail = "; ".join(_probe_err_sel[:3]) if _probe_err_sel else (msg or "")
                                 _probe_tail = _probe_tail[:300]
                                 if _probe_tail:
                                     _probe_extra["errors"] = _probe_tail
@@ -7333,9 +7410,18 @@ class VerificationEngine:
                 and not (features.get("syntax_checked")
                          and features.get("syntax_passed"))):
             features["coherence_repair_unverified"] = True
+            # S28-281 (trial36, polars-0015): the note keeps its
+            # fail-closed semantics (in `hard`, so the candidate cannot
+            # pass) but moves to its own validator class — a statement
+            # about the PIPELINE's provisional state, not a defect in
+            # the text. The CEGIS failure signature and the repair
+            # prompt exclude this class (see _hard_failure_signature /
+            # build_repair_prompt): the signature flattened materially
+            # different candidates into one shape, and the model was
+            # prompted to fix a meta-diagnostic it cannot act on.
             hard.append(
                 VerificationFailure(
-                    validator="syntax",
+                    validator="coherence",
                     severity="error",
                     message=(
                         "coherence repair applied without compiler "
