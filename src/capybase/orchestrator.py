@@ -11742,13 +11742,22 @@ class Orchestrator:
                             and len(_ss_sigs) >= _ss_t
                             and len(set(_ss_sigs[-_ss_t:])) == 1
                             and any(_ss_round_model[-_ss_t:])):
+                        # S28-264 trial catch (redis-0032 INFRA_LOST): a
+                        # CLEARED round leaves the next validation
+                        # hard-failure-free — cur_sig is the EMPTY
+                        # frozenset and next(iter(...)) exhausted, raising
+                        # StopIteration out of the journaling (the whole
+                        # orch died after a SUCCESSFUL repair). Guard the
+                        # diagnostic; the stop's semantics are unchanged.
+                        _sig_head = (
+                            next(iter(sorted(cur_sig)))[0][1][:80]
+                            if cur_sig else "(no hard failures)")
                         self.journal.emit(
                             "same_signature_stop",
                             {"consecutive": _ss_t,
                              "wf_retry": wf_retries,
                              "model_in_window": any(_ss_round_model[-_ss_t:]),
-                             "signature_head": next(
-                                 iter(sorted(cur_sig)))[0][1][:80]},
+                             "signature_head": _sig_head},
                             step_index=self.step, path=path,
                         )
                         break
