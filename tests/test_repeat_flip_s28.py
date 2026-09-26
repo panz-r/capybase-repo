@@ -241,3 +241,51 @@ def test_equal_rank_equal_sim_is_not_a_flip():
     r = _row(verdict="GATE_UNAVAILABLE", matches_oracle=0.0,
              best_repeat_verdict="GATE_UNAVAILABLE", best_repeat_sim=0.0)
     assert not _M._is_repeat_flip(r)
+
+
+# ---------------------------------------------------------------------------
+# S28-265: the oracle-identity door + the promotion's evidence copy
+# ---------------------------------------------------------------------------
+
+def test_oracle_identity_door_reads_gu():
+    """scikit-0005's trial16 row: sim 0.998 (the content IS the oracle),
+    oracle probe undecidable — GU, not UNVERIFIED ('we couldn't judge'
+    is dishonest when the answer is the oracle's own content). The
+    identity rung rides the relabel's flag; the 0.80-0.99 band stays
+    UNVERIFIED."""
+    _M._UNVERIFIED_RELABEL = True
+    try:
+        r = _row(oracle_builds=None, matches_oracle=0.998,
+                 marker_free=True)
+        assert _M._verdict_chain(r) == "GATE_UNAVAILABLE"
+        # the relabel band below the identity bar
+        r_mid = _row(oracle_builds=None, matches_oracle=0.95,
+                     marker_free=True)
+        assert _M._verdict_chain(r_mid) == "UNVERIFIED"
+    finally:
+        _M._UNVERIFIED_RELABEL = False
+
+
+def test_promote_copies_the_evidence_fields():
+    kept = _row(verdict="UNVERIFIED", matches_oracle=0.916,
+                best_repeat_verdict="PASS", best_repeat_sim=0.916,
+                compiles=False, marker_free=True, oracle_builds=None,
+                harness_builds=[{"site": "runner_c_build",
+                                 "outcome": "fail"}],
+                ship_gate_unproven=True)
+    best = _M.CaseResult(id="x", language="cpp", dataset="d")
+    best.matches_oracle = 0.916
+    best.reason = "r"
+    best.session_id = "s2"
+    best.compiles = True
+    best.marker_free = True
+    best.oracle_builds = None
+    best.harness_builds = [{"site": "runner_c_build",
+                            "outcome": "pass"}]
+    best.ship_gate_unproven = False
+    _M._promote_best_repeat(kept, "UNVERIFIED", [best], 0)
+    # the promoted row is SELF-CONSISTENT: the PASS verdict rides with
+    # the passing build, not the demoted row's failing build
+    assert kept.compiles is True
+    assert kept.harness_builds == best.harness_builds
+    assert kept.ship_gate_unproven is False

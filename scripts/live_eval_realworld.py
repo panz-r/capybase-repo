@@ -2478,6 +2478,15 @@ def _promote_best_repeat(r: "CaseResult", kept_verdict: str,
     r.matches_oracle = best.matches_oracle
     r.reason = best.reason
     r.session_id = best.session_id
+    # S28-265 (0126/0130's case studies): the VERDICT-EVIDENCE fields
+    # ride too — a promoted row carrying the demoted row's
+    # harness_builds (0126: runner_c_build FAIL under a PASS verdict)
+    # or missing them entirely (0130: the cold/warm divergence
+    # invisible) is an auditor trap. The row must be self-consistent.
+    for _f in ("compiles", "marker_free", "oracle_builds",
+               "harness_builds", "ship_gate_unproven",
+               "oracle_equivalent"):
+        setattr(r, _f, getattr(best, _f, None))
     r.verdict = r.best_repeat_verdict
     return r.best_repeat_verdict
 
@@ -2617,6 +2626,20 @@ def _verdict_chain(r: "CaseResult") -> str:
                 and r.compiles and r.marker_free
                 and (r.matches_oracle or 0.0) >= PASS_THRESHOLD):
             return "PASS"
+        # S28-265 (case study: scikit-0005's sim-0.998 row): the
+        # oracle-IDENTITY door, the relabel's top rung (same flag) —
+        # the content IS the human resolution (sim >= 0.99,
+        # marker-free) and the oracle probe is UNDECIDABLE (None): the
+        # tree cannot compile the oracle itself, so the class is the
+        # environment's (S28-144's identity doctrine extended to the
+        # undecidable half). GU, not UNVERIFIED — "we couldn't judge"
+        # is dishonest when the answer is the oracle's own content.
+        # Ordered after the fresh-gate read (a passing harness build is
+        # the stronger claim); the 0.80-0.99 band stays UNVERIFIED.
+        if (_UNVERIFIED_RELABEL
+                and r.marker_free and (r.matches_oracle or 0.0) >= 0.99
+                and getattr(r, "oracle_builds", None) is None):
+            return "GATE_UNAVAILABLE"
         if getattr(r, "compile_evidence_missing", False):
             # S28-170(1): the environment could not judge the merge (the
             # gate build timed out and the engine proposed FOR REVIEW on
