@@ -260,31 +260,22 @@ def test_terminal_arms_rung2_rescues_the_glue_class(monkeypatch):
 # S28-268: the tree-absent-member deletion trigger
 # ---------------------------------------------------------------------------
 
-def test_tree_absent_trigger(tmp_path):
-    """The redis-0032 shape: the failures name a member that exists
-    NOWHERE in the tree -> the rung's trigger fires; a symbol the tree
-    defines -> inconclusive (None); short names are skipped."""
-    import subprocess
-    from capybase.orchestrator import _failures_name_tree_absent_member
-    repo = tmp_path / "tree"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    (repo / "a.c").write_text("int main() { return 0; }\n")
-    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
-                    "-c", "user.name=t", "commit", "-qm", "x"], check=True)
+def test_compiler_absent_trigger():
+    """The redis-0032 shape, v2 (compiler authority): the failures name
+    a member ABSENT ON ITS TYPE -> the rung's trigger fires and gcc's
+    rename hint is captured; the tree-grep gate is GONE (it grepped the
+    broken file under repair and always matched)."""
+    from capybase.orchestrator import _failures_name_compiler_absent_member
     fails = [SimpleNamespace(message=(
         "config.c:694:20: error: 'struct redisServer' has no member "
-        "named 'hash_max_zipmap_entries'"))]
-    assert _failures_name_tree_absent_member(
-        fails, str(repo)) == "hash_max_zipmap_entries"
-    # the tree defines it -> not absent
-    (repo / "b.h").write_text("struct redisServer { int hash_max_zipmap_entries; };\n")
-    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t",
-                    "-c", "user.name=t", "commit", "-qm", "y"], check=True)
-    assert _failures_name_tree_absent_member(
-        fails, str(repo)) is None
-    # short names are never the trigger
-    short = [SimpleNamespace(message="error: 'ab' has no member named 'cd'")]
-    assert _failures_name_tree_absent_member(short, str(repo)) is None
+        "named 'hash_max_zipmap_entries'; did you mean "
+        "'hash_max_ziplist_entries'?"))]
+    sym, hint = _failures_name_compiler_absent_member(fails)
+    assert sym == "hash_max_zipmap_entries"
+    assert hint == "hash_max_ziplist_entries"
+    # no member-error in the failures -> no trigger
+    assert _failures_name_compiler_absent_member(
+        [SimpleNamespace(message="build failed (make config.o)")]) == (None, None)
+    # short names are skipped
+    assert _failures_name_compiler_absent_member(
+        [SimpleNamespace(message="error: 'ab' has no member named 'cd'")]) == (None, None)

@@ -315,17 +315,17 @@ _TA_SYMBOL_PATTERNS = (
 )
 
 
-def _failures_name_tree_absent_member(failures, repo_path) -> str | None:
-    """S28-268 (the tree-absent-member deletion rung): the first member
-    symbol named by ``failures`` that is ABSENT from the entire tree
-    (fixed-string ``git grep`` — the era screen's conservative rule:
-    presence anywhere counts as present; grep anomalies are
-    inconclusive), or None. This is the trigger that inverts the
-    side-pick churn guard: taking the replayed side loses only content
-    the tree cannot compile."""
+def _failures_name_compiler_absent_member(failures):
+    """S28-268/v2 (the trial35 correction): the first member symbol the
+    failures name as ABSENT ON ITS TYPE — the COMPILER's word is the
+    proof, and the previous tree-grep gate was the wrong predicate: it
+    grepped the tree CONTAINING THE BROKEN FILE UNDER REPAIR, so the
+    member string always matched and the trigger declined its own
+    target class (redis-0032 never fired). Returns (symbol, suggestion)
+    — suggestion is gcc's "did you mean 'N'" rename hint when present —
+    or (None, None)."""
     import re as _re_t
-    import subprocess as _sp
-    seen: list[str] = []
+    seen: list[tuple[str, str]] = []
     for f in failures:
         msg = getattr(f, "message", "") or ""
         if not any(pat in msg for pat in _TA_SYMBOL_PATTERNS):
@@ -333,21 +333,14 @@ def _failures_name_tree_absent_member(failures, repo_path) -> str | None:
         m = (_re_t.search(r"named\s+[\u2018']([A-Za-z_]\w*)", msg)
              or _re_t.search(r"call to\s+[\u2018']([\w:]+)", msg)
              or _re_t.search(r"[\u2018']([A-Za-z_]\w*)[\u2019']? does not name", msg))
-        if m:
-            sym = m.group(1).split("::")[-1]
-            if len(sym) >= 4 and sym not in seen:
-                seen.append(sym)
-    for sym in seen[:6]:
-        try:
-            out = _sp.run(
-                ["git", "-C", str(repo_path), "grep", "-I", "-l", "-F",
-                 sym, "--", "."],
-                capture_output=True, text=True, timeout=60)
-            if not (out.stdout or "").strip():
-                return sym
-        except Exception:  # noqa: BLE001 — inconclusive is not absent
+        if not m:
             continue
-    return None
+        sym = m.group(1).split("::")[-1]
+        if len(sym) < 4 or any(sym == s for s, _ in seen):
+            continue
+        sug_m = _re_t.search(r"did you mean\s+[\u2018']([A-Za-z_]\w*)[\u2019']?", msg)
+        seen.append((sym, sug_m.group(1) if sug_m else ""))
+    return (seen[0] if seen else (None, None))
 
 
 def _try_boundary_glue(text: str) -> str | None:
@@ -15465,8 +15458,13 @@ class Orchestrator:
                     getattr(self.config, "future", None),
                     "enable_tree_absent_deletion", False)
                     and f"treeabsent:{_sig}" not in _tried):
-                _absent = _failures_name_tree_absent_member(
-                    failures, str(self.git.repo))
+                _absent, _rename_hint = _failures_name_compiler_absent_member(
+                    failures)
+                if _absent is None:
+                    self.journal.emit(
+                        "tree_absent_trigger_declined",
+                        {"path": path, "reason": "no_compiler_absent_member"},
+                        step_index=self.step, path=path)
                 if _absent is not None:
                     _tried.add(f"treeabsent:{_sig}")
                     try:
@@ -15503,15 +15501,20 @@ class Orchestrator:
                                             "deterministic_tree_absent_deletion",
                                         "self_reported_confidence": 0.7,
                                         "explanation": (
-                                            f"tree-absent deletion: member "
-                                            f"'{_absent}' exists nowhere in "
-                                            f"the tree; the replayed splice "
-                                            f"verifies"),
+                                            f"compiler-absent member "
+                                            f"'{_absent}'"
+                                            + (f" (did you mean "
+                                               f"'{_rename_hint}')"
+                                               if _rename_hint else "")
+                                            + "; the replayed splice "
+                                              "verifies"),
                                     })
                                 self.journal.emit(
                                     "tree_absent_deletion_applied",
                                     {"side": _sp_side, "path": path,
-                                     "symbol": _absent, "sig": _sig[:60]},
+                                     "symbol": _absent,
+                                     "rename_hint": _rename_hint or None,
+                                     "sig": _sig[:60]},
                                     step_index=self.step, path=path)
                                 return [(_sp_unit, _sp_cand)]
                     except Exception as _rung_exc:  # noqa: BLE001 — best-effort
