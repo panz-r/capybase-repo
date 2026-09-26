@@ -142,6 +142,7 @@ def test_fresh_gate_read_flips_a_harness_proven_ship():
     try:
         r = _row(compiles=True, marker_free=True, matches_oracle=0.995)
         assert _M._verdict_chain(r) == "PASS"
+        assert "fresh-gate read" in (r.reason or "")
         # below the PASS bar the escalation stands (honest evidence)
         r_low = _row(compiles=True, marker_free=True, matches_oracle=0.80)
         assert _M._verdict_chain(r_low) == "ESCALATE"
@@ -258,6 +259,8 @@ def test_oracle_identity_door_reads_gu():
         r = _row(oracle_builds=None, matches_oracle=0.998,
                  marker_free=True)
         assert _M._verdict_chain(r) == "GATE_UNAVAILABLE"
+        # the door stamps its reason (the auditor-consistency rule)
+        assert "oracle-identity" in (r.reason or "")
         # the relabel band below the identity bar
         r_mid = _row(oracle_builds=None, matches_oracle=0.95,
                      marker_free=True)

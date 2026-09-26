@@ -2694,6 +2694,12 @@ def _verdict_chain(r: "CaseResult") -> str:
         if (_SHIP_GATE_READ
                 and r.compiles and r.marker_free
                 and (r.matches_oracle or 0.0) >= PASS_THRESHOLD):
+            # S28-272: the door STAMPS its reason — an escalated row
+            # reading PASS with an empty reason was an auditor trap
+            # (cython-0054's trial16 row: escalated=True, verdict PASS,
+            # reason empty).
+            r.reason = ("fresh-gate read: the harness build passed the "
+                        "shipped buffer (S28-253)")
             return "PASS"
         # S28-265 (case study: scikit-0005's sim-0.998 row): the
         # oracle-IDENTITY door, the relabel's top rung (same flag) —
@@ -2708,6 +2714,9 @@ def _verdict_chain(r: "CaseResult") -> str:
         if (_UNVERIFIED_RELABEL
                 and r.marker_free and (r.matches_oracle or 0.0) >= 0.99
                 and getattr(r, "oracle_builds", None) is None):
+            r.reason = ("oracle-identity: the content matches the human "
+                        "resolution; the oracle probe is undecidable "
+                        "(S28-265)")
             return "GATE_UNAVAILABLE"
         if getattr(r, "compile_evidence_missing", False):
             # S28-170(1): the environment could not judge the merge (the
