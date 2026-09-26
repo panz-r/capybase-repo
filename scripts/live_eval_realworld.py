@@ -2335,6 +2335,33 @@ def _oracle_builds_uncached(repo: Path, case: Case, crate_source: Path | None,
             finally:
                 if _saved_tcl is not None:
                     _tcl.write_bytes(_saved_tcl)
+        if case.language == "python":
+            # S28-288 (trial36 case study, scikit-learn-0052): the python
+            # oracle probe was UNIMPLEMENTED, so oracle_builds read None
+            # and the UNVERIFIED/identity doors read not-implemented as
+            # undecidable — a mislabel class (0052's honest verdict is
+            # ESCALATE: the human merge py_compiles, the candidate does
+            # not). py_compile is the millisecond judge; a syntax error
+            # in the oracle text is the only False (a probe this cheap
+            # cannot time out into None except under true pathology).
+            import py_compile as _pyc
+            import tempfile as _tfd
+            try:
+                with _tfd.NamedTemporaryFile(
+                        suffix=".py", delete=False,
+                        encoding="utf-8") as _tf:
+                    _tf.write(case.expected_resolved)
+                    _tmp_py = _tf.name
+                try:
+                    _pyc.compile(_tmp_py, doraise=True)
+                    return True
+                except _pyc.PyCompileError:
+                    return False
+                finally:
+                    from pathlib import Path as _P2
+                    _P2(_tmp_py).unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001 — probe is best-effort
+                return None
         return None
     except Exception:  # noqa: BLE001 — best-effort probe
         return None
@@ -2547,6 +2574,14 @@ def _promote_best_repeat(r: "CaseResult", kept_verdict: str,
     r.matches_oracle = best.matches_oracle
     r.reason = best.reason
     r.session_id = best.session_id
+    # S28-284 (trial36 case study, nlohmann-0038): the DESCRIPTIVE fields
+    # ride too — a promoted row carrying the demoted escalation's
+    # `escalated=True` (and its 1200s clock) beside a clean repeat's PASS
+    # reads as an unstamped door (3 of 30 trial36 rows at the time of the
+    # finding). terminal_reason classifies from r.reason after promotion,
+    # so fixing the flag fixes that classification too.
+    r.escalated = best.escalated
+    r.elapsed = best.elapsed
     # S28-265 (0126/0130's case studies): the VERDICT-EVIDENCE fields
     # ride too — a promoted row carrying the demoted row's
     # harness_builds (0126: runner_c_build FAIL under a PASS verdict)
@@ -3689,22 +3724,34 @@ def main():
             # Maps dataset name → external-datasets clone dir. Enables cargo check.
             _crate = None
             if case.merge_sha:
-                # Map dataset name → external-datasets clone dir. The convention is
-                # dataset.replace("-history",""), but some repos use a dash the
-                # dataset name omits (jsonc-history → external-datasets/json-c/).
-                # The CLONE_OVERRIDES table covers those exceptions; everything else
-                # follows the standard convention (redis, sqlite, tokio, ...).
-                # fmt-history → fmtlib-fmt: without the override the clone misses,
-                # cases get single-file repos, no build gate, and no
-                # compile_commands.json.
                 _CLONE_OVERRIDES = {
                     "jsonc-history": "json-c",
                     "fmt-history": "fmtlib-fmt",
                 }
-                _clone_name = _CLONE_OVERRIDES.get(
-                    case.dataset,
-                    case.dataset.replace("-history", "") if case.dataset else "",
+                # S28-297 (harvest census): the clone-name resolution must
+                # SINGLE-SOURCE the loader's authoritative registry — the
+                # inline convention (dataset.replace("-history","")) mapped
+                # php-history to external-datasets/php while the real clone
+                # is php-src, so `_crate` was None for the whole php family
+                # and S28-110's api-drift probe (gated on crate_source)
+                # never fired on a single row of the 1,501-row harvest.
+                from corpus.rebase_scenario_loader import (
+                    _GIT_HISTORY_CLONE_SUBDIR as _CLONE_REGISTRY,
                 )
+                _clone_name = _CLONE_REGISTRY.get(case.dataset)
+                if _clone_name is None:
+                    # Not a git-history dataset (zenodo-hdiff, protobuf,
+                    # nlohmann-json, fmt): keep the legacy overrides/convention.
+                    _clone_name = _CLONE_OVERRIDES.get(
+                        case.dataset,
+                        case.dataset.replace("-history", "") if case.dataset else "",
+                    )
+                else:
+                    # The registry is authoritative but the legacy overrides
+                    # stay available for local dir layouts that diverge.
+                    _override = _CLONE_OVERRIDES.get(case.dataset)
+                    if _override:
+                        _clone_name = _override
                 _clone_path = Path(__file__).resolve().parent.parent / "external-datasets" / _clone_name
                 if _clone_path.is_dir():
                     _crate = _clone_path
