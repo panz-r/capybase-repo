@@ -694,6 +694,12 @@ class CaseResult:
     # own text uses them, so the pass criterion is unachievable in-place;
     # classified at setup, before any model budget.
     era_header_dead: bool = False
+    # S28-267: the gate-divergence suspect (eval-only) — the session's
+    # LAST in-session build_probe FAILED the content while the HARNESS's
+    # own build PASSED it (fmt-0003/libuv-0089's S28-217 shapes). Sizes
+    # the session-vs-harness divergence per class; feeds the future
+    # suspicion scoring.
+    gate_divergence_suspect: bool = False
 
 
 def _engine_session_completed(flights_dir, case_id, live_root=None) -> bool:
@@ -3176,6 +3182,15 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         )
     else:
         res.compiles = _brace_balanced(content, case.language)
+    # S28-267: the gate-divergence suspect — the session's LAST
+    # in-session build failed the content the harness's build passes.
+    if (c_builds_result is True and _session_events):
+        _sess_bp = [e for e in _session_events
+                    if getattr(e, "event_type", None) == "build_probe"]
+        res.gate_divergence_suspect = bool(
+            _sess_bp
+            and (getattr(_sess_bp[-1], "payload", None) or {}).get("outcome")
+            == "fail")
     res.matches_oracle = _token_jaccard(content, case.expected_resolved) if content else 0.0
     # Sprint-20 S20.11: skeleton intent similarity (EVAL ONLY — never a
     # gate). Recorded on every result; the harvest cross-tabs it against
