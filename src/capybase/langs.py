@@ -165,6 +165,7 @@ _PROVENANCE_SAFETY: dict[str, SafetyClass] = {
     "deterministic_brace_repair": SafetyClass.HEURISTIC,
     "deterministic_pystring_repair": SafetyClass.HEURISTIC,
     "deterministic_boundary_glue": SafetyClass.HEURISTIC,
+    "deterministic_tree_absent_deletion": SafetyClass.POLICY,
     "deterministic_generated_file_side": SafetyClass.POLICY,
     "deterministic_preprocessor_repair": SafetyClass.HEURISTIC,
     "deterministic_storage_class_relocation": SafetyClass.HEURISTIC,

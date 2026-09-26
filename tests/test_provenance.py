@@ -49,6 +49,7 @@ def test_provenance_values_match_spec():
         "deterministic_brace_repair",
         "deterministic_pystring_repair",
         "deterministic_boundary_glue",
+        "deterministic_tree_absent_deletion",
         "deterministic_generated_file_side",
         "deterministic_gcc_fixit",
         "deterministic_cc_repair",

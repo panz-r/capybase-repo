@@ -1308,6 +1308,10 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # default OFF; the next armed rerun opts in via env.
     if os.environ.get("CAPYBASE_TERMINAL_ARMS", "") == "1":
         cfg.future.enable_terminal_path_arms = True
+    # S28-268 pilot gate: the tree-absent-member deletion rung is
+    # default OFF; the next armed rerun opts in via env.
+    if os.environ.get("CAPYBASE_TREE_ABSENT_DELETION", "") == "1":
+        cfg.future.enable_tree_absent_deletion = True
     # S28-183 pilot gate: the repair-edit delimiter guard is default OFF
     # (census-gated decline); the screening rerun opts in via env.
     if os.environ.get("CAPYBASE_REPAIR_GUARD", "") == "1":
@@ -1970,6 +1974,65 @@ def _tree_defines_symbol(repo: Path, symbol: str) -> bool:
         return bool((out.stdout or "").strip())
     except Exception:  # noqa: BLE001 — the grep is best-effort
         return True  # inconclusive counts as present (never a false GU)
+
+
+#: S28-268: the era memo — persisted per-case era classifications so
+#: run N+1 classifies at setup without re-running the probe builds.
+#: Keyed (case_id) with a spec content hash + the armed-flag
+#: fingerprint for validity.
+_ERA_MEMO_PATH = Path.home() / ".cache" / "capybase" / "era_memo.json"
+_ERA_NO_MEMBER_RE = re.compile(r"no member named\s+[‘']?([A-Za-z_]\w*)")
+_ERA_NO_DECL_RE = re.compile(
+    r"no declaration matches\s+[‘']?[\w:<> ]*?([A-Za-z_]\w*)\s*\(")
+_ERA_FLAGS_FINGERPRINT = "|".join(sorted(
+    name for name, env in (("ERA_PRESCREEN", "CAPYBASE_ERA_PRESCREEN"),
+                           ("SHIP_GATE_PROBE", "CAPYBASE_SHIP_GATE_PROBE"),
+                           ("TERMINAL_ARMS", "CAPYBASE_TERMINAL_ARMS"),
+                           ("TREE_ABSENT_DELETION",
+                            "CAPYBASE_TREE_ABSENT_DELETION"),
+                           ("ANTI_REROLL", "CAPYBASE_ANTI_REROLL"))
+    if os.environ.get(env, "") == "1"))
+
+
+def _era_spec_sha(case: "Case") -> str:
+    import hashlib as _hl
+    return _hl.sha1(
+        ((case.current or "") + "\x00" + (case.replayed or "") + "\x00"
+         + (case.expected_resolved or "")).encode("utf-8", "replace")
+    ).hexdigest()[:16]
+
+
+def _era_memo_load() -> dict:
+    try:
+        return json.loads(_ERA_MEMO_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — a missing/corrupt memo is a miss
+        return {}
+
+
+def _era_memo_store(case_id: str, entry: dict) -> None:
+    memo = _era_memo_load()
+    memo[case_id] = entry
+    try:
+        _ERA_MEMO_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _ERA_MEMO_PATH.write_text(json.dumps(memo, indent=1),
+                                  encoding="utf-8")
+    except Exception:  # noqa: BLE001 — the memo is best-effort
+        pass
+
+
+def _era_side_symbols(probe: dict) -> list[str]:
+    """The member symbols the probe's SIDE builds named (the era
+    screen's extraction, hoisted for the memo's subset check)."""
+    probes = probe.get("probes") or {}
+    syms: list[str] = []
+    for side in ("current", "replayed"):
+        for ln in (probes.get(side) or {}).get("sig") or []:
+            m = _ERA_NO_MEMBER_RE.search(ln or "") or _ERA_NO_DECL_RE.search(ln or "")
+            if m:
+                sym = m.group(1).split("::")[-1]
+                if len(sym) >= 4 and sym not in syms:
+                    syms.append(sym)
+    return syms
 
 
 def _era_header_screen(repo: Path, case: "Case",
@@ -2897,6 +2960,20 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
                 {"site": site, "duration_s": round(time.time() - _t0, 1)})
             return out
 
+        # S28-268: the era signature memo — when run N recorded that this
+        # case's terminal gate failures were a symbol-subset of the
+        # probe's side failures (the era errors known before the first
+        # draw), run N+1 classifies at setup WITHOUT re-running the probe
+        # builds. Validity: the spec content hash + the armed-flag
+        # fingerprint (arms changes re-probe).
+        if _ERA_PRESCREEN and _cached_probe is None:
+            _memo_entry = _era_memo_load().get(case.id) or {}
+            if (_memo_entry.get("spec_sha") == _era_spec_sha(case)
+                    and _memo_entry.get("flags_fp") == _era_flags_fp):
+                res.harness_builds = _harness_builds or None
+                return _mark_era_header_dead(
+                    res, _memo_entry.get("screen") or {}, t0)
+
         if _cached_probe is None:
             _cached_probe = _timed_harness_build(
                 "toolchain_probe", _toolchain_era_probe,
@@ -3224,6 +3301,29 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         and res.matches_oracle >= 0.99)
     # S28-171(1): the harness's own builds ride the row.
     res.harness_builds = _harness_builds or None
+    # S28-268: the era memo WRITE — when the terminal gate failure's
+    # symbols are a subset of the probe's side symbols (the era errors
+    # were known at setup), persist so run N+1 classifies without
+    # re-running the probe builds.
+    if (_ERA_PRESCREEN and res.escalated
+            and isinstance(res.toolchain_probe, dict)
+            and res.toolchain_probe.get("probes")):
+        _probe_syms = _era_side_symbols(res.toolchain_probe)
+        if _probe_syms:
+            _final_syms = [s for s in _era_side_symbols(
+                {"probes": {"current": {"sig": [res.reason or ""]}}})
+                if s in _probe_syms]
+            if _final_syms:
+                _era_memo_store(case.id, {
+                    "spec_sha": _era_spec_sha(case),
+                    "flags_fp": _ERA_FLAGS_FINGERPRINT,
+                    "screen": {
+                        "era_header_dead": True,
+                        "missing_symbols": _probe_syms[:8],
+                        "oracle_uses_missing": _final_syms[:8],
+                        "oracle_repeats_invalid": [],
+                    },
+                })
     return res
 
 def _print_census(results_path: str) -> None:

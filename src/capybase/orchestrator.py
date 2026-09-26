@@ -304,6 +304,52 @@ def _whitespace_equal(a: str, b: str) -> bool:
     return " ".join((a or "").split()) == " ".join((b or "").split())
 
 
+#: S28-268: the gcc error shapes that name a member symbol the conflict
+#: TU needs (the era screen's set, orchestrator-side).
+_TA_SYMBOL_PATTERNS = (
+    "no member named",
+    "no matching function for call to",
+    "' does not name a type",
+    "use of undeclared identifier",
+    "unknown type name",
+)
+
+
+def _failures_name_tree_absent_member(failures, repo_path) -> str | None:
+    """S28-268 (the tree-absent-member deletion rung): the first member
+    symbol named by ``failures`` that is ABSENT from the entire tree
+    (fixed-string ``git grep`` — the era screen's conservative rule:
+    presence anywhere counts as present; grep anomalies are
+    inconclusive), or None. This is the trigger that inverts the
+    side-pick churn guard: taking the replayed side loses only content
+    the tree cannot compile."""
+    import re as _re_t
+    import subprocess as _sp
+    seen: list[str] = []
+    for f in failures:
+        msg = getattr(f, "message", "") or ""
+        if not any(pat in msg for pat in _TA_SYMBOL_PATTERNS):
+            continue
+        m = (_re_t.search(r"named\s+[\u2018']([A-Za-z_]\w*)", msg)
+             or _re_t.search(r"call to\s+[\u2018']([\w:]+)", msg)
+             or _re_t.search(r"[\u2018']([A-Za-z_]\w*)[\u2019']? does not name", msg))
+        if m:
+            sym = m.group(1).split("::")[-1]
+            if len(sym) >= 4 and sym not in seen:
+                seen.append(sym)
+    for sym in seen[:6]:
+        try:
+            out = _sp.run(
+                ["git", "-C", str(repo_path), "grep", "-I", "-l", "-F",
+                 sym, "--", "."],
+                capture_output=True, text=True, timeout=60)
+            if not (out.stdout or "").strip():
+                return sym
+        except Exception:  # noqa: BLE001 — inconclusive is not absent
+            continue
+    return None
+
+
 def _try_boundary_glue(text: str) -> str | None:
     """S28-259/260 (the boundary-glue arm): the cross-unit docstring-seam
     deterministic repair.
@@ -15409,6 +15455,75 @@ class Orchestrator:
             # Same condition + threshold as F1 tier-1 (the mechanism that
             # owns this decision class): land a side only when the loser
             # side ≈ base (near-one-sided).
+            # S28-268 (queue: the tree-absent-member deletion rung): when
+            # the failures name a member ABSENT FROM THE ENTIRE TREE
+            # (fixed-string git grep), the churn guard's premise inverts —
+            # taking the replayed side loses only content the tree cannot
+            # compile. Try the replayed side-pick FIRST, bypassing the
+            # churn guard. Flag-gated (default OFF); zero model requests.
+            if (getattr(
+                    getattr(self.config, "future", None),
+                    "enable_tree_absent_deletion", False)
+                    and f"treeabsent:{_sig}" not in _tried):
+                _absent = _failures_name_tree_absent_member(
+                    failures, str(self.git.repo))
+                if _absent is not None:
+                    _tried.add(f"treeabsent:{_sig}")
+                    try:
+                        for _sp_side, _sp_cands in _whole_file_side_candidates(units):
+                            if _sp_side != "replayed":
+                                continue
+                            _sp_spans = [
+                                (u.marker_span, c.resolved_text)
+                                for u, c in _sp_cands]
+                            _sp_val = self.verification.verify_file(
+                                path, language, original, _sp_spans,
+                                repo_root=str(self.git.repo),
+                                whole_text=_resolved_buffer(original, _sp_cands),
+                                pristine_side_texts=(
+                                    [t for t in (self._micro_stage_sides(path)[0]
+                                     or {}).values() if t.strip()] or None),
+                            )
+                            self._journal_validation(
+                                _sp_cands[0][0], _sp_cands[0][1], _sp_val)
+                            if _sp_val.passed:
+                                _sp_full = _resolved_buffer(original, _sp_cands)
+                                _sp_unit = _sp_cands[0][0].model_copy(
+                                    update={"marker_span": None,
+                                            "unit_kind": "whole_file"})
+                                _sp_cand = _sp_cands[0][1].model_copy(
+                                    update={
+                                        "candidate_id": (
+                                            _sp_cands[0][1].candidate_id
+                                            + ":tree-absent-deletion"),
+                                        "resolved_text": _sp_full,
+                                        "prompt_version":
+                                            "deterministic_tree_absent_deletion",
+                                        "provenance":
+                                            "deterministic_tree_absent_deletion",
+                                        "self_reported_confidence": 0.7,
+                                        "explanation": (
+                                            f"tree-absent deletion: member "
+                                            f"'{_absent}' exists nowhere in "
+                                            f"the tree; the replayed splice "
+                                            f"verifies"),
+                                    })
+                                self.journal.emit(
+                                    "tree_absent_deletion_applied",
+                                    {"side": _sp_side, "path": path,
+                                     "symbol": _absent, "sig": _sig[:60]},
+                                    step_index=self.step, path=path)
+                                return [(_sp_unit, _sp_cand)]
+                    except Exception as _rung_exc:  # noqa: BLE001 — best-effort
+                        try:
+                            self.journal.emit(
+                                "repair_rung_error",
+                                {"rung": "tree_absent_deletion",
+                                 "error": (f"{type(_rung_exc).__name__}: "
+                                           f"{_rung_exc}")},
+                                step_index=self.step, path=path)
+                        except Exception:  # noqa: BLE001
+                            pass
             _sp_guard = self._side_pick_churn_ok(path)
             if f"sidepick:{_sig}" not in _tried and _sp_guard is not False:
                 _tried.add(f"sidepick:{_sig}")

@@ -1062,6 +1062,13 @@ class FutureConfig(BaseModel):
     # wholesale-winner floor when every per-unit candidate was rejected
     # (the arms are otherwise structurally unreachable — pilot6's 0052).
     enable_beam_sides_substrate: bool = False
+    # S28-268: the tree-absent-member deletion rung (pilot-gated,
+    # default OFF) — when the whole-file repair failures name a member
+    # ABSENT from the entire tree (fixed-string git grep), the churn
+    # guard's premise inverts: taking the replayed side loses only
+    # content the tree cannot compile. Tries the replayed side-pick
+    # first, bypassing the churn guard. Zero new model requests.
+    enable_tree_absent_deletion: bool = False
     # Declaration restoration (S28-197, pilot-gated — the corrected
     # S28-178): when a whole-file failure names an UNDECLARED symbol,
     # insert the pristine side's DECLARING LINE before the symbol's
