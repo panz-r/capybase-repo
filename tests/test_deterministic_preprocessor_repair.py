@@ -348,3 +348,58 @@ def test_snippet_includes_endif_after_error():
     failures = [_pp_failure(2)]  # error near the #if; #endif is far below
     snippet = _splice_context_snippet(failures, worktree, accepted)
     assert "#endif" in snippet
+
+
+# --- S28-262/278: the composition to a fixpoint ------------------------------
+
+def test_composition_repairs_two_stray_endifs():
+    """Two separate stray #endifs: the single-edit pass cleared the first and
+    declined (revalidation_failed_multi); the composition clears both."""
+    lines = [
+        "#ifdef A",          # 1  (depth 1)
+        "int a(void);",      # 2
+        "#endif",            # 3  (depth 0)
+        "#endif",            # 4  STRAY 1 -> depth -1
+        "int b(void);",      # 5
+        "#ifdef B",          # 6  (depth 1)
+        "#endif",            # 7  (depth 0)
+        "#endif",            # 8  STRAY 2 -> depth -1
+        "int c(void);",      # 9
+    ]
+    text = "\n".join(lines)
+    assert _preprocessor_imbalance_line(text) is not None
+    out = _try_balance_preprocessor(text)
+    assert out is not None
+    assert _preprocessor_imbalance_line(out) is None
+    # both strays removed, the legit pairs untouched
+    assert "#ifdef A" in out and "#ifdef B" in out
+    assert out.count("#endif") == 2
+
+
+def test_composition_mixed_stray_and_missing():
+    """A stray #endif up top AND a missing #endif at the bottom: the negative
+    pass removes the stray, the positive pass inserts the deficit — one call."""
+    lines = [
+        "#ifdef A",          # 1
+        "int a(void);",      # 2
+        "#endif",            # 3
+        "#endif",            # 4  STRAY -> depth -1
+        "int b(void);",      # 5
+        "#ifdef B",          # 6  depth 1, never closed
+        "int c(void);",      # 7
+    ]
+    text = "\n".join(lines)
+    assert _preprocessor_imbalance_line(text) is not None
+    out = _try_balance_preprocessor(text)
+    assert out is not None
+    assert _preprocessor_imbalance_line(out) is None
+    assert out.count("#endif") == 2  # the surviving pair close + the inserted deficit
+
+
+def test_composition_decline_records_passes():
+    """A truncated slice (no content after the stray) declines on pass 0 with
+    the raw reason last — byte-compatible with the legacy single-edit reads."""
+    decline: list = []
+    out = _try_balance_preprocessor("#ifdef A\nint a;\n#endif\n#endif\n", decline)
+    assert out is None
+    assert decline[-1] == "truncated_slice"
