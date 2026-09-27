@@ -174,6 +174,7 @@ _PROVENANCE_SAFETY: dict[str, SafetyClass] = {
     "deterministic_gcc_fixit": SafetyClass.HEURISTIC,
     "deterministic_rename": SafetyClass.HEURISTIC,
     "deterministic_expected_token": SafetyClass.HEURISTIC,
+    "deterministic_indented_block": SafetyClass.HEURISTIC,
     "deterministic_cc_repair": SafetyClass.HEURISTIC,
     "deterministic_dup_eradication": SafetyClass.HEURISTIC,
     "deterministic_side_consistency_repair": SafetyClass.HEURISTIC,

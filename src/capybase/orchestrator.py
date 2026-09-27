@@ -15911,6 +15911,127 @@ class Orchestrator:
                             step_index=self.step, path=path)
                     except Exception:  # noqa: BLE001
                         pass
+            # S28-321: the INDENTED-BLOCK RESTORER (python) —
+            # `IndentationError: expected an indented block after 'else'
+            # statement on line N` means the splice dropped the block body;
+            # the sides carry it (zenodo-0019's oracle is one indented block
+            # away). Find the same statement in a side, take its following
+            # deeper-indented block, splice it after line N. Accept only on
+            # pass. Zero model requests.
+            if (language == "python"
+                    and getattr(
+                        getattr(self.config, "future", None),
+                        "enable_tree_absent_deletion", False)
+                    and f"indblock:{_sig}" not in _tried):
+                _tried.add(f"indblock:{_sig}")
+                try:
+                    import re as _re_ib
+                    _ib_ins = None
+                    for _f in failures:
+                        _m = _re_ib.search(
+                            r"IndentationError: expected an indented block "
+                            r"after '(\w+)' statement on line (\d+)",
+                            getattr(_f, "message", "") or "")
+                        if _m:
+                            _ib_ins = (_m.group(1), int(_m.group(2)))
+                            break
+                    if _ib_ins is not None:
+                        _ib_buf0 = _resolved_buffer(original, accepted)
+                        _ib_lines = _ib_buf0.split("\n")
+                        _ib_kw, _ib_no = _ib_ins
+                        _ib_idx = _ib_no - 1
+                        if 0 <= _ib_idx < len(_ib_lines):
+                            _ib_stmt = _ib_lines[_ib_idx]
+                            _ib_stmt_st = _ib_stmt.strip()
+                            _ib_indent = len(_ib_stmt) - len(_ib_stmt.lstrip())
+                            _ib_block = None
+                            _ib_sides = (self._micro_stage_sides(path)[0]
+                                         or {})
+                            for _st in _ib_sides.values():
+                                if not _st:
+                                    continue
+                                _sl = _st.split("\n")
+                                for _si, _sl_ln in enumerate(_sl):
+                                    if (_sl_ln.strip() == _ib_stmt_st
+                                            and (_sl_ln.startswith("\t")
+                                                 or _sl_ln.startswith(" "))
+                                            or _sl_ln.strip() == _ib_stmt_st):
+                                        _blk = []
+                                        for _bl in _sl[_si + 1:]:
+                                            if not _bl.strip():
+                                                _blk.append(_bl)
+                                                continue
+                                            _bi = len(_bl) - len(_bl.lstrip())
+                                            if _bi > _ib_indent:
+                                                _blk.append(_bl)
+                                            else:
+                                                break
+                                        while _blk and not _blk[-1].strip():
+                                            _blk.pop()
+                                        if _blk:
+                                            _ib_block = _blk
+                                            break
+                                if _ib_block:
+                                    break
+                        if _ib_block:
+                            _ib_new = (
+                                _ib_lines[:_ib_idx + 1] + _ib_block
+                                + _ib_lines[_ib_idx + 1:])
+                            _ib_buf = "\n".join(_ib_new)
+                            if _ib_buf != _ib_buf0:
+                                _ib_spans = [
+                                    (u.marker_span, c.resolved_text)
+                                    for u, c in accepted]
+                                _ib_val = self.verification.verify_file(
+                                    path, language, original, _ib_spans,
+                                    repo_root=str(self.git.repo),
+                                    whole_text=_ib_buf,
+                                    pristine_side_texts=(
+                                        [t for t in _ib_sides.values()
+                                         if t.strip()] or None),
+                                )
+                                if _ib_val.passed:
+                                    _ib_unit = units[0].model_copy(update={
+                                        "marker_span": None,
+                                        "unit_kind": "whole_file"})
+                                    _ib_cid = (
+                                        (accepted[fault_idx][1]
+                                         .candidate_id
+                                         if 0 <= fault_idx < len(accepted)
+                                         else unit.unit_id)
+                                        + ":indblock")
+                                    _ib_cand = CandidateResolution(
+                                        candidate_id=_ib_cid,
+                                        unit_id=unit.unit_id,
+                                        model_name="deterministic",
+                                        resolved_text=_ib_buf,
+                                        prompt_version=(
+                                            "deterministic_indented_block"),
+                                        provenance="deterministic_indented_block",
+                                        self_reported_confidence=0.7,
+                                        explanation=(
+                                            "S28-321: restored the indented "
+                                            f"block after the {_ib_kw!r} at "
+                                            f"line {_ib_no} from a pristine "
+                                            "side; the splice verifies"),
+                                    )
+                                    self.journal.emit(
+                                        "indented_block_applied",
+                                        {"path": path, "keyword": _ib_kw,
+                                         "line": _ib_no,
+                                         "block_lines": len(_ib_block)},
+                                        step_index=self.step, path=path)
+                                    return [(_ib_unit, _ib_cand)]
+                except Exception as _ib_exc:  # noqa: BLE001 — best-effort
+                    try:
+                        self.journal.emit(
+                            "repair_rung_error",
+                            {"rung": "indented_block",
+                             "error": (f"{type(_ib_exc).__name__}: "
+                                       f"{_ib_exc}")},
+                            step_index=self.step, path=path)
+                    except Exception:  # noqa: BLE001
+                        pass
             _sp_guard = self._side_pick_churn_ok(path)
             if f"sidepick:{_sig}" not in _tried and _sp_guard is not False:
                 _tried.add(f"sidepick:{_sig}")
@@ -18656,6 +18777,29 @@ class Orchestrator:
                         _dup_def_retried = True
                         _header_repaired = True
                 # Escalate unless a repair strategy granted a retry.
+                # S28-321 (the 0069 anatomy): the deterministic cap->recovery
+                # edge — the recovery grant CONVERTED this case in t36 but is
+                # variance-gated (fired 1 of 4 t38 sessions, all three
+                # non-firings escalating here). When recovery is enabled and
+                # unused for this unit, grant exactly ONE more iteration and
+                # select the recovery prompt for it; the second cap hit
+                # escalates unchanged.
+                if (not _header_repaired
+                        and not pending_recovery
+                        and recovery_retry_count
+                        < getattr(self.config.validation,
+                                  "max_recovery_retries_per_unit", 1)
+                        and getattr(self.config.validation,
+                                    "enable_recovery_retry", True)):
+                    _header_repaired = True
+                    pending_recovery = True
+                    recovery_retry_count += 1
+                    self.journal.emit(
+                        "header_cap_recovery_granted",
+                        {"path": unit.path,
+                         "unit_id": getattr(unit, "unit_id", "")},
+                        step_index=self.step, path=unit.path,
+                        unit_id=unit.unit_id)
                 if not _header_repaired:
                     outcome.escalated = True
                     outcome.retry_count = retry_count
