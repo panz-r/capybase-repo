@@ -333,7 +333,14 @@ def _failures_name_compiler_absent_member(failures):
     import re as _re_t
     seen: list[tuple[str, str]] = []
     for f in failures:
-        msg = getattr(f, "message", "") or ""
+        # S28-327: gcc's in-tree diagnostics quote with U+2018/U+2019 —
+        # normalize before the pattern gate, whose `' does not name a
+        # type` entry is ASCII-quoted (the same normalization the header
+        # cap's dup-marker check applies). Without it the does-not-name
+        # class never matched real tree-build output and the whole
+        # trigger family starved on the era files.
+        msg = (getattr(f, "message", "") or "")
+        msg = msg.replace("\u2018", "'").replace("\u2019", "'")
         if not any(pat in msg for pat in _TA_SYMBOL_PATTERNS):
             continue
         m = (_re_t.search(r"named\s+[\u2018']([A-Za-z_]\w*)", msg)
