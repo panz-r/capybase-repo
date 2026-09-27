@@ -19007,8 +19007,10 @@ class Orchestrator:
                     and validation is not None and not validation.passed
                     and decision.action == "retry"
                     and validation.hard_failures
-                    and getattr(validation.hard_failures[0], "validator", "")
-                    in ("syntax", "build_test")):
+                    and ("syntax" in getattr(
+                        validation.hard_failures[0], "validator", "").lower()
+                        or getattr(validation.hard_failures[0],
+                                   "validator", "") == "build_test")):
                 _thr_key = (unit.path, unit.unit_id)
                 _thr_hist = getattr(self, "_syntax_fail_history", None)
                 if _thr_hist is None:
