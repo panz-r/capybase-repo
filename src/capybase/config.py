@@ -1069,6 +1069,19 @@ class FutureConfig(BaseModel):
     # content the tree cannot compile. Tries the replayed side-pick
     # first, bypassing the churn guard. Zero new model requests.
     enable_tree_absent_deletion: bool = False
+    # S28-311 (trial37 cost census; pilot-gated, default OFF): after 2
+    # byte-identical syntax-class failures on the same unit, decline
+    # further model draws for that unit — the deterministic arms own the
+    # class (scikit-0052 spent 12 draws/session on one unterminated
+    # string with zero verdict change).
+    enable_syntax_draw_throttle: bool = False
+    # S28-309/310 (pilot-gated, default OFF): the self-refuting-gate
+    # fallback — when a rust tree's file gate fails the merge but
+    # rust-analyzer passes the same text, the session gate has refuted
+    # itself (polars-0015: cargo check failed all four texts,
+    # rust-analyzer passed all four). Stamp, journal the delta, skip the
+    # repair budget. Zero model requests.
+    enable_ra_gate_fallback: bool = False
     # Declaration restoration (S28-197, pilot-gated — the corrected
     # S28-178): when a whole-file failure names an UNDECLARED symbol,
     # insert the pristine side's DECLARING LINE before the symbol's

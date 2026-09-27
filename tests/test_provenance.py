@@ -53,6 +53,8 @@ def test_provenance_values_match_spec():
         "deterministic_generated_file_side",
         "deterministic_gcc_fixit",
         "deterministic_cc_repair",
+        "deterministic_rename",
+        "deterministic_expected_token",
         "deterministic_dup_eradication",
         "deterministic_side_consistency_repair",
         "deterministic_side_consensus_repair",

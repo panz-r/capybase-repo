@@ -312,6 +312,12 @@ _TA_SYMBOL_PATTERNS = (
     "' does not name a type",
     "use of undeclared identifier",
     "unknown type name",
+    # S28-304(b) (the 0126/0128 measurement): gcc's phrasing for the same
+    # class — clang's "use of undeclared identifier" was covered, gcc's
+    # was not, and the era cascade's round-1 errors are exactly this
+    # shape (`'cache' was not declared in this scope`). The rung is
+    # flag-gated and its replayed-splice revalidation guards the net.
+    "was not declared in this scope",
 )
 
 
@@ -12481,6 +12487,39 @@ class Orchestrator:
                         step_index=self.step,
                         path=path,
                     )
+                    # S28-309/310: the self-refuting-gate fallback (rust,
+                    # pilot-gated). When the file gate fails the merge but
+                    # rust-analyzer passes the same text, the session gate
+                    # has refuted itself (polars-0015: cargo check failed
+                    # all four texts, rust-analyzer passed all four) —
+                    # keep the buffer, skip the repair draws, let the
+                    # escalation carry the stamp for the harness doors.
+                    if (getattr(
+                            getattr(self.config, "future", None),
+                            "enable_ra_gate_fallback", False)
+                            and language == "rust"
+                            and path not in getattr(self, "_ra_refuted", set())
+                            and accepted):
+                        try:
+                            from capybase.adapters import lsp as _lsp_fb
+                            _fb_runner = _lsp_fb.RustAnalyzerRunner(timeout=300)
+                            _fb_buf = _resolved_buffer(original, accepted)
+                            _fb = _fb_runner.check(
+                                _fb_buf, path=path,
+                                repo_root=str(self.git.repo))
+                            if _fb.checked and not _fb.errors:
+                                if not hasattr(self, "_ra_refuted"):
+                                    self._ra_refuted = set()
+                                self._ra_refuted.add(path)
+                                self.journal.emit(
+                                    "primary_gate_self_refuted",
+                                    {"path": path,
+                                     "judge": "rust-analyzer",
+                                     "merge_errors": 0},
+                                    step_index=self.step, path=path)
+                                break
+                        except Exception:  # noqa: BLE001 — fallback is best-effort
+                            pass
                     accepted_opt: list[tuple[ConflictUnit, CandidateResolution]] | None = (
                         self._guarded_whole_file_repair(
                             path, accepted, original, file_validation.hard_failures,
@@ -15099,6 +15138,9 @@ class Orchestrator:
                 {"kind": "line_replace", "line": err_idx + 1,
                  "replacement": replacement[:120], "path": path},
                 step_index=self.step, path=path, unit_id=unit.unit_id)
+            # S28-304(a): one of the two unwired starvation sites (0126's
+            # round-2 shape applied here with no telemetry).
+            self._journal_tree_absent_starvation(failures, None, path)
             return [(wf_unit, wf_cand)]
 
         # C1b derived prototype: if the symbol's DEFINITION exists in a
@@ -15139,6 +15181,10 @@ class Orchestrator:
                                      "provenance": side_name},
                                     step_index=self.step, path=path,
                                     unit_id=unit.unit_id)
+                                # S28-304(a): the second unwired starvation
+                                # site — the derived-prototype exit.
+                                self._journal_tree_absent_starvation(
+                                    failures, symbol, path)
                                 return [(wf_unit, wf_cand)]
 
         for symbol in symbols[:3]:
@@ -15671,6 +15717,198 @@ class Orchestrator:
                                 step_index=self.step, path=path)
                         except Exception:  # noqa: BLE001
                             pass
+            # S28-302: the deterministic RENAME rung — when the failures
+            # carry gcc's `did you mean 'X'` hint for an absent member,
+            # splice X over the absent symbol at the failing use site.
+            # Guards: X present in the pristine sides/base; the splice
+            # changes the buffer; the full gate re-verifies (conservative —
+            # accept only on pass, matching the tree-absent rung).
+            # Zero model requests. (redis-0032: the hint names the
+            # oracle's own field — the dry run proved the fixture
+            # oracle-exact.)
+            if (getattr(
+                    getattr(self.config, "future", None),
+                    "enable_tree_absent_deletion", False)
+                    and f"rename:{_sig}" not in _tried):
+                _tried.add(f"rename:{_sig}")
+                try:
+                    import re as _re_rn
+                    _rn_absent, _rn_hint = (
+                        _failures_name_compiler_absent_member(failures))
+                    _rn_buf0 = _resolved_buffer(original, accepted)
+                    _rn_lines = _rn_buf0.split("\n")
+                    _rn_line = None
+                    for _f in failures:
+                        _m = _re_rn.search(
+                            r":(\d+):\d+:.*" + _re_rn.escape(_rn_absent),
+                            getattr(_f, "message", "") or "")
+                        if _m:
+                            _rn_line = int(_m.group(1)) - 1
+                            break
+                    _rn_sides = (
+                        self._micro_stage_sides(path)[0] or {})
+                    _hint_in_tree = _rn_hint and any(
+                        _rn_hint in (t or "")
+                        for t in list(_rn_sides.values()) + [original])
+                    if (_rn_absent is not None and _rn_hint
+                            and _rn_line is not None
+                            and 0 <= _rn_line < len(_rn_lines)
+                            and _hint_in_tree
+                            and _rn_absent in _rn_lines[_rn_line]
+                            and _rn_hint not in _rn_lines[_rn_line]):
+                        _rn_lines[_rn_line] = _rn_lines[_rn_line].replace(
+                            _rn_absent, _rn_hint)
+                        _rn_buf = "\n".join(_rn_lines)
+                        if _rn_buf != _rn_buf0:
+                            _rn_spans = [
+                                (u.marker_span, c.resolved_text)
+                                for u, c in accepted]
+                            _rn_val = self.verification.verify_file(
+                                path, language, original, _rn_spans,
+                                repo_root=str(self.git.repo),
+                                whole_text=_rn_buf,
+                                pristine_side_texts=(
+                                    [t for t in _rn_sides.values()
+                                     if t.strip()] or None),
+                            )
+                            _rn_cleared = not any(
+                                _rn_absent in (getattr(f, "message", "") or "")
+                                for f in _rn_val.hard_failures)
+                            if _rn_val.passed:
+                                _rn_unit = units[0].model_copy(update={
+                                    "marker_span": None,
+                                    "unit_kind": "whole_file"})
+                                _rn_cid = (
+                                        (accepted[fault_idx][1].candidate_id
+                                         if 0 <= fault_idx < len(accepted)
+                                         else unit.unit_id)
+                                        + ":rename")
+                                _rn_cand = CandidateResolution(
+                                    candidate_id=_rn_cid,
+                                    unit_id=unit.unit_id,
+                                    model_name="deterministic",
+                                    resolved_text=_rn_buf,
+                                    prompt_version="deterministic_rename",
+                                    provenance="deterministic_rename",
+                                    self_reported_confidence=0.7,
+                                    explanation=(
+                                        f"S28-302 rename: {_rn_absent} -> "
+                                        f"{_rn_hint} (gcc hint) at line "
+                                        f"{_rn_line + 1}; the splice verifies"),
+                                )
+                                self.journal.emit(
+                                    "rename_rung_applied",
+                                    {"path": path, "symbol": _rn_absent,
+                                     "hint": _rn_hint,
+                                     "line": _rn_line + 1},
+                                    step_index=self.step, path=path)
+                                return [(_rn_unit, _rn_cand)]
+                            self.journal.emit(
+                                "rename_rung_declined",
+                                {"path": path, "symbol": _rn_absent,
+                                 "hint": _rn_hint,
+                                 "target_error_cleared": _rn_cleared,
+                                 "reason": "gate_still_fails"},
+                                step_index=self.step, path=path)
+                except Exception as _rn_exc:  # noqa: BLE001 — best-effort
+                    try:
+                        self.journal.emit(
+                            "repair_rung_error",
+                            {"rung": "rename",
+                             "error": (f"{type(_rn_exc).__name__}: "
+                                       f"{_rn_exc}")},
+                            step_index=self.step, path=path)
+                    except Exception:  # noqa: BLE001
+                        pass
+            # S28-303: the EXPECTED-TOKEN rung — gcc names the exact
+            # line:col and token for the cheapest deterministic edits in C
+            # (`expected ';' after struct definition`, duckdb-0063's
+            # matcher.hpp:328). Parse, splice, re-gate conservatively
+            # (accept only on pass). Zero model requests.
+            if (getattr(
+                    getattr(self.config, "future", None),
+                    "enable_tree_absent_deletion", False)
+                    and f"exptok:{_sig}" not in _tried):
+                _tried.add(f"exptok:{_sig}")
+                try:
+                    import re as _re_et
+                    _et_ins = None
+                    for _f in failures:
+                        _m = _re_et.search(
+                            r":(\d+):(\d+): error: expected '([^']+)'",
+                            getattr(_f, "message", "") or "")
+                        if (_m and _m.group(3)
+                                in (";", ",", ")", "]", "}", ">")):
+                            _et_ins = (int(_m.group(1)) - 1,
+                                       int(_m.group(2)) - 1, _m.group(3))
+                            break
+                    if _et_ins is not None:
+                        _et_buf0 = _resolved_buffer(original, accepted)
+                        _et_lines = _et_buf0.split("\n")
+                        _et_l, _et_c, _et_tok = _et_ins
+                        if 0 <= _et_l < len(_et_lines):
+                            _et_line = _et_lines[_et_l]
+                            _et_c = max(0, min(_et_c, len(_et_line)))
+                            _et_lines[_et_l] = (
+                                _et_line[:_et_c] + _et_tok
+                                + _et_line[_et_c:])
+                            _et_buf = "\n".join(_et_lines)
+                            if _et_buf != _et_buf0:
+                                _et_spans = [
+                                    (u.marker_span, c.resolved_text)
+                                    for u, c in accepted]
+                                _et_val = self.verification.verify_file(
+                                    path, language, original, _et_spans,
+                                    repo_root=str(self.git.repo),
+                                    whole_text=_et_buf,
+                                    pristine_side_texts=(
+                                        [t for t in (
+                                            self._micro_stage_sides(path)[0]
+                                            or {}).values() if t.strip()]
+                                        or None),
+                                )
+                                if _et_val.passed:
+                                    _et_unit = units[0].model_copy(update={
+                                        "marker_span": None,
+                                        "unit_kind": "whole_file"})
+                                    _et_cid = (
+                                            (accepted[fault_idx][1]
+                                             .candidate_id
+                                             if 0 <= fault_idx < len(accepted)
+                                             else unit.unit_id)
+                                            + ":exptok")
+                                    _et_cand = CandidateResolution(
+                                        candidate_id=_et_cid,
+                                        unit_id=unit.unit_id,
+                                        model_name="deterministic",
+                                        resolved_text=_et_buf,
+                                        prompt_version=(
+                                            "deterministic_expected_token"),
+                                        provenance="deterministic_expected_token",
+                                        self_reported_confidence=0.7,
+                                        explanation=(
+                                            f"S28-303: inserted {_et_tok!r} "
+                                            f"at line {_et_l + 1}:"
+                                            f"{_et_c + 1} (gcc expected-"
+                                            "token); the splice verifies"),
+                                    )
+                                    self.journal.emit(
+                                        "expected_token_applied",
+                                        {"path": path, "token": _et_tok,
+                                         "line": _et_l + 1,
+                                         "col": _et_c + 1},
+                                        step_index=self.step, path=path)
+                                    return [(_et_unit, _et_cand)]
+                except Exception as _et_exc:  # noqa: BLE001 — best-effort
+                    try:
+                        self.journal.emit(
+                            "repair_rung_error",
+                            {"rung": "expected_token",
+                             "error": (f"{type(_et_exc).__name__}: "
+                                       f"{_et_exc}")},
+                            step_index=self.step, path=path)
+                    except Exception:  # noqa: BLE001
+                        pass
             _sp_guard = self._side_pick_churn_ok(path)
             if f"sidepick:{_sig}" not in _tried and _sp_guard is not False:
                 _tried.add(f"sidepick:{_sig}")
@@ -18755,6 +18993,40 @@ class Orchestrator:
                 recovery_retry_count=recovery_retry_count,
                 samples_ceiling_retries=(n_cap - 1),
             )
+            # S28-311 (trial37 cost census): the syntax-class draw
+            # throttle. After 2 byte-identical syntax failures on the same
+            # unit, further draws have near-zero expected value (0052: 12
+            # draws/session on one unterminated string, UNVERIFIED either
+            # way) — decline instead of drawing. The deterministic arms
+            # own the class.
+            if (getattr(
+                    getattr(self.config, "future", None),
+                    "enable_syntax_draw_throttle", False)
+                    and validation is not None and not validation.passed
+                    and decision.action == "retry"
+                    and validation.hard_failures
+                    and getattr(validation.hard_failures[0], "validator", "")
+                    in ("syntax", "build_test")):
+                _thr_key = (unit.path, unit.unit_id)
+                _thr_hist = getattr(self, "_syntax_fail_history", None)
+                if _thr_hist is None:
+                    _thr_hist = self._syntax_fail_history = {}
+                _thr_msg = getattr(
+                    validation.hard_failures[0], "message", "") or ""
+                _thr_lst = _thr_hist.setdefault(_thr_key, [])
+                _thr_lst.append(_thr_msg)
+                if (len(_thr_lst) >= 3
+                        and _thr_lst[-1] == _thr_lst[-2] == _thr_lst[-3]):
+                    decision.action = "escalate"
+                    decision.reasons.append(
+                        "syntax-class draw throttle: byte-identical "
+                        "failure repeated 3x on this unit (S28-311)")
+                    self.journal.emit(
+                        "syntax_draw_throttled",
+                        {"unit_id": unit.unit_id,
+                         "failure_head": _thr_msg[:120]},
+                        step_index=self.step, path=unit.path,
+                        unit_id=unit.unit_id)
             outcome.decision = decision
             self.journal.emit(
                 "risk_decision",
