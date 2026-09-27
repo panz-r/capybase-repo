@@ -7774,6 +7774,26 @@ class VerificationEngine:
             if not structural.is_available(language):
                 return
             dupes = structural.duplicate_definitions(whole, language)
+            # S28-283(b) (libuv-0056): when the abstract parser DEGRADES on
+            # an era-mixed/branch-heavy C file, dupes come back None and the
+            # check silently passes — the duplicated `struct
+            # uv__cf_loop_state_s {` opener shipped exactly through that
+            # hole. Raw-line C fallback: count named aggregate openers
+            # outside strings; scope-blind (any 2+ definitions of the same
+            # struct/union/enum name in one file is a merge defect unless
+            # the baseline has it).
+            if (dupes is None and language in ("c", "cpp", "c++")):
+                import re as _re_dd
+                _dd_mask = _mask_strings_and_comments(whole, "c")
+                _dd_counts: dict[str, list[int]] = {}
+                for _i, _ln in enumerate(_dd_mask.split("\n"), start=1):
+                    _m = _re_dd.match(
+                        r"\s*(?:typedef\s+)?(?:struct|union|enum)\s+"
+                        r"([A-Za-z_]\w*)\s*[^;{]*\{", _ln)
+                    if _m:
+                        _dd_counts.setdefault(_m.group(1), []).append(_i)
+                dupes = [("struct", n, rows) for n, rows in _dd_counts.items()
+                         if len(rows) >= 2] or None
         else:
             return
         if dupes is None:

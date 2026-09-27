@@ -550,6 +550,8 @@ class CaseResult:
     # ORACLE_DIVERGENT because unchecked content read as failed checks.
     marker_free: bool | None = None
     compiles: bool | None = None
+    # S28-290: what the compiles evidence IS (brace|py_compile|c_build|ra_check)
+    compiles_scope: str | None = None
     matches_oracle: float = 0.0
     # Sprint-20 S20.11: control-flow skeleton similarity to the oracle
     # (EVAL ONLY — never a gate). High with low matches_oracle flags an
@@ -1312,6 +1314,12 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # default OFF; the next armed rerun opts in via env.
     if os.environ.get("CAPYBASE_TREE_ABSENT_DELETION", "") == "1":
         cfg.future.enable_tree_absent_deletion = True
+    # S28-311: the syntax-class draw throttle (pilot-gated).
+    if os.environ.get("CAPYBASE_SYNTAX_DRAW_THROTTLE", "") == "1":
+        cfg.future.enable_syntax_draw_throttle = True
+    # S28-309/310: the self-refuting-gate fallback (rust, pilot-gated).
+    if os.environ.get("CAPYBASE_RA_GATE_FALLBACK", "") == "1":
+        cfg.future.enable_ra_gate_fallback = True
     # S28-183 pilot gate: the repair-edit delimiter guard is default OFF
     # (census-gated decline); the screening rerun opts in via env.
     if os.environ.get("CAPYBASE_REPAIR_GUARD", "") == "1":
@@ -3046,6 +3054,19 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
                     res.harness_builds = _harness_builds or None
                     res.toolchain_probe = {
                         **(_cached_probe or {}), "era_header_screen": _screen}
+                    # S28-312/316: store HERE — the scoring-tail writer's
+                    # toolchain_probe precondition excludes the duckdb GU
+                    # family (no toolchain_probe), so the memo never cached
+                    # the rows it was built for. The read path at the top of
+                    # the pre-screen expects exactly this entry shape.
+                    try:
+                        _era_memo_store(case.id, {
+                            "spec_sha": _era_spec_sha(case),
+                            "flags_fp": _ERA_FLAGS_FINGERPRINT,
+                            "screen": _screen,
+                        })
+                    except Exception:  # noqa: BLE001 — cache is best-effort
+                        pass
                     return _mark_era_header_dead(res, _screen, t0)
         cfg = _config_for(case, has_crate=crate_source is not None)
         if _RELAXED_FLOOR:
@@ -3291,18 +3312,23 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
     from capybase.verification import structural_gate_applies as _sga
     if not content:
         res.compiles = False
+        res.compiles_scope = "empty"
     elif not _sga(case.path):
         res.compiles = True
+        res.compiles_scope = "not_applicable"
     elif case.language == "python":
         res.compiles = _py_compiles(content)
+        res.compiles_scope = "py_compile"
     elif case.language in ("c", "cpp", "c++"):
         # Use the build verdict captured before cleanup; fall back to brace-
         # balance if the build couldn't run (no command registered or no tree).
         res.compiles = c_builds_result if c_builds_result is not None else (
             _brace_balanced(content, case.language)
         )
+        res.compiles_scope = "c_build" if c_builds_result is not None else "brace"
     else:
         res.compiles = _brace_balanced(content, case.language)
+        res.compiles_scope = "brace"
     # S28-267: the gate-divergence suspect — the session's LAST
     # in-session build failed the content the harness's build passes.
     if (c_builds_result is True and _session_events):
