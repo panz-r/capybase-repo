@@ -19163,8 +19163,8 @@ class Orchestrator:
                     validation.hard_failures[0], "message", "") or ""
                 _thr_lst = _thr_hist.setdefault(_thr_key, [])
                 _thr_lst.append(_thr_msg)
-                if (len(_thr_lst) >= 3
-                        and _thr_lst[-1] == _thr_lst[-2] == _thr_lst[-3]):
+                if (len(_thr_lst) >= 2
+                        and _thr_lst[-1] == _thr_lst[-2]):
                     decision.action = "escalate"
                     decision.reasons.append(
                         "syntax-class draw throttle: byte-identical "
