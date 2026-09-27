@@ -3326,7 +3326,11 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         res.compiles = c_builds_result if c_builds_result is not None else (
             _brace_balanced(content, case.language)
         )
-        res.compiles_scope = "c_build" if c_builds_result is not None else "brace"
+        # S28-329: a None build is a DEGRADED gate (timeout/error) — the
+        # php-0005 PASS<->GU flips were this, undiagnosable at scope=brace.
+        res.compiles_scope = (
+            "c_build" if c_builds_result is not None
+            else "c_build_degraded")
     else:
         res.compiles = _brace_balanced(content, case.language)
         res.compiles_scope = "brace"

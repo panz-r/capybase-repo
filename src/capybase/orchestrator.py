@@ -15246,6 +15246,8 @@ class Orchestrator:
                              "path": path},
                             step_index=self.step, path=path,
                             unit_id=unit.unit_id)
+                        self._journal_tree_absent_starvation(
+                            failures, symbol, path)
                         return [(_su, _sc)]
                 self.journal.emit(
                     "symbol_inject_decl_not_found",
@@ -15281,6 +15283,7 @@ class Orchestrator:
                 {"symbol": symbol, "decl": decls[0][:120],
                  "provenance": provenance, "path": path},
                 step_index=self.step, path=path, unit_id=unit.unit_id)
+            self._journal_tree_absent_starvation(failures, symbol, path)
             return [(wf_unit, wf_cand)]
         return None
 
@@ -15876,6 +15879,17 @@ class Orchestrator:
                                             or {}).values() if t.strip()]
                                         or None),
                                 )
+                                if not _et_val.passed:
+                                    # S28-325: silent declines read as
+                                    # "never engaged" — journal the splice-
+                                    # but-gate-fails shape.
+                                    self.journal.emit(
+                                        "exptok_declined",
+                                        {"path": path,
+                                         "token": _et_tok,
+                                         "line": _et_l + 1,
+                                         "gate_still_fails": True},
+                                        step_index=self.step, path=path)
                                 if _et_val.passed:
                                     _et_unit = units[0].model_copy(update={
                                         "marker_span": None,
@@ -15997,6 +16011,16 @@ class Orchestrator:
                                         [t for t in _ib_sides.values()
                                          if t.strip()] or None),
                                 )
+                                if not _ib_val.passed:
+                                    # S28-325: decline telemetry (see exptok).
+                                    self.journal.emit(
+                                        "indblock_declined",
+                                        {"path": path,
+                                         "keyword": _ib_kw,
+                                         "line": _ib_no,
+                                         "block_lines": len(_ib_block),
+                                         "gate_still_fails": True},
+                                        step_index=self.step, path=path)
                                 if _ib_val.passed:
                                     _ib_unit = units[0].model_copy(update={
                                         "marker_span": None,
@@ -16241,6 +16265,8 @@ class Orchestrator:
                                          "declaration": _decl[:120], "path": path},
                                         step_index=self.step, path=path,
                                         unit_id=unit.unit_id)
+                                    self._journal_tree_absent_starvation(
+                                        failures, _decl[:40], path)
                                     _tried.add(f"storclass:{_sig}")
                                     return [(_sc_unit, _sc_cand)]
                     except Exception as _rung_exc:  # noqa: BLE001 — relocation is best-effort
@@ -18791,16 +18817,22 @@ class Orchestrator:
                 # unused for this unit, grant exactly ONE more iteration and
                 # select the recovery prompt for it; the second cap hit
                 # escalates unchanged.
+                # S28-324b: the cap edge draws from its OWN single-shot
+                # budget — an empty/refusal recovery earlier in the unit no
+                # longer pre-spends the cap's reframe (the 0070 shape).
                 if (not _header_repaired
                         and not pending_recovery
-                        and recovery_retry_count
-                        < getattr(self.config.validation,
-                                  "max_recovery_retries_per_unit", 1)
+                        and retry_count + critic_retry_count
+                        + recovery_retry_count < 99
+                        and not getattr(self, "_cap_recovery_used", set())
+                        .intersection({(path, unit.unit_id)})
                         and getattr(self.config.validation,
                                     "enable_recovery_retry", True)):
                     _header_repaired = True
                     pending_recovery = True
-                    recovery_retry_count += 1
+                    if not hasattr(self, "_cap_recovery_used"):
+                        self._cap_recovery_used = set()
+                    self._cap_recovery_used.add((path, unit.unit_id))
                     self.journal.emit(
                         "header_cap_recovery_granted",
                         {"path": unit.path,
