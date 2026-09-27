@@ -3021,7 +3021,8 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         if _ERA_PRESCREEN and _cached_probe is None:
             _memo_entry = _era_memo_load().get(case.id) or {}
             if (_memo_entry.get("spec_sha") == _era_spec_sha(case)
-                    and _memo_entry.get("flags_fp") == _era_flags_fp):
+                    and _memo_entry.get(
+                        "flags_fp") == _ERA_FLAGS_FINGERPRINT):
                 res.harness_builds = _harness_builds or None
                 return _mark_era_header_dead(
                     res, _memo_entry.get("screen") or {}, t0)
