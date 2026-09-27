@@ -338,7 +338,8 @@ def _failures_name_compiler_absent_member(failures):
             continue
         m = (_re_t.search(r"named\s+[\u2018']([A-Za-z_]\w*)", msg)
              or _re_t.search(r"call to\s+[\u2018']([\w:]+)", msg)
-             or _re_t.search(r"[\u2018']([A-Za-z_]\w*)[\u2019']? does not name", msg))
+             or _re_t.search(r"[\u2018']([A-Za-z_]\w*)[\u2019']? does not name", msg)
+             or _re_t.search(r"[\u2018']([A-Za-z_]\w*)[\u2019']? was not declared", msg))
         if not m:
             continue
         sym = m.group(1).split("::")[-1]
@@ -15835,7 +15836,8 @@ class Orchestrator:
                     _et_ins = None
                     for _f in failures:
                         _m = _re_et.search(
-                            r":(\d+):(\d+): error: expected '([^']+)'",
+                            r":(\d+):(\d+): error: expected "
+                            r"[\u2018']([^'\u2019]+)[\u2019']",
                             getattr(_f, "message", "") or "")
                         if (_m and _m.group(3)
                                 in (";", ",", ")", "]", "}", ">")):
