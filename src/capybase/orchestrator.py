@@ -18986,14 +18986,14 @@ class Orchestrator:
                         and retry_count + critic_retry_count
                         + recovery_retry_count < 99
                         and not getattr(self, "_cap_recovery_used", set())
-                        .intersection({(path, unit.unit_id)})
+                        .intersection({(unit.path, unit.unit_id)})
                         and getattr(self.config.validation,
                                     "enable_recovery_retry", True)):
                     _header_repaired = True
                     pending_recovery = True
                     if not hasattr(self, "_cap_recovery_used"):
                         self._cap_recovery_used = set()
-                    self._cap_recovery_used.add((path, unit.unit_id))
+                    self._cap_recovery_used.add((unit.path, unit.unit_id))
                     self.journal.emit(
                         "header_cap_recovery_granted",
                         {"path": unit.path,
