@@ -56,6 +56,7 @@ def test_provenance_values_match_spec():
         "deterministic_rename",
         "deterministic_expected_token",
         "deterministic_indented_block",
+        "deterministic_paren_closer",
         "deterministic_dup_eradication",
         "deterministic_side_consistency_repair",
         "deterministic_side_consensus_repair",

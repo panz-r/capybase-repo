@@ -1320,6 +1320,12 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # S28-309/310: the self-refuting-gate fallback (rust, pilot-gated).
     if os.environ.get("CAPYBASE_RA_GATE_FALLBACK", "") == "1":
         cfg.future.enable_ra_gate_fallback = True
+    # S28-280: the judge-unavailable stamp (pilot-gated).
+    if os.environ.get("CAPYBASE_JUDGE_STAMP", "") == "1":
+        cfg.future.enable_judge_unavailable_stamp = True
+    # S28-345: sequenced syntax-first preflight (pilot-gated).
+    if os.environ.get("CAPYBASE_SYNTAX_PREFLIGHT", "") == "1":
+        cfg.validation.enable_syntax_preflight = True
     # S28-183 pilot gate: the repair-edit delimiter guard is default OFF
     # (census-gated decline); the screening rerun opts in via env.
     if os.environ.get("CAPYBASE_REPAIR_GUARD", "") == "1":

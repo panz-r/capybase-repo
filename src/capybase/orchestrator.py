@@ -306,6 +306,38 @@ def _whitespace_equal(a: str, b: str) -> bool:
 
 #: S28-268: the gcc error shapes that name a member symbol the conflict
 #: TU needs (the era screen's set, orchestrator-side).
+def _gate_judge_unavailable(failures, whole_text: str) -> bool:
+    """S28-280: does the gate failure name an UNDEFINED ALL-CAPS macro
+    invocation? The generated arginfo headers' class: gcc reports
+    `expected ... before ...`/`expected ... after ...` at a line whose
+    text is `SOME_MACRO(...)` and SOME_MACRO has no #define in the
+    buffer — the standalone gate cannot parse the file, the oracle
+    fails it too (S28-293's population), and no resolution of this
+    file can pass. Quote-normalized (the S28-327 lesson)."""
+    import re as _re_ju
+    if not whole_text:
+        return False
+    defines = set(_re_ju.findall(
+        r"^\s*#\s*define\s+([A-Za-z_]\w*)", whole_text, _re_ju.M))
+    for f in failures:
+        msg = (getattr(f, "message", "") or "").replace(
+            "\u2018", "'").replace("\u2019", "'")
+        m = _re_ju.search(
+            r":(\d+):\d+: error: .*\b([A-Z][A-Z0-9_]{3,})\b", msg)
+        if not m:
+            continue
+        line_no = int(m.group(1))
+        macro = m.group(2)
+        if macro in defines:
+            continue
+        lines = whole_text.split("\n")
+        if 0 <= line_no - 1 < len(lines):
+            stmt = lines[line_no - 1]
+            if _re_ju.match(rf"\s*{macro}\s*\(", stmt):
+                return True
+    return False
+
+
 _TA_SYMBOL_PATTERNS = (
     "no member named",
     "no matching function for call to",
@@ -10636,9 +10668,14 @@ class Orchestrator:
                 )
                 return det
         else:
+            # S28-288(b): the decline payload carries the detected line —
+            # the analysis data 0052's gap study was blocked on twice.
+            import re as _re_ta
+            _ta_m = _re_ta.search(r"line (\d+)", str(diag))
             self.journal.emit(
                 "terminal_arms_declined",
-                {"path": path, "arm": "pystring", "reason": diag},
+                {"path": path, "arm": "pystring", "reason": diag,
+                 "detected_line": int(_ta_m.group(1)) if _ta_m else None},
                 step_index=self.step, path=path,
             )
         # rung 2: the boundary-glue arm — the cross-unit docstring-glue
@@ -10674,7 +10711,8 @@ class Orchestrator:
             self.journal.emit(
                 "terminal_arms_declined",
                 {"path": path, "arm": "boundary_glue",
-                 "reason": "no_compiling_variant"},
+                 "reason": "no_compiling_variant",
+                 "substrate_units": len(substrate)},
                 step_index=self.step, path=path,
             )
         return None
@@ -12471,6 +12509,32 @@ class Orchestrator:
                                      for f in _sig_val.hard_failures[:3]]},
                                 step_index=self.step, path=path,
                             )
+                    # S28-280: the judge-unavailable stamp — an undefined
+                    # ALL-CAPS macro invocation means the gate cannot judge
+                    # ANY resolution of this file (the oracle fails it too);
+                    # skip the repair budget and the rungs entirely.
+                    if (getattr(
+                            getattr(self.config, "future", None),
+                            "enable_judge_unavailable_stamp", False)
+                            and not getattr(self, "_ju_stamped", set())
+                            .intersection({path})):
+                        try:
+                            _ju_buf = _resolved_buffer(original, accepted)
+                        except Exception:  # noqa: BLE001
+                            _ju_buf = None
+                        if _ju_buf and _gate_judge_unavailable(
+                                file_validation.hard_failures, _ju_buf):
+                            if not hasattr(self, "_ju_stamped"):
+                                self._ju_stamped = set()
+                            self._ju_stamped.add(path)
+                            self.journal.emit(
+                                "gate_judge_unavailable",
+                                {"path": path,
+                                 "failure_head": (file_validation
+                                                  .hard_failures[0]
+                                                  .message[:120])},
+                                step_index=self.step, path=path)
+                            break
                     # Attribute the failure to a unit and re-resolve it with the
                     # file-level failures as concrete repair feedback.
                     wf_retries += 1
@@ -16060,6 +16124,103 @@ class Orchestrator:
                             {"rung": "indented_block",
                              "error": (f"{type(_ib_exc).__name__}: "
                                        f"{_ib_exc}")},
+                            step_index=self.step, path=path)
+                    except Exception:  # noqa: BLE001
+                        pass
+            # S28-329/335: the PAREN CLOSER (python) — `unmatched ')'
+            # (at line N)` means one extra closer; delete it. The two
+            # fixtures (0079, scikit-0005) are one punctuation defect
+            # from PASS. Conservative: position required, accept only on
+            # pass. Composes with the indblock rung through the beam
+            # (each round re-gates; the S28-346 constraint).
+            if (language == "python"
+                    and getattr(
+                        getattr(self.config, "future", None),
+                        "enable_tree_absent_deletion", False)
+                    and f"parenclose:{_sig}" not in _tried):
+                _tried.add(f"parenclose:{_sig}")
+                try:
+                    import re as _re_pc
+                    _pc_ins = None
+                    for _f in failures:
+                        _m = _re_pc.search(
+                            r"SyntaxError: unmatched '\)' \(at line "
+                            r"(\d+)\)",
+                            getattr(_f, "message", "") or "")
+                        if _m:
+                            _pc_ins = int(_m.group(1))
+                            break
+                    if _pc_ins is not None:
+                        _pc_buf0 = _resolved_buffer(original, accepted)
+                        _pc_lines = _pc_buf0.split("\n")
+                        _pc_idx = _pc_ins - 1
+                        if 0 <= _pc_idx < len(_pc_lines):
+                            _pc_line = _pc_lines[_pc_idx]
+                            _pc_pos = _pc_line.rfind(")")
+                            if _pc_pos >= 0:
+                                _pc_new = (_pc_line[:_pc_pos]
+                                           + _pc_line[_pc_pos + 1:])
+                                _pc_lines[_pc_idx] = _pc_new
+                                _pc_buf = "\n".join(_pc_lines)
+                                if _pc_buf != _pc_buf0:
+                                    _pc_spans = [
+                                        (u.marker_span, c.resolved_text)
+                                        for u, c in accepted]
+                                    _pc_val = self.verification.verify_file(
+                                        path, language, original, _pc_spans,
+                                        repo_root=str(self.git.repo),
+                                        whole_text=_pc_buf,
+                                        pristine_side_texts=(
+                                            [t for t in (
+                                                self._micro_stage_sides(
+                                                    path)[0] or {})
+                                                .values() if t.strip()]
+                                            or None),
+                                    )
+                                    if _pc_val.passed:
+                                        _pc_unit = units[0].model_copy(
+                                            update={"marker_span": None,
+                                                    "unit_kind":
+                                                    "whole_file"})
+                                        _pc_cid = (
+                                            (accepted[fault_idx][1]
+                                             .candidate_id
+                                             if 0 <= fault_idx < len(accepted)
+                                             else unit.unit_id)
+                                            + ":parenclose")
+                                        _pc_cand = CandidateResolution(
+                                            candidate_id=_pc_cid,
+                                            unit_id=unit.unit_id,
+                                            model_name="deterministic",
+                                            resolved_text=_pc_buf,
+                                            prompt_version=(
+                                                "deterministic_paren_closer"),
+                                            provenance="deterministic_paren_closer",
+                                            self_reported_confidence=0.7,
+                                            explanation=(
+                                                "S28-329: removed the extra "
+                                                f"')' at line {_pc_ins} "
+                                                "(unmatched; the splice "
+                                                "verifies"),
+                                        )
+                                        self.journal.emit(
+                                            "paren_closer_applied",
+                                            {"path": path,
+                                             "line": _pc_ins},
+                                            step_index=self.step, path=path)
+                                        return [(_pc_unit, _pc_cand)]
+                                    self.journal.emit(
+                                        "parenclose_declined",
+                                        {"path": path, "line": _pc_ins,
+                                         "gate_still_fails": True},
+                                        step_index=self.step, path=path)
+                except Exception as _pc_exc:  # noqa: BLE001 — best-effort
+                    try:
+                        self.journal.emit(
+                            "repair_rung_error",
+                            {"rung": "paren_closer",
+                             "error": (f"{type(_pc_exc).__name__}: "
+                                       f"{_pc_exc}")},
                             step_index=self.step, path=path)
                     except Exception:  # noqa: BLE001
                         pass

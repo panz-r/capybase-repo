@@ -336,6 +336,11 @@ class ValidationConfig(BaseModel):
     require_no_markers: bool = True
     require_exact_splice_scope: bool = True
     require_syntax_if_supported: bool = True
+    # S28-345 (pilot-gated, default OFF): sequenced syntax-first — the
+    # standalone check precedes a C/C++ buffer's first full tree build;
+    # a syntax failure retires the 300s window (a non-parsing file will
+    # not compile).
+    enable_syntax_preflight: bool = False
     reject_if_copies_one_side: bool = True
     # Sprint-19 P2 (churn-aware preservation heuristic): when the ONLY
     # unaccounted obligation of the non-copied side is a pure DELETION of
@@ -1082,6 +1087,15 @@ class FutureConfig(BaseModel):
     # rust-analyzer passed all four). Stamp, journal the delta, skip the
     # repair budget. Zero model requests.
     enable_ra_gate_fallback: bool = False
+    # S28-280 (pilot-gated, default OFF): the judge-unavailable stamp —
+    # when a file gate's failure names an UNDEFINED ALL-CAPS macro
+    # invocation (generated arginfo headers' class: the macro is not
+    # #define'd in the buffer), the gate cannot judge any resolution of
+    # this file (the oracle itself fails it — S28-293's population).
+    # Skip the repair budget AND the deterministic rungs for the file;
+    # the harness doors classify the row.
+    enable_judge_unavailable_stamp: bool = False
+
     # Declaration restoration (S28-197, pilot-gated — the corrected
     # S28-178): when a whole-file failure names an UNDECLARED symbol,
     # insert the pristine side's DECLARING LINE before the symbol's

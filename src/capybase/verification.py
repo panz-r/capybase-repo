@@ -4762,7 +4762,16 @@ def _compile_python(source: str) -> tuple[bool, str]:
     proc = _py_compile_run(source)
     if proc.returncode == 0:
         return True, "py_compile ok"
-    return False, (proc.stderr.strip() or "py_compile failed").splitlines()[-1]
+    # S28-329(a): carry the diagnostic's line number into the message —
+    # classes like `unmatched ')'` name no position on their own line,
+    # and the deterministic closer (and any analysis) needs it.
+    tail = (proc.stderr.strip() or "py_compile failed").splitlines()[-1]
+    if "line " not in tail:
+        import re as _re_cp
+        m = _re_cp.search(r'File "[^"]+", line (\d+)', proc.stderr or "")
+        if m:
+            tail = f"{tail} (at line {m.group(1)})"
+    return False, tail
 
 
 def _py_compile_errors(source: str) -> list[str]:
@@ -6846,6 +6855,35 @@ class VerificationEngine:
                         _build_timeout = 30 if target_tmpl else 300
                         _build_attempts = 0
                         proc = None
+                        # S28-345: sequenced syntax-first arbitration — a
+                        # buffer that does not PARSE will not compile; the
+                        # seconds-cheap standalone check runs BEFORE the
+                        # first full build of this content and its failure
+                        # retires the 300s window (the 0053 sequence: the
+                        # timeout bought information the pre-check had).
+                        # Only the FIRST attempt per buffer; the memo and
+                        # single-flight below are untouched.
+                        if (
+                                getattr(self.config, "enable_syntax_preflight",
+                                        False)
+                                and _build_attempts == 0
+                                and not target_tmpl):
+                            _pf_ok, _pf_msg = _syntax_only_fallback(
+                                "preflight")
+                            _bs.record_probe(
+                                build_cmd, 0.0,
+                                "pass" if _pf_ok else "skip_syntax_failed",
+                                path=path, note="S28-345 preflight",
+                                errors=None if _pf_ok else _pf_msg[:300])
+                            if not _pf_ok:
+                                syntax_ok = False
+                                err_lines = (_pf_msg or "").splitlines()
+                                msg = (f"build: preflight syntax failure "
+                                       f"({_pf_msg[:160]})")
+                                # jump to the failure handling: emulate the
+                                # failed-proc path
+                                proc = subprocess.CompletedProcess(
+                                    build_cmd, 1, stdout="", stderr=_pf_msg)
                         # S28-168 single-flight: an identical concurrent
                         # build (same cmd, same target content) adopts
                         # one execution instead of racing (the census's
