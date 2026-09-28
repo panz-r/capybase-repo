@@ -174,6 +174,12 @@ class ValidationConfig:
     # = standalone gcc (the existing behavior). Set by the orchestrator from
     # tests.pre_continue, or by the live-eval driver from C_BUILD_COMMANDS.
     cc_build_command: str = ""
+    # S28-345 sequenced syntax-first preflight (mirrors config.ValidationConfig;
+    # the live flag). A parse-failed C/C++ buffer retires its first full-build
+    # window without the 300s compile. NOTE: this class is the bridge TARGET —
+    # a field that exists only on config.py's pydantic twin is silently dropped
+    # by from_dict (tests/test_validation_bridge_parity_s28.py guards the set).
+    enable_syntax_preflight: bool = False
     # Clippy lint check (mirrors config.ValidationConfig; the live flags).
     enable_clippy: bool = False
     clippy_severity: str = "warning"
@@ -6870,20 +6876,37 @@ class VerificationEngine:
                                 and not target_tmpl):
                             _pf_ok, _pf_msg = _syntax_only_fallback(
                                 "preflight")
+                            if not _pf_ok:
+                                # The fallback compiled the buffer from a
+                                # /tmp copy, so gcc names the tmp path. The
+                                # failed-proc tail localizes errors by file
+                                # stem — a tmp stem classifies as a SIBLING
+                                # error and the verdict fails OPEN (passing a
+                                # buffer that does not parse). Rewrite the
+                                # location to the conflict file: the error IS
+                                # in its content (S28-349, probe-proven).
+                                _pf_tmp = re.search(
+                                    r"/tmp/tmp[A-Za-z0-9_]+\.(?:c|cpp|cc|cxx)",
+                                    _pf_msg or "")
+                                _pf_view = (
+                                    _pf_msg.replace(_pf_tmp.group(0), path)
+                                    if _pf_tmp else (_pf_msg or ""))
                             _bs.record_probe(
                                 build_cmd, 0.0,
                                 "pass" if _pf_ok else "skip_syntax_failed",
                                 path=path, note="S28-345 preflight",
-                                errors=None if _pf_ok else _pf_msg[:300])
+                                errors=None if _pf_ok else _pf_view[:300])
                             if not _pf_ok:
                                 syntax_ok = False
-                                err_lines = (_pf_msg or "").splitlines()
+                                err_lines = (_pf_view or "").splitlines()
                                 msg = (f"build: preflight syntax failure "
-                                       f"({_pf_msg[:160]})")
+                                       f"({_pf_view[:160]})")
                                 # jump to the failure handling: emulate the
-                                # failed-proc path
+                                # failed-proc path (stderr carries the
+                                # conflict-file location so the stem
+                                # classifier lands it as a real error)
                                 proc = subprocess.CompletedProcess(
-                                    build_cmd, 1, stdout="", stderr=_pf_msg)
+                                    build_cmd, 1, stdout="", stderr=_pf_view)
                         # S28-168 single-flight: an identical concurrent
                         # build (same cmd, same target content) adopts
                         # one execution instead of racing (the census's
