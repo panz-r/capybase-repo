@@ -1096,6 +1096,34 @@ class FutureConfig(BaseModel):
     # the harness doors classify the row.
     enable_judge_unavailable_stamp: bool = False
 
+    # Defer-to-ladder (S28-337/339, pilot-gated): the SECOND header-cap
+    # hit (recovery already spent) carries a defer marker on the
+    # escalation; run()'s per-unit loop routes it into the file-level
+    # deterministic ladder (the rungs + the side-consistency repair —
+    # ZERO model requests) before the escalation stands. 0069's class:
+    # the cap exits the unit before the ladder whose deterministic arm
+    # converts it. Budget constraint honored: deterministic-only, the
+    # gate is the rescue authority.
+    enable_defer_to_ladder: bool = False
+
+    # Era-preference arm (S28-312b/316, pilot-gated): the file's
+    # already-resolved units vote which side's vocabulary their candidate
+    # matches (distinctive token sets); the running election (UNIT
+    # plurality — never token mass, the S28-316 correction) rides a
+    # pre-draw era-consistency note into later units' prompts. Advisory
+    # only; the normal gates judge the result. Fixture: 0056 (the
+    # era-MIXED file whose 16 draws bought the mixture).
+    enable_era_preference: bool = False
+
+    # Hunk-level substitution rung (S28-275(b), pilot-gated): at a gate
+    # failure naming a line in the conflict file, swap the candidate's
+    # base-aligned region at that line for the OTHER side's aligned
+    # region — local surgery where the whole-file side-pick structurally
+    # cannot reach (the other side's own era errors fail its full splice;
+    # 0127's two-edit gap). Both directions tried, each gated; accept
+    # only on pass. Zero model requests.
+    enable_hunk_substitution: bool = False
+
     # Declaration restoration (S28-197, pilot-gated — the corrected
     # S28-178): when a whole-file failure names an UNDECLARED symbol,
     # insert the pristine side's DECLARING LINE before the symbol's

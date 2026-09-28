@@ -176,6 +176,7 @@ _PROVENANCE_SAFETY: dict[str, SafetyClass] = {
     "deterministic_expected_token": SafetyClass.HEURISTIC,
     "deterministic_indented_block": SafetyClass.HEURISTIC,
     "deterministic_paren_closer": SafetyClass.HEURISTIC,
+    "deterministic_hunk_substitution": SafetyClass.HEURISTIC,
     "deterministic_cc_repair": SafetyClass.HEURISTIC,
     "deterministic_dup_eradication": SafetyClass.HEURISTIC,
     "deterministic_side_consistency_repair": SafetyClass.HEURISTIC,

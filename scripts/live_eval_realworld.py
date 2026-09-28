@@ -1323,6 +1323,15 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # S28-280: the judge-unavailable stamp (pilot-gated).
     if os.environ.get("CAPYBASE_JUDGE_STAMP", "") == "1":
         cfg.future.enable_judge_unavailable_stamp = True
+    # S28-337/339: the defer-to-ladder (pilot-gated).
+    if os.environ.get("CAPYBASE_DEFER_TO_LADDER", "") == "1":
+        cfg.future.enable_defer_to_ladder = True
+    # S28-312b/316: the era-preference arm (pilot-gated).
+    if os.environ.get("CAPYBASE_ERA_PREFERENCE", "") == "1":
+        cfg.future.enable_era_preference = True
+    # S28-275(b): the hunk-level substitution rung (pilot-gated).
+    if os.environ.get("CAPYBASE_HUNK_SUBSTITUTION", "") == "1":
+        cfg.future.enable_hunk_substitution = True
     # S28-345: sequenced syntax-first preflight (pilot-gated).
     if os.environ.get("CAPYBASE_SYNTAX_PREFLIGHT", "") == "1":
         cfg.validation.enable_syntax_preflight = True

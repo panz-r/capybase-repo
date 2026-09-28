@@ -94,6 +94,13 @@ class UnitOutcome:
     # None/False on accept; set together on an escalation return.
     escalated: bool = False
     reason: str | None = None
+    # S28-337/339 defer-to-ladder (flag-gated): the unit escalated at the
+    # SECOND header-cap hit (recovery already spent) — run()'s per-unit
+    # loop routes this marker into the file-level deterministic ladder
+    # (whose rungs, incl. the side-consistency repair, get their chance)
+    # BEFORE the escalation is accepted. The escalation itself is
+    # unchanged — this is a carried second chance, not a verdict change.
+    deferred_to_ladder: bool = False
     # Oscillation detection (CEGIS resilience): hashes of resolved_text seen
     # across retries for this unit, mapped to how many times each was seen.
     # If the same candidate appears 3+ times, the model is cycling (producing
@@ -257,6 +264,173 @@ _ZB_ADVISORY = frozenset({
     "intent_coverage",
     "unattributed_code",
 })
+
+
+def _era_vote(unit, candidate) -> str | None:
+    """S28-312b/316 era-preference: which side's vocabulary does the
+    accepted candidate match? Returns "current" | "replayed" | None.
+
+    The fingerprint is the DISTINCTIVE token sets — the tokens unique to
+    each side (the shared vocabulary carries no era signal; 0056's
+    ngx_queue x29 vs QUEUE x28 class). A candidate that matches neither
+    side distinctly votes nothing (None)."""
+
+    def _toks(t: str) -> set:
+        return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", t or ""))
+
+    cur = _toks(getattr(getattr(unit, "current", None), "text", ""))
+    rep = _toks(getattr(getattr(unit, "replayed", None), "text", ""))
+    cand = _toks(getattr(candidate, "resolved_text", "") or "")
+    if not cur or not rep or not cand:
+        return None
+    cur_only, rep_only = cur - rep, rep - cur
+    if not cur_only or not rep_only:
+        return None
+    hit_c, hit_r = len(cand & cur_only), len(cand & rep_only)
+    if hit_c == hit_r:
+        return None
+    return "current" if hit_c > hit_r else "replayed"
+
+
+def _era_election(votes: list) -> str | None:
+    """S28-316's critical resolution: elect by UNIT PLURALITY of the
+    side-preference votes — never token mass (an election by mass picked
+    OLD, the WRONG era, on 0056; unit plurality picked NEW, the oracle's).
+    Fires on any strict plurality with at least two votes; a tie elects
+    nothing."""
+    votes = [v for v in (votes or []) if v]
+    if len(votes) < 2:
+        return None
+    c, r = votes.count("current"), votes.count("replayed")
+    if c == r:
+        return None
+    return "current" if c > r else "replayed"
+
+
+def _era_consistency_note(votes: list, side: str) -> str:
+    """The pre-draw era-consistency line the prompt renders (the note is
+    stashed by the orchestrator only when the flag is on)."""
+    c, r = votes.count("current"), votes.count("replayed")
+    label = ("CURRENT_UPSTREAM_SIDE" if side == "current"
+             else "REPLAYED_COMMIT_SIDE")
+    return (
+        f"ERA CONSISTENCY: {max(c, r)} of the {c + r} already-resolved "
+        f"units in this file follow the {label}'s API era (vote "
+        f"{c}-{r}). Resolve this unit in the SAME era — the rest of the "
+        f"file already uses that side's API style — unless this unit's "
+        f"own content clearly requires otherwise.\n\n"
+    )
+
+
+def _hunk_substitute_at_line(
+    frag_text: str, base_text: str, other_text: str, local_line: int,
+) -> tuple[str, int, int] | None:
+    """S28-275(b): the hunk-level substitution mechanics.
+
+    The error line is located in the candidate's fragment, aligned to
+    base via difflib opcodes; the region substituted is the maximal
+    contiguous run of base range the OTHER side REWRITES (delete/replace
+    opcodes) containing that position — a one-line rename swaps one line,
+    a deleted block removes exactly the block. The whole-file side-pick
+    needs the ENTIRE other splice to verify — structurally impossible
+    when the other side carries its own era errors (0127) — this swaps
+    ONLY the error-site region.
+
+    Returns ``(new_frag_text, region_start, region_end)`` or None to
+    decline: the line sits in a fragment-only insert (no base alignment
+    to swap through — the point-edit rungs own those), the other side
+    AGREES with base at the error site (nothing to substitute), the
+    substitution is a no-op, or the region swallows most of the fragment
+    (the side-pick's territory, already declined)."""
+    from difflib import SequenceMatcher as _SM
+
+    frag = frag_text.split("\n")
+    base = base_text.split("\n")
+    other = other_text.split("\n")
+    if not frag or not base or not other:
+        return None
+    if not (0 <= local_line < len(frag)):
+        return None
+    bf = _SM(None, base, frag, autojunk=False).get_opcodes()
+    # the base position aligned to the error line (None when the line is
+    # a fragment-only insert — no base anchor to swap through)
+    b_pos = None
+    for tag, i1, i2, j1, j2 in bf:
+        if j1 <= local_line < j2:
+            if tag == "insert" or i2 <= i1:
+                return None
+            b_pos = i1 + (i2 - i1) * (local_line - j1) // (j2 - j1)
+            break
+    if b_pos is None:
+        return None
+    # the maximal contiguous non-equal runs of base→other (a run may
+    # absorb an interleaved insertion — its lines join the substitution)
+    runs: list[tuple[int, int, list[str]]] = []
+    cur = None
+    for otag, oi1, oi2, oj1, oj2 in _SM(
+            None, base, other, autojunk=False).get_opcodes():
+        if otag == "equal":
+            if cur is not None:
+                runs.append(cur)
+                cur = None
+            continue
+        lines = other[oj1:oj2] if otag != "delete" else []
+        if cur is not None and oi1 <= cur[1] + 1:
+            cur = (cur[0], max(cur[1], oi2), cur[2] + lines)
+        else:
+            if cur is not None:
+                runs.append(cur)
+            cur = (oi1, oi2, lines)
+    if cur is not None:
+        runs.append(cur)
+    run = next((r for r in runs if r[0] <= b_pos < r[1]), None)
+    if run is None:
+        return None  # the other side agrees with base at the error site
+    w0, w1, repl = run
+    # map the base range [w0, w1) to the fragment's coordinates via the
+    # base→frag opcodes (proportional at the containing opcode's edges)
+    f_lo = f_hi = None
+    for tag, i1, i2, j1, j2 in bf:
+        if tag == "insert" or i2 <= i1:
+            continue
+        if w0 < i2 and w1 > i1:
+            lo = max(w0, i1)
+            hi = min(w1, i2)
+            f_lo = j1 + (j2 - j1) * (lo - i1) // (i2 - i1)
+            f_hi = j1 + (j2 - j1) * (hi - i1) // (i2 - i1)
+    if f_lo is None or f_hi is None or f_hi <= f_lo:
+        return None
+    new_frag = frag[:f_lo] + repl + frag[f_hi:]
+    if new_frag == frag:
+        return None
+    if (f_hi - f_lo) > max(1, int(0.6 * len(frag))):
+        return None
+    return "\n".join(new_frag), f_lo, f_hi
+
+
+def _unit_local_line(accepted, err_line0: int):
+    """Map an assembled-buffer line to ``(unit, cand, local_line)`` for the
+    hunk rung — None when the line falls outside every unit's splice (the
+    original's own lines are not ours to substitute)."""
+    if err_line0 is None or err_line0 < 0:
+        return None
+    pos = 0
+    prev_end = -1
+    for u, c in sorted(
+            accepted,
+            key=lambda p: (p[0].marker_span is None,
+                           (p[0].marker_span or (0, 0))[0])):
+        span = u.marker_span
+        frag = (getattr(c, "resolved_text", "") or "").split("\n")
+        if span is None:
+            return (u, c, err_line0) if err_line0 < len(frag) else None
+        start, end = span
+        pos += start - (prev_end + 1)
+        if pos <= err_line0 < pos + len(frag):
+            return (u, c, err_line0 - pos)
+        pos += len(frag)
+        prev_end = end
+    return None
 
 
 def _cap_boundary_advisory(validation, cand) -> bool:
@@ -10595,6 +10769,109 @@ class Orchestrator:
         # chains); never escalates.
         return StepResult(step_index=self.step, escalated=False, continued=True)
 
+    def _defer_escalated_units_to_ladder(
+        self, path: str, accepted: list, escalated_units: list,
+        *, wall_deadline: float | None = None,
+    ):
+        """S28-337/339: the file-level deterministic ladder for deferred
+        header-cap escalations.
+
+        The second cap hit exits ``_resolve_unit_core`` BEFORE the
+        file-level machinery whose deterministic rungs convert 0069's
+        class (the S28-339 correction: the converter is the
+        ``:sidefix`` side-consistency rung — ZERO model requests — not
+        the chat arm). This runs the ladder's deterministic-only pass
+        on the full near-miss substrate (the terminal-path arms'
+        substrate doctrine: accepted resolutions + the escalated
+        units' best attempts, so the whole file splices and the seam
+        is visible). The repair output replaces ``accepted`` ONLY if
+        the whole-file gate passes it; otherwise the caller's
+        escalation stands untouched. Budget constraint (S28-343):
+        deterministic-only — no model draws, no fresh caps.
+
+        Returns the replacement accepted list, or None (escalation
+        stands / nothing qualified)."""
+        _deferred = [
+            _esc for _esc in escalated_units
+            if getattr(_esc, "deferred_to_ladder", False)]
+        if not _deferred:
+            return None
+
+        def _best_attempt(_o):
+            for _c in reversed(_o.attempts or []):
+                if (getattr(_c, "resolved_text", "") or "").strip():
+                    return _c
+            return None
+
+        _substrate = list(accepted) + [
+            (_esc.unit, _ba) for _esc in _deferred
+            if (_ba := _best_attempt(_esc)) is not None]
+        if not _substrate:
+            return None
+        # original/language derived from the substrate (the terminal-arms
+        # doctrine): every unit of a file carries the full worktree text,
+        # and the caller's `original` binding is not stable here (the
+        # escalation exits before run()'s splice assigns it).
+        _original = _substrate[0][0].original_worktree_text
+        _language = _substrate[0][0].language
+        _failures = []
+        for _esc in _deferred:
+            _failures.extend(
+                getattr(getattr(_esc, "validation", None),
+                        "hard_failures", None) or [])
+        self.journal.emit(
+            "defer_to_ladder_engaged",
+            {"path": path, "deferred_units": len(_deferred),
+             "substrate_units": len(_substrate),
+             "failures": len(_failures)},
+            step_index=self.step, path=path,
+        )
+        try:
+            _det = self._whole_file_repair(
+                path, _substrate, _original, _failures,
+                deterministic_only=True,
+                wall_deadline=wall_deadline,
+            )
+        except Exception as _exc:  # noqa: BLE001 — the defer is best-effort;
+            # a ladder error must never change the escalation's shape.
+            try:
+                self.journal.emit(
+                    "defer_to_ladder_error",
+                    {"path": path,
+                     "error": f"{type(_exc).__name__}: {_exc}"[:200]},
+                    step_index=self.step, path=path,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return None
+        if not _det:
+            return None
+        # The gate is the authority: the ladder's output rescues only if
+        # the whole file verifies (the rungs' returns are whole-file
+        # representations; re-validate exactly as Phase 2 does).
+        try:
+            _spans = [(u.marker_span, c.resolved_text) for u, c in _det]
+            _val = self.verification.verify_file(
+                path, _language, _original, _spans,
+                repo_root=str(self.git.repo),
+            )
+        except Exception:  # noqa: BLE001 — gate errors decline the rescue
+            _val = None
+        if _val is None or not _val.passed:
+            self.journal.emit(
+                "defer_to_ladder_declined",
+                {"path": path, "gate_passed": False},
+                step_index=self.step, path=path,
+            )
+            return None
+        self.journal.emit(
+            "defer_to_ladder_rescued",
+            {"path": path,
+             "candidate_ids": [c.candidate_id for _, c in _det][:5]},
+            step_index=self.step, path=path,
+        )
+        return _det
+
     def _terminal_path_arms(self, path: str, substrate: list,
                             failures: list):
         """S28-233/243 (queue item 4): the deterministic arms at the
@@ -11370,6 +11647,31 @@ class Orchestrator:
                     unit.structural_metadata["sibling_resolutions"] = list(
                         _sibling_resolved[_parent]
                     )
+                # S28-312b/316 era-preference (pilot-gated): the file's
+                # already-resolved units elect a dominant era by UNIT
+                # plurality; the election rides structural_metadata into the
+                # prompt (the engine renders the era-consistency line).
+                # Advisory only — the model may override, and the normal
+                # gates judge the result (the re-gate is inherent).
+                if getattr(getattr(self.config, "future", None),
+                           "enable_era_preference", False):
+                    _era_votes = getattr(self, "_step_era_votes", {}).get(
+                        path, [])
+                    _era_el = _era_election(_era_votes)
+                    if _era_el is not None:
+                        unit.structural_metadata["era_election"] = {
+                            "side": _era_el,
+                            "votes": list(_era_votes),
+                            "note": _era_consistency_note(_era_votes, _era_el),
+                        }
+                        self.journal.emit(
+                            "era_election_engaged",
+                            {"path": path, "unit_id": unit.unit_id,
+                             "side": _era_el,
+                             "votes_current": _era_votes.count("current"),
+                             "votes_replayed": _era_votes.count("replayed")},
+                            step_index=self.step, path=path,
+                            unit_id=unit.unit_id)
                 outcome = self._resolve_unit(
                     unit, wall_deadline=_file_wall_deadline,
                     max_retries=_file_max_retries,
@@ -11386,6 +11688,23 @@ class Orchestrator:
                     # (safety invariant: don't splice a partially-resolved
                     # file), but every unit gets its resolution attempted.
                     continue
+                # S28-312b/316: record the accepted candidate's era vote for
+                # the file's running election.
+                if getattr(getattr(self.config, "future", None),
+                           "enable_era_preference", False):
+                    _ev = _era_vote(unit, outcome.accepted)
+                    if _ev:
+                        _votes = getattr(self, "_step_era_votes", None)
+                        if _votes is None:
+                            _votes = self._step_era_votes = {}
+                        _votes.setdefault(path, []).append(_ev)
+                        self.journal.emit(
+                            "era_vote_recorded",
+                            {"path": path, "unit_id": unit.unit_id,
+                             "vote": _ev,
+                             "candidate_id": outcome.accepted.candidate_id},
+                            step_index=self.step, path=path,
+                            unit_id=unit.unit_id)
                 # Feed this resolution forward to later siblings in the same group.
                 if _parent:
                     _sibling_resolved.setdefault(_parent, []).append(
@@ -11509,6 +11828,23 @@ class Orchestrator:
                     # pairs or the bucket gap persists on this path.
                     accepted_by_path[path] = accepted
                     escalated_units = []
+            if escalated_units:
+                # S28-337/339: the deferred header-cap escalations get the
+                # file-level deterministic ladder before the escalation
+                # stands (flag-gated, zero model requests; the gate is the
+                # authority — a decline leaves everything untouched). A
+                # rescue clears the escalation and flows to the normal
+                # splice + Phase-2 validation below (the terminal-arms
+                # rescue's exact flow).
+                if getattr(getattr(self.config, "future", None),
+                           "enable_defer_to_ladder", False):
+                    _deferred_acc = self._defer_escalated_units_to_ladder(
+                        path, accepted, escalated_units,
+                        wall_deadline=_file_wall_deadline)
+                    if _deferred_acc is not None:
+                        accepted = _deferred_acc
+                        accepted_by_path[path] = accepted
+                        escalated_units = []
             if escalated_units:
                 escalated_unit = escalated_units[0]
                 result.escalated = True
@@ -15996,6 +16332,136 @@ class Orchestrator:
                             step_index=self.step, path=path)
                     except Exception:  # noqa: BLE001
                         pass
+            # S28-275(b): the HUNK-LEVEL SUBSTITUTION rung — at a gate
+            # failure whose diagnostic names a line in the conflict file,
+            # swap the candidate's aligned region at that line for the
+            # OTHER side's aligned region (diff through base). The
+            # whole-file side-pick needs the entire other splice to verify
+            # — structurally impossible when the other side carries its
+            # own era errors (0127) — this is LOCAL surgery. Both
+            # directions tried, each gated; accept only on pass. Zero
+            # model requests.
+            if (getattr(
+                    getattr(self.config, "future", None),
+                    "enable_hunk_substitution", False)
+                    and f"hunksub:{_sig}" not in _tried):
+                _tried.add(f"hunksub:{_sig}")
+                try:
+                    from capybase.verification import (
+                        _parse_cc_error_location as _hs_loc,
+                    )
+                    _hs_err = None
+                    for _f in failures:
+                        _stem, _ln = _hs_loc(
+                            getattr(_f, "message", "") or "")
+                        if (_stem is not None
+                                and _stem == Path(path).stem and _ln):
+                            _hs_err = _ln - 1
+                            break
+                    _hs_hit = (_unit_local_line(accepted, _hs_err)
+                               if _hs_err is not None else None)
+                    if _hs_hit is None:
+                        self.journal.emit(
+                            "hunk_substitution_declined",
+                            {"path": path,
+                             "reason": ("no_in_file_error_line"
+                                        if _hs_err is None
+                                        else "line_outside_splice") },
+                            step_index=self.step, path=path)
+                    else:
+                        _hs_unit, _hs_cand, _hs_local = _hs_hit
+                        _hs_sides = (
+                            self._micro_stage_sides(path)[0] or {})
+                        _hs_opts = (
+                            ("replayed",
+                             _hs_sides.get("replayed")
+                             or _hs_unit.replayed.text or ""),
+                            ("current",
+                             _hs_sides.get("current")
+                             or _hs_unit.current.text or ""),
+                        )
+                        for _hs_side, _hs_other in _hs_opts:
+                            if not _hs_other.strip():
+                                continue
+                            _hs_sub = _hunk_substitute_at_line(
+                                _hs_cand.resolved_text or "",
+                                _hs_unit.base.text or "", _hs_other,
+                                _hs_local)
+                            if _hs_sub is None:
+                                continue
+                            _hs_new, _hs_f0, _hs_f1 = _hs_sub
+                            _hs_pairs = [
+                                (u, c.model_copy(update={
+                                    "resolved_text": _hs_new})
+                                 if u is _hs_unit else c)
+                                for u, c in accepted]
+                            try:
+                                _hs_buf = _resolved_buffer(
+                                    original, _hs_pairs)
+                            except ValueError:
+                                continue
+                            if _hs_buf == _resolved_buffer(
+                                    original, accepted):
+                                continue
+                            _hs_val = self.verification.verify_file(
+                                path, language, original,
+                                [(u.marker_span, c.resolved_text)
+                                 for u, c in _hs_pairs],
+                                repo_root=str(self.git.repo),
+                                whole_text=_hs_buf,
+                                pristine_side_texts=(
+                                    [t for t in _hs_sides.values()
+                                     if t.strip()] or None),
+                            )
+                            if not _hs_val.passed:
+                                continue
+                            _hs_wf = units[0].model_copy(update={
+                                "marker_span": None,
+                                "unit_kind": "whole_file"})
+                            _hs_cid = (
+                                _hs_cand.candidate_id
+                                + f":hunksub-{_hs_side}")
+                            _hs_cand_new = CandidateResolution(
+                                candidate_id=_hs_cid,
+                                unit_id=unit.unit_id,
+                                model_name="deterministic",
+                                resolved_text=_hs_buf,
+                                prompt_version="deterministic_hunk_substitution",
+                                provenance="deterministic_hunk_substitution",
+                                self_reported_confidence=0.7,
+                                explanation=(
+                                    "S28-275(b): substituted the other "
+                                    f"side's region for lines "
+                                    f"{_hs_f0 + 1}-{_hs_f1} at the "
+                                    f"error site (line {_hs_err + 1}); "
+                                    "the splice verifies"),
+                            )
+                            self.journal.emit(
+                                "hunk_substitution_applied",
+                                {"path": path, "side": _hs_side,
+                                 "line": _hs_err + 1,
+                                 "region_start": _hs_f0 + 1,
+                                 "region_end": _hs_f1,
+                                 "unit_id": _hs_unit.unit_id},
+                                step_index=self.step, path=path)
+                            return [(_hs_wf, _hs_cand_new)]
+                        self.journal.emit(
+                            "hunk_substitution_declined",
+                            {"path": path,
+                             "reason": "no_gate_passing_substitution",
+                             "line": (_hs_err + 1)
+                             if _hs_err is not None else None},
+                            step_index=self.step, path=path)
+                except Exception as _hs_exc:  # noqa: BLE001 — best-effort
+                    try:
+                        self.journal.emit(
+                            "repair_rung_error",
+                            {"rung": "hunk_substitution",
+                             "error": (f"{type(_hs_exc).__name__}: "
+                                       f"{_hs_exc}")},
+                            step_index=self.step, path=path)
+                    except Exception:  # noqa: BLE001
+                        pass
             # S28-321: the INDENTED-BLOCK RESTORER (python) —
             # `IndentationError: expected an indented block after 'else'
             # statement on line N` means the splice dropped the block body;
@@ -19007,6 +19473,22 @@ class Orchestrator:
                         f"header file CEGIS cap reached "
                         f"({_header_max_retries} retry budget for headers)"
                     )
+                    # S28-337/339: this is the SECOND cap hit (the recovery
+                    # grant above is the first-hit bridge) — the escalation
+                    # that exits before the file-level ladder whose
+                    # deterministic rungs convert 0069's class. Carry the
+                    # defer marker on the outcome; run()'s per-unit loop
+                    # routes it into the ladder (zero model requests) before
+                    # accepting the escalation. The verdict is unchanged.
+                    if getattr(self.config.future,
+                               "enable_defer_to_ladder", False):
+                        outcome.deferred_to_ladder = True
+                        self.journal.emit(
+                            "header_cap_deferred_to_ladder",
+                            {"path": unit.path,
+                             "unit_id": getattr(unit, "unit_id", "")},
+                            step_index=self.step, path=unit.path,
+                            unit_id=unit.unit_id)
                     self._record_resolution_attempt(
                         outcome, mechanism="llm",
                         decision="escalate", reason=outcome.reason,

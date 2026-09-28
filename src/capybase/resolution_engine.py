@@ -1745,6 +1745,15 @@ def _resolve_prompt_parts(
     # the conflict. Gives the model local scope awareness (parameter types,
     # variable declarations) that the file-level skeleton can't provide.
     func_ctx = _function_local_context(unit)
+    # S28-312b/316 era-consistency note: the file's already-resolved units
+    # elected a dominant API era (unit plurality); the orchestrator stashed
+    # the rendered line only when its pilot flag is on, so its absence here
+    # is the flag-off byte-identical default. Essential (never trimmed) —
+    # short, and cross-unit coherence is what the mixture class loses.
+    era_ctx = (unit.structural_metadata or {}).get("era_election", {}).get(
+        "note", "") if unit.structural_metadata else ""
+    if era_ctx:
+        era_ctx = f"{era_ctx}\n" if not era_ctx.endswith("\n\n") else era_ctx
     # Shared Resolution Context: when this unit is an entity-split sub-unit, the
     # resolved text of upstream sibling sub-units (fed by the orchestrator).
     src_block = _sibling_resolutions_block(unit)
@@ -1776,7 +1785,7 @@ def _resolve_prompt_parts(
     # never-trimmed "essential" estimate with text the model never saw.
     # Removed; re-add BEHIND the hint block's render if ever wanted.
     sides_text = (
-        f"{struct_ctx}{side_intent}{semantic_change}{value_resolution}{_sides}"
+        f"{struct_ctx}{side_intent}{semantic_change}{value_resolution}{era_ctx}{_sides}"
     )
     anchor_t, siblings_t, deps_t, few_shot_t, primary_t, history_t, obls_t, intent_t, nm_t, trims, skeleton_block = _fit_to_budget(
         budget=budget,
@@ -1801,7 +1810,7 @@ def _resolve_prompt_parts(
     # The skeleton block (global entity names for oversized files) is prepended
     # so the model has global awareness before the local conflict.
     data_block = (
-        f"{skeleton_block}{func_ctx}{src_block}{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{intent_t}{few_shot_t}{struct_ctx}{side_intent}{semantic_change}{value_resolution}"
+        f"{skeleton_block}{func_ctx}{src_block}{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{intent_t}{few_shot_t}{struct_ctx}{side_intent}{semantic_change}{value_resolution}{era_ctx}"
         f"{_sides}"
         f"{nm_t}"
         f"Surrounding file context:\n{primary_t}\n\n"
