@@ -431,7 +431,10 @@ _UNVERIFIED_RELABEL = os.environ.get(
 # S28-253: build-what-you-ship's fresh-gate read (same pilot flag as the
 # session-side probe) — escalated + the HARNESS build passes + marker-
 # free + sim >= PASS reads PASS.
-_SHIP_GATE_READ = os.environ.get("CAPYBASE_SHIP_GATE_PROBE", "") == "1"
+# S28-253 + S28-367 graduated (default ON; CAPYBASE_SHIP_GATE_PROBE=0
+# opts out): the fresh-gate READ — the verdict-chain door that
+# converts escalated rows the harness build passes.
+_SHIP_GATE_READ = os.environ.get("CAPYBASE_SHIP_GATE_PROBE", "1") != "0"
 
 # S28-243.2 (queue item 6): the era-header pre-screen (pilot-gated,
 # default OFF; CAPYBASE_ERA_PRESCREEN=1) — setup-time GU for cases whose
@@ -1335,34 +1338,6 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # S28-311: the syntax-class draw throttle (pilot-gated).
     # S28-309/310: the self-refuting-gate fallback (rust, pilot-gated).
     # S28-280: the judge-unavailable stamp (pilot-gated).
-    # S28-337/339: the defer-to-ladder (pilot-gated).
-    if os.environ.get("CAPYBASE_DEFER_TO_LADDER", "") == "1":
-        cfg.future.enable_defer_to_ladder = True
-    # S28-312b/316: the era-preference arm (pilot-gated).
-    if os.environ.get("CAPYBASE_ERA_PREFERENCE", "") == "1":
-        cfg.future.enable_era_preference = True
-    # S28-275(b): the hunk-level substitution rung (pilot-gated).
-    if os.environ.get("CAPYBASE_HUNK_SUBSTITUTION", "") == "1":
-        cfg.future.enable_hunk_substitution = True
-    # S28-358: the session gate-pass cache (pilot-gated).
-    if os.environ.get("CAPYBASE_GATE_PASS_CACHE", "") == "1":
-        cfg.future.enable_gate_pass_cache = True
-    # S28-365 D1: the defer's bounded model re-resolve (pilot-gated).
-    if os.environ.get("CAPYBASE_DEFER_MODEL_RESOLVE", "") == "1":
-        cfg.future.enable_defer_model_resolve = True
-    # S28-365 D3: the injection/deletion arbitration (pilot-gated).
-    if os.environ.get("CAPYBASE_INJECT_ARBITRATION", "") == "1":
-        cfg.future.enable_inject_arbitration = True
-    # S28-183 pilot gate: the repair-edit delimiter guard is default OFF
-    # (census-gated decline); the screening rerun opts in via env.
-    if os.environ.get("CAPYBASE_REPAIR_GUARD", "") == "1":
-        cfg.future.enable_repair_delimiter_guard = True
-    # S28-197 pilot gate: the declaration-restoration mode (default OFF).
-    if os.environ.get("CAPYBASE_DECL_RESTORE", "") == "1":
-        cfg.future.enable_declaration_restoration = True
-    # S28-206 pilot gate: the identical-block dedup rung (default OFF).
-    if os.environ.get("CAPYBASE_BLOCK_DEDUP", "") == "1":
-        cfg.future.enable_identical_block_dedup = True
     # B10 (sprint-26): the self-consistency A/B arm —
     # CAPYBASE_SELF_CONSISTENCY=N (N>1) enables consensus sampling with N
     # samples (samples_complex follows). The per-candidate consensus fields
@@ -2939,7 +2914,15 @@ def _verdict_chain(r: "CaseResult") -> str:
         # build is stronger evidence than either undecidable signal.
         if (_SHIP_GATE_READ
                 and r.compiles and r.marker_free
-                and (r.matches_oracle or 0.0) >= PASS_THRESHOLD):
+                and (r.matches_oracle or 0.0) >= PASS_THRESHOLD
+                # S28-368 review: the fresh-gate read must not preempt the
+                # GU evidence — when the ORACLE fails the same gate
+                # (oracle_builds False), the sandbox-artifact label is the
+                # honest verdict (the read's premise is that the SESSION
+                # gate was poisoned; a failing oracle says the case, not
+                # the gate, is unjudgeable). The GU doors at the chain's
+                # tail outrank it.
+                and getattr(r, "oracle_builds", None) is not False):
             # S28-272: the door STAMPS its reason — an escalated row
             # reading PASS with an empty reason was an auditor trap
             # (cython-0054's trial16 row: escalated=True, verdict PASS,

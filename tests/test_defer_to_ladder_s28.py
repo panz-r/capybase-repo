@@ -164,9 +164,9 @@ def test_ladder_error_never_breaks_the_escalation():
 
 def test_wiring_marker_and_flag_exist():
     assert UnitOutcome.__dataclass_fields__["deferred_to_ladder"].default \
-        is False
+        is False  # the marker is not the flag
     from capybase.config import Config
-    assert Config().future.enable_defer_to_ladder is False
+    assert Config().future.enable_defer_to_ladder is True  # S28-368 promoted
 
 
 # ---------------------------------------------------------------------------
@@ -228,4 +228,4 @@ def test_d1_model_round_none_declines_visibly():
 
 def test_d1_flag_and_env_gate_exist():
     from capybase.config import Config
-    assert Config().future.enable_defer_model_resolve is False
+    assert Config().future.enable_defer_model_resolve is True  # S28-368 promoted

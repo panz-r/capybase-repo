@@ -16341,9 +16341,10 @@ class Orchestrator:
             # taking the replayed side loses only content the tree cannot
             # compile. Try the replayed side-pick FIRST, bypassing the
             # churn guard. Flag-gated (default OFF); zero model requests.
-            if (getattr(
-                    getattr(self.config, "future", None),
-                    "enable_tree_absent_deletion", False)
+            if (language in ("c", "cpp", "c++")
+                    and getattr(
+                        getattr(self.config, "future", None),
+                        "enable_tree_absent_deletion", False)
                     and f"treeabsent:{_sig}" not in _tried):
                 # S28-275(a): the era cascade ROTATES which error surfaces
                 # first, so the current round's list alone sees one shape
@@ -16435,9 +16436,10 @@ class Orchestrator:
             # Zero model requests. (redis-0032: the hint names the
             # oracle's own field — the dry run proved the fixture
             # oracle-exact.)
-            if (getattr(
-                    getattr(self.config, "future", None),
-                    "enable_tree_absent_deletion", False)
+            if (language in ("c", "cpp", "c++")
+                    and getattr(
+                        getattr(self.config, "future", None),
+                        "enable_tree_absent_deletion", False)
                     and f"rename:{_sig}" not in _tried):
                 _tried.add(f"rename:{_sig}")
                 try:
@@ -16534,9 +16536,10 @@ class Orchestrator:
             # (`expected ';' after struct definition`, duckdb-0063's
             # matcher.hpp:328). Parse, splice, re-gate conservatively
             # (accept only on pass). Zero model requests.
-            if (getattr(
-                    getattr(self.config, "future", None),
-                    "enable_tree_absent_deletion", False)
+            if (language in ("c", "cpp", "c++")
+                    and getattr(
+                        getattr(self.config, "future", None),
+                        "enable_tree_absent_deletion", False)
                     and f"exptok:{_sig}" not in _tried):
                 _tried.add(f"exptok:{_sig}")
                 try:

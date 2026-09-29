@@ -12,10 +12,13 @@ import sys
 from pathlib import Path
 
 
-def _load_classifier():
-    """Import _classify_terminal_reason from scripts/live_eval_realworld.py.
+_LOADED_HARNESS_MODULES: list = []
 
-    The script isn't a package module, so we load it by path."""
+
+def _load_harness():
+    """Load scripts/live_eval_realworld.py by path (once) and return it."""
+    if _LOADED_HARNESS_MODULES:
+        return _LOADED_HARNESS_MODULES[0]
     spec = importlib.util.spec_from_file_location(
         "live_eval_realworld",
         Path(__file__).resolve().parent.parent / "scripts" / "live_eval_realworld.py",
@@ -23,7 +26,15 @@ def _load_classifier():
     mod = importlib.util.module_from_spec(spec)
     sys.modules["live_eval_realworld"] = mod
     spec.loader.exec_module(mod)  # type: ignore[arg-type]
-    return mod._classify_terminal_reason
+    _LOADED_HARNESS_MODULES.append(mod)
+    return mod
+
+
+def _load_classifier():
+    """Import _classify_terminal_reason from scripts/live_eval_realworld.py.
+
+    The script isn't a package module, so we load it by path."""
+    return _load_harness()._classify_terminal_reason
 
 
 _classify = _load_classifier()
@@ -67,13 +78,10 @@ def test_other_is_fallback():
 # ---------------------------------------------------------------------------
 
 def _load_verdict_chain():
-    spec = importlib.util.spec_from_file_location(
-        "live_eval_realworld_vchain",
-        Path(__file__).resolve().parent.parent / "scripts" / "live_eval_realworld.py",
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["live_eval_realworld_vchain"] = mod
-    spec.loader.exec_module(mod)  # type: ignore[arg-type]
+    # S28-368: load through the SAME cached module as _load_harness — two
+    # exec_module instances would carry independent module state (the
+    # graduated _SHIP_GATE_READ pin must reach the chain).
+    mod = _load_harness()
     return mod._verdict_chain, mod.CaseResult, mod.PASS_THRESHOLD
 
 
@@ -97,6 +105,11 @@ def test_gate_unavailable_when_oracle_fails_same_gate():
 
 def test_gate_rejection_with_clean_oracle_stands():
     # oracle_builds=True → the gate CAN distinguish — the rejection is real.
+    # S28-368: these tests unit-test the oracle_builds door; pin the
+    # graduated fresh-gate read off (its compiles+marker_free+sim
+    # preconditions would convert these fixtures to PASS — a different
+    # door's verdict).
+    _load_harness()._SHIP_GATE_READ = False
     r = _rec(escalated=True, matches_oracle=0.999, oracle_builds=True)
     assert _verdict(r) == "ESCALATE"
     r = _rec(escalated=False, marker_free=True, compiles=False,
@@ -106,6 +119,7 @@ def test_gate_rejection_with_clean_oracle_stands():
 
 def test_undecidable_probe_changes_nothing():
     # oracle_builds=None (probe didn't run / undecidable) → original verdict.
+    _load_harness()._SHIP_GATE_READ = False  # S28-368: unit-testing the GU door
     r = _rec(escalated=True, matches_oracle=0.999, oracle_builds=None)
     assert _verdict(r) == "ESCALATE"
 

@@ -121,6 +121,6 @@ def test_empty_stash_declines_without_gate_calls():
 
 def test_wiring_flag_and_provenance():
     from capybase.config import Config
-    assert Config().future.enable_gate_pass_cache is False
+    assert Config().future.enable_gate_pass_cache is True  # S28-368 promoted
     from capybase.provenance import PROVENANCE_VALUES
     assert "deterministic_gate_pass_cache" in PROVENANCE_VALUES

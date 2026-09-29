@@ -30,7 +30,10 @@ def _load_module():
     )
     mod = importlib.util.module_from_spec(spec)
     sys.modules["live_eval_realworld_ocg"] = mod
-    spec.loader.exec_module(mod)  # type: ignore[arg-type]
+    spec.loader.exec_module(mod)
+    # S28-368: these tests unit-test the CALIBRATION guard —
+    # pin the graduated fresh-gate read off (a different door).
+    mod._SHIP_GATE_READ = False  # type: ignore[arg-type]
     return mod
 
 

@@ -615,15 +615,16 @@ class JournalConfig(BaseModel):
 
 
 class FutureConfig(BaseModel):
-    # S28-367 GRADUATION DOCTRINE: pilot flags are the experiment control
-    # (default OFF + env gate) until a mechanism earns promotion with live
-    # evidence — then the default flips True, the env gate retires, and
-    # the [future] toml section remains the bisection off-switch. The
-    # graduated set (see the per-field notes): the rung family, the three
-    # feedback carriers, the ship-gate read chain, the throttle, the
-    # stamp, terminal arms, the ra fallback, and the preflight. The
-    # UN-graduated flags below stay OFF until their first conversion or
-    # their first armed round.
+    # S28-367/368 GRADUATION DOCTRINE: a pilot flag exists ONLY for the
+    # differential-testing phase (the same build, on/off arms). A complete
+    # mechanism carries its own trigger conditions — it fires only on its
+    # defect shape and declines visibly otherwise — so NO flag outlives
+    # the first development and design phase: the default flips True at
+    # promotion, the env gate retires, and the [future] toml section
+    # remains the bisection off-switch. The two exceptions still in their
+    # differential phase: enable_beam_sides_substrate and
+    # enable_sides_check_alignment (their single armed arm decides
+    # promote-or-prune).
     """Resolution-mechanism toggles (the pre-LLM layers).
 
     NOTE: the history-aware features (future probes, obligations, branch
@@ -1113,7 +1114,7 @@ class FutureConfig(BaseModel):
     # the cap exits the unit before the ladder whose deterministic arm
     # converts it. Budget constraint honored: deterministic-only, the
     # gate is the rescue authority.
-    enable_defer_to_ladder: bool = False
+    enable_defer_to_ladder: bool = True
 
     # Era-preference arm (S28-312b/316, pilot-gated): the file's
     # already-resolved units vote which side's vocabulary their candidate
@@ -1122,7 +1123,7 @@ class FutureConfig(BaseModel):
     # pre-draw era-consistency note into later units' prompts. Advisory
     # only; the normal gates judge the result. Fixture: 0056 (the
     # era-MIXED file whose 16 draws bought the mixture).
-    enable_era_preference: bool = False
+    enable_era_preference: bool = True
 
     # Hunk-level substitution rung (S28-275(b), pilot-gated): at a gate
     # failure naming a line in the conflict file, swap the candidate's
@@ -1131,7 +1132,7 @@ class FutureConfig(BaseModel):
     # cannot reach (the other side's own era errors fail its full splice;
     # 0127's two-edit gap). Both directions tried, each gated; accept
     # only on pass. Zero model requests.
-    enable_hunk_substitution: bool = False
+    enable_hunk_substitution: bool = True
 
     # Session gate-pass cache (S28-358, pilot-gated): stash buffers that
     # PASSED the file gate this session; when a later candidate fails
@@ -1141,14 +1142,14 @@ class FutureConfig(BaseModel):
     # ended with the side-takeover rescue replacing the near-oracle
     # content. The stash is a GATE fact only — never a preservation
     # heuristic (S28-341). Zero model requests.
-    enable_gate_pass_cache: bool = False
+    enable_gate_pass_cache: bool = True
 
     # D1 (S28-365, pilot-gated): the defer-to-ladder's deterministic pass
     # returning None earns exactly ONE model re-resolve round (attribution
     # + model + sidefix) within the CARRIED wall deadline — no fresh caps
     # (S28-343). 0069's Technologies.hpp: no deterministic rung fits; the
     # t36 converter for its class was the chat arm.
-    enable_defer_model_resolve: bool = False
+    enable_defer_model_resolve: bool = True
 
     # D3 (S28-365, pilot-gated): the starved-census arbitration — when the
     # round's FIRST absent-symbol message is the type shape ("does not
@@ -1156,7 +1157,7 @@ class FutureConfig(BaseModel):
     # deletion rung gets the round (a type the tree erased cannot be
     # declared back). The histogram: 38 events, three symbols, each
     # exactly one shape; zero rename hints.
-    enable_inject_arbitration: bool = False
+    enable_inject_arbitration: bool = True
 
     # Declaration restoration (S28-197, pilot-gated — the corrected
     # S28-178): when a whole-file failure names an UNDECLARED symbol,
@@ -1167,14 +1168,14 @@ class FutureConfig(BaseModel):
     # declaration search runs BEFORE line_replace and line_replace is
     # skipped for the not-declared class. Transitive by the
     # validate-after-each loop; compile-gated.
-    enable_declaration_restoration: bool = False
+    enable_declaration_restoration: bool = True
     # Identical-block dedup (S28-206, pilot-gated): a splice ECHO
     # duplicates a whole block byte-identically (fmt-0003's TEST(...) at
     # lines 299 AND 304 — a cross-era fixed point) and the compiler
     # reports redefinition. Fires only on redefinition/duplicate-class
     # failures with a non-adjacent byte-identical >=3-line block; the
     # later copy is removed; the whole-file gate revalidates.
-    enable_identical_block_dedup: bool = False
+    enable_identical_block_dedup: bool = True
     # Repair-edit delimiter guard (S28-183, census-gated): a whole-file
     # repair round that UNBALANCES a previously-balanced ()/{} pair is
     # declined (the duckdb-0093 shape — a one-char ';' defect became a

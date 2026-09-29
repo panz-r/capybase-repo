@@ -57,6 +57,12 @@ def _orchestrator(repo, engine, *, stop=True):
     _cfg.future.enable_empty_fast_fail = False
     _cfg.policy.max_retries_per_unit = 3
     _cfg.future.enable_no_clear_progress_stop = stop
+    # S28-368: the promoted delimiter guard intercepts this fixture's
+    # paren-losing repair edit and resolves via the side fallback (3
+    # draws, no escalation) — a BETTER outcome than the escalation these
+    # tests document, but a different path. The tests unit-test the STOP:
+    # pin the guard off.
+    _cfg.future.enable_repair_delimiter_guard = False
     return Orchestrator(
         _cfg, repo=str(repo), resolution_engine=engine,
         out=lambda *_a, **_k: None,

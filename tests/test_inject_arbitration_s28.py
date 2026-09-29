@@ -60,4 +60,4 @@ def test_no_absent_symbol_message_is_neutral():
 
 def test_wiring_flag_exists():
     from capybase.config import Config
-    assert Config().future.enable_inject_arbitration is False
+    assert Config().future.enable_inject_arbitration is True  # S28-368 promoted
