@@ -1801,6 +1801,116 @@ def _compile_error_signature(
     return sorted(sig)
 
 
+def _crate_source_for(case: "Case") -> Path | None:
+    """The dataset's clone dir for full-tree materialization at merge_sha.
+
+    S28-297's single-sourcing (the loader's authoritative registry, the
+    legacy overrides kept for divergent local layouts) — shared by the
+    resolution path and the S28-360 classifier."""
+    _crate = None
+    if case.merge_sha:
+        _CLONE_OVERRIDES = {
+            "jsonc-history": "json-c",
+            "fmt-history": "fmtlib-fmt",
+        }
+        from corpus.rebase_scenario_loader import (
+            _GIT_HISTORY_CLONE_SUBDIR as _CLONE_REGISTRY,
+        )
+        _clone_name = _CLONE_REGISTRY.get(case.dataset)
+        if _clone_name is None:
+            # Not a git-history dataset (zenodo-hdiff, protobuf,
+            # nlohmann-json, fmt): keep the legacy overrides/convention.
+            _clone_name = _CLONE_OVERRIDES.get(
+                case.dataset,
+                case.dataset.replace("-history", "") if case.dataset else "",
+            )
+        else:
+            # The registry is authoritative but the legacy overrides
+            # stay available for local dir layouts that diverge.
+            _override = _CLONE_OVERRIDES.get(case.dataset)
+            if _override:
+                _clone_name = _override
+        _clone_path = Path(__file__).resolve().parent.parent / "external-datasets" / _clone_name
+        if _clone_path.is_dir():
+            _crate = _clone_path
+    return _crate
+
+
+def _classify_case(case: "Case") -> dict:
+    """S28-360: the era-classifier's per-case record.
+
+    Materialize the tree, run the toolchain-era probe triple and the
+    era-header screen, classify, clean up. NO resolution, NO model
+    calls. Classes:
+      era_dead        — the probe's strict toolchain classification
+                        (both sides + the oracle fail identically; the
+                        tikv-0012/tokio-0114 class)
+      era_header_dead — the era-header screen fired (the oracle
+                        references tree-absent APIs)
+      builds          — all three probe texts compile (measurable)
+      mixed_failures  — the probe ran, the strict class didn't fire
+                        (content-dependent failures; the case still runs)
+      no_gate         — python / no crate / no usable build command
+      setup_failed    — materialization failed (harness defect)
+    """
+    import shutil as _shutil
+    t0 = time.time()
+    rec = {
+        "case_id": case.id, "dataset": case.dataset,
+        "language": case.language, "merge_sha": case.merge_sha,
+    }
+    _memo = _era_memo_load().get(case.id) or {}
+    if _memo.get("spec_sha") == _era_spec_sha(case) \
+            and _memo.get("flags_fp") == _ERA_FLAGS_FINGERPRINT:
+        rec["class"] = "era_header_dead"
+        rec["memo_hit"] = True
+        rec["probe_s"] = 0.0
+        return rec
+    td = tempfile.mkdtemp(prefix="capy-cl-", dir="/tmp")
+    try:
+        repo = Path(td) / "r"
+        try:
+            _materialize_conflict(case, repo, crate_source=_crate_source_for(case))
+        except Exception as exc:
+            rec["class"] = "setup_failed"
+            rec["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+            return rec
+        _probe = _toolchain_era_probe(repo, case, has_crate=True)
+        if _probe is None:
+            rec["class"] = "no_gate"
+            return rec
+        rec["probe_s"] = round(time.time() - t0, 1)
+        _probe_rcs = [_probe.get(k, {}).get("rc") for k in
+                      ("current", "replayed", "oracle") if k in _probe]
+        if _probe.get("toolchain_dead"):
+            rec["class"] = "era_dead"
+            rec["sig_count"] = len(_probe.get("sig") or
+                                   _probe.get("current", {}).get("sig") or [])
+            return rec
+        if _probe_rcs and all(rc == 0 for rc in _probe_rcs):
+            rec["class"] = "builds"
+        else:
+            rec["class"] = "mixed_failures"
+        if _ERA_PRESCREEN:
+            _screen = _era_header_screen(repo, case, _probe)
+            if _screen and _screen.get("era_header_dead"):
+                rec["class"] = "era_header_dead"
+                rec["screen"] = {
+                    k: v for k, v in _screen.items()
+                    if isinstance(v, (str, int, float, bool))}
+                try:
+                    _era_memo_store(case.id, {
+                        "spec_sha": _era_spec_sha(case),
+                        "flags_fp": _ERA_FLAGS_FINGERPRINT,
+                        "screen": _screen,
+                    })
+                except Exception:  # noqa: BLE001 — cache is best-effort
+                    pass
+        return rec
+    finally:
+        _shutil.rmtree(td, ignore_errors=True)
+
+
 def _toolchain_era_probe(repo: Path, case: "Case", *, has_crate: bool) -> dict | None:
     """Sprint-20 S20.2: compile both pristine sides + the oracle in the
     materialized worktree BEFORE the resolution pipeline runs.
@@ -3596,6 +3706,12 @@ def main():
                     help="S28-162 A/B: enable the wholesale-winner floor's "
                          "relaxed band (ratio 0.81, shrinkage dominance "
                          "0.35; every firing stays output-gated).")
+    ap.add_argument("--classify-only", action="store_true",
+                    help="S28-360: the era-classifier sweep — per case, "
+                         "materialize + the toolchain-era probe + the "
+                         "era-header screen ONLY (no resolution, no LLM). "
+                         "Writes classifications JSON next to --out and "
+                         "exits; prices the harvest's era-gated ceiling.")
     ap.add_argument("--oracle-calibrate", action="store_true",
                     help="S28-140 part 1: when the toolchain-era preflight's oracle probe "
                          "fails with real compile errors, downgrade candidate hard failures "
@@ -3685,6 +3801,36 @@ def main():
         except Exception as exc:
             print(f"resume: could not load prior results ({exc}); starting fresh")
 
+    if args.classify_only:
+        # S28-360: the era-classifier sweep. Serial, incremental write
+        # (crash-safe), cleanup per case; exits BEFORE any provider/LLM
+        # setup — classification makes zero model calls.
+        out_path = str(Path(args.out).with_suffix("")) + ".classifications.json"
+        rows: list = []
+        print(f"classify-only: {len(cases)} cases -> {out_path}")
+        for i, case in enumerate(cases, 1):
+            print(f"[classify {i}/{len(cases)}] {case.id} "
+                  f"({case.language}/{case.dataset}) ...", end=" ",
+                  flush=True)
+            try:
+                rec = _classify_case(case)
+            except Exception as exc:  # noqa: BLE001 — a classifier bug is
+                # one row's error, not the sweep's
+                rec = {"case_id": case.id, "dataset": case.dataset,
+                       "language": case.language,
+                       "class": "classifier_error",
+                       "error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+            rows.append(rec)
+            print(f" {rec['class']} ({rec.get('probe_s', 0)}s)")
+            Path(out_path).write_text(json.dumps(rows, indent=1))
+        from collections import Counter as _C2
+        print("\nCLASSIFICATION SUMMARY")
+        for _k, _v in _C2(r["class"] for r in rows).most_common():
+            print(f"  {_v:4d}  {_k}")
+        _probe_wall = sum(r.get("probe_s") or 0 for r in rows)
+        print(f"probe wall: {_probe_wall:.0f}s across {len(rows)} cases")
+        return 0
+
     global _PROVIDER
     try:
         _PROVIDER = resolve_provider(
@@ -3771,39 +3917,9 @@ def main():
                 dir=os.environ.get("CAPYBASE_WORKTREE_DIR", "/tmp"))
             # Resolve the crate source clone for full-tree materialization.
             # Maps dataset name → external-datasets clone dir. Enables cargo check.
-            _crate = None
-            if case.merge_sha:
-                _CLONE_OVERRIDES = {
-                    "jsonc-history": "json-c",
-                    "fmt-history": "fmtlib-fmt",
-                }
-                # S28-297 (harvest census): the clone-name resolution must
-                # SINGLE-SOURCE the loader's authoritative registry — the
-                # inline convention (dataset.replace("-history","")) mapped
-                # php-history to external-datasets/php while the real clone
-                # is php-src, so `_crate` was None for the whole php family
-                # and S28-110's api-drift probe (gated on crate_source)
-                # never fired on a single row of the 1,501-row harvest.
-                from corpus.rebase_scenario_loader import (
-                    _GIT_HISTORY_CLONE_SUBDIR as _CLONE_REGISTRY,
-                )
-                _clone_name = _CLONE_REGISTRY.get(case.dataset)
-                if _clone_name is None:
-                    # Not a git-history dataset (zenodo-hdiff, protobuf,
-                    # nlohmann-json, fmt): keep the legacy overrides/convention.
-                    _clone_name = _CLONE_OVERRIDES.get(
-                        case.dataset,
-                        case.dataset.replace("-history", "") if case.dataset else "",
-                    )
-                else:
-                    # The registry is authoritative but the legacy overrides
-                    # stay available for local dir layouts that diverge.
-                    _override = _CLONE_OVERRIDES.get(case.dataset)
-                    if _override:
-                        _clone_name = _override
-                _clone_path = Path(__file__).resolve().parent.parent / "external-datasets" / _clone_name
-                if _clone_path.is_dir():
-                    _crate = _clone_path
+            # S28-360: single-sourced into _crate_source_for (shared with the
+            # classifier; the registry + overrides live in ONE place).
+            _crate = _crate_source_for(case)
             _holder: list = []
 
             # The llm column's source of truth: count every model call
