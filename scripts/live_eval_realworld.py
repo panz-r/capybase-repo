@@ -1867,28 +1867,72 @@ def _classify_case(case: "Case") -> dict:
         rec["probe_s"] = 0.0
         return rec
     td = tempfile.mkdtemp(prefix="capy-cl-", dir="/tmp")
+    _prev_net = os.environ.get("CARGO_NET_OFFLINE")
+    _prev_rustflags = os.environ.get("RUSTFLAGS")
     try:
         repo = Path(td) / "r"
         try:
             _materialize_conflict(case, repo, crate_source=_crate_source_for(case))
+            # the resolution path's env contract (S28-27): a vendored crate
+            # probes OFFLINE with capped lints — without this the rust
+            # probe dies on network resolution in seconds and the row
+            # misclassifies (the smoke's tokio catch).
+            if (repo / "vendor").is_dir():
+                os.environ["CARGO_NET_OFFLINE"] = "true"
+                os.environ["RUSTFLAGS"] = "--cap-lints warn"
         except Exception as exc:
             rec["class"] = "setup_failed"
             rec["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+            return rec
+        if not (repo / case.path).exists():
+            # the no-registry datasets (protobuf/nlohmann/zenodo/fmt
+            # without a local clone) materialize without the full tree —
+            # unclassifiable HERE, not "no gate" (the resolution path
+            # still runs them; protobuf-0032 PASSED in t44)
+            rec["class"] = "no_tree"
+            return rec
+        # the DETECTED gate (materialize's adaptive resolve_c_build),
+        # not the static table: a prepare that failed this pass ("true"
+        # fallback) means the build system didn't configure — the
+        # honest class is prepare_failed, not a probe on a gate that
+        # cannot work (protobuf's 2015-era prepare intermittently
+        # exceeds its budget under load; the resolution path retries
+        # per run)
+        _detected = _DETECTED_BUILD_CMD.get(case.id)
+        if (case.language in ("c", "cpp", "c++")
+                and (not _detected or _detected == "true")):
+            rec["class"] = "prepare_failed"
             return rec
         _probe = _toolchain_era_probe(repo, case, has_crate=True)
         if _probe is None:
             rec["class"] = "no_gate"
             return rec
         rec["probe_s"] = round(time.time() - t0, 1)
-        _probe_rcs = [_probe.get(k, {}).get("rc") for k in
-                      ("current", "replayed", "oracle") if k in _probe]
+        _p = _probe.get("probes", {})
+        _probe_rcs = [_p.get(k, {}).get("rc")
+                      for k in ("current", "replayed", "oracle")]
         if _probe.get("toolchain_dead"):
             rec["class"] = "era_dead"
-            rec["sig_count"] = len(_probe.get("sig") or
-                                   _probe.get("current", {}).get("sig") or [])
+            rec["sig_count"] = len(_p.get("current", {}).get("sig") or [])
             return rec
         if _probe_rcs and all(rc == 0 for rc in _probe_rcs):
             rec["class"] = "builds"
+        elif (case.language == "rust"
+                and _probe_rcs
+                and all(rc not in (0, None) for rc in _probe_rcs)):
+            _infra_markers = ("failed to download", "failed to parse manifest",
+                              "unable to get packages")
+            _sigs = " ".join(
+                " ".join(_p.get(k, {}).get("sig") or [])
+                for k in ("current", "replayed", "oracle"))
+            if any(m in _sigs for m in _infra_markers):
+                # cargo download/manifest/cache infrastructure (the
+                # smoke's tokio catch: a corrupted registry entry) —
+                # never an era signal; era_dead's strict class cannot
+                # fire on it either
+                rec["class"] = "cargo_infra"
+            else:
+                rec["class"] = "mixed_failures"
         else:
             rec["class"] = "mixed_failures"
         if _ERA_PRESCREEN:
@@ -1908,6 +1952,14 @@ def _classify_case(case: "Case") -> dict:
                     pass
         return rec
     finally:
+        if _prev_net is None:
+            os.environ.pop("CARGO_NET_OFFLINE", None)
+        else:
+            os.environ["CARGO_NET_OFFLINE"] = _prev_net
+        if _prev_rustflags is None:
+            os.environ.pop("RUSTFLAGS", None)
+        else:
+            os.environ["RUSTFLAGS"] = _prev_rustflags
         _shutil.rmtree(td, ignore_errors=True)
 
 
