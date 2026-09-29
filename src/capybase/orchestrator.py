@@ -10845,6 +10845,16 @@ class Orchestrator:
                 pass
             return None
         if not _det:
+            # S28-352 (the trial42 catch): the ladder-None decline was
+            # silent — the engaged event had no outcome between it and the
+            # standing escalation. Journal it; the honest decline path
+            # must be VISIBLE (the S28-345 doctrine).
+            self.journal.emit(
+                "defer_to_ladder_declined",
+                {"path": path, "gate_passed": None,
+                 "reason": "ladder_none"},
+                step_index=self.step, path=path,
+            )
             return None
         # The gate is the authority: the ladder's output rescues only if
         # the whole file verifies (the rungs' returns are whole-file

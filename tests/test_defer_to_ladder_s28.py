@@ -131,6 +131,10 @@ def test_ladder_none_declines():
     assert out is None
     kinds = [e for e, _ in orch.journal.events]
     assert "defer_to_ladder_engaged" in kinds
+    # S28-352 (the trial42 catch): the ladder-None decline is VISIBLE
+    declined = [p for e, p in orch.journal.events
+                if e == "defer_to_ladder_declined"]
+    assert declined and declined[0]["reason"] == "ladder_none"
     assert "defer_to_ladder_rescued" not in kinds
 
 
