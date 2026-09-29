@@ -1363,6 +1363,9 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # S28-365 D1: the defer's bounded model re-resolve (pilot-gated).
     if os.environ.get("CAPYBASE_DEFER_MODEL_RESOLVE", "") == "1":
         cfg.future.enable_defer_model_resolve = True
+    # S28-365 D3: the injection/deletion arbitration (pilot-gated).
+    if os.environ.get("CAPYBASE_INJECT_ARBITRATION", "") == "1":
+        cfg.future.enable_inject_arbitration = True
     # S28-345: sequenced syntax-first preflight (pilot-gated).
     if os.environ.get("CAPYBASE_SYNTAX_PREFLIGHT", "") == "1":
         cfg.validation.enable_syntax_preflight = True

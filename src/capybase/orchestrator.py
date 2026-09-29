@@ -527,6 +527,35 @@ _TA_SYMBOL_PATTERNS = (
 )
 
 
+def _failures_shape_is_type_only(failures) -> bool:
+    """S28-365 D3: True when the FIRST absent-symbol message in the round
+    is the TYPE shape ("does not name a type") — the deletion rung's
+    territory. The era rotation puts different symbols (with different
+    shapes) in one list; the histogram showed each symbol maps to exactly
+    one shape, so the FIRST-named symbol's shape is the round's routing
+    fact (the symbol the rungs would act on). Quote-normalized (the
+    S28-327 lesson)."""
+    import re as _re_sh
+    _type_re = _re_sh.compile(
+        r"['\u2018](\w+)['\u2019] does not name a type")
+    _other_res = (
+        # gcc QUOTES the symbol: 'cache' was not declared in this scope
+        _re_sh.compile(r"\b(\w+)['\u2019]? was not declared in this scope"),
+        _re_sh.compile(r"['\u2018](\w+)['\u2019] is not a member of"),
+        _re_sh.compile(r"no member named ['\u2018]?(\w+)"),
+        _re_sh.compile(r"use of undeclared identifier ['\u2018]?(\w+)"),
+        _re_sh.compile(r"unknown type name ['\u2018]?(\w+)"),
+    )
+    for f in failures:
+        msg = (getattr(f, "message", "") or "").replace(
+            "\u2018", "'").replace("\u2019", "'")
+        if _type_re.search(msg):
+            return True
+        if any(r.search(msg) for r in _other_res):
+            return False
+    return False
+
+
 def _failures_name_compiler_absent_member(failures):
     """S28-268/v2 (the trial35 correction): the first member symbol the
     failures name as ABSENT ON ITS TYPE — the COMPILER's word is the
@@ -16061,11 +16090,33 @@ class Orchestrator:
             # reason). The compiler names the symbol; the pristine stage
             # sides carry its declaration; splice it verbatim.
             if f"symbol_inject:{_sig}" not in _tried:
-                sym = self._try_symbol_injection_repair(
-                    path, original, accepted, failures, max(0, fault_idx))
-                if sym is not None:
-                    return sym
-                _tried.add(f"symbol_inject:{_sig}")
+                # S28-365 D3 (flag-gated): the starved-census arbitration —
+                # when the failures name the absent symbol with the
+                # TYPE-shape ("does not name a type"), the DELETION rung
+                # (later in this beam) is the honest first move: a type the
+                # tree erased cannot be declared back into existence. The
+                # histogram (38 events): ParserCache x12 type-shape vs
+                # cache/state x26 undeclared-shape — each symbol exactly
+                # one shape, so the failure text alone routes the order.
+                # The injection declines (visibly) and the deletion rung
+                # gets the round; both re-validate unchanged.
+                if (getattr(
+                        getattr(self.config, "future", None),
+                        "enable_inject_arbitration", False)
+                        and _failures_shape_is_type_only(failures)):
+                    self.journal.emit(
+                        "inject_arbitration_declined",
+                        {"path": path,
+                         "shape": "type_shape",
+                         "reason": "deletion_rung_first"},
+                        step_index=self.step, path=path)
+                    _tried.add(f"symbol_inject:{_sig}")
+                else:
+                    sym = self._try_symbol_injection_repair(
+                        path, original, accepted, failures, max(0, fault_idx))
+                    if sym is not None:
+                        return sym
+                    _tried.add(f"symbol_inject:{_sig}")
             else:
                 self.journal.emit(
                     "repair_rotation",

@@ -1141,6 +1141,14 @@ class FutureConfig(BaseModel):
     # t36 converter for its class was the chat arm.
     enable_defer_model_resolve: bool = False
 
+    # D3 (S28-365, pilot-gated): the starved-census arbitration — when the
+    # round's FIRST absent-symbol message is the type shape ("does not
+    # name a type"), the symbol-injection declines and the tree-absent
+    # deletion rung gets the round (a type the tree erased cannot be
+    # declared back). The histogram: 38 events, three symbols, each
+    # exactly one shape; zero rename hints.
+    enable_inject_arbitration: bool = False
+
     # Declaration restoration (S28-197, pilot-gated — the corrected
     # S28-178): when a whole-file failure names an UNDECLARED symbol,
     # insert the pristine side's DECLARING LINE before the symbol's
