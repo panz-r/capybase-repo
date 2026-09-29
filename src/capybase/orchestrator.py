@@ -11453,6 +11453,16 @@ class Orchestrator:
         # silently suppress the arm there.
         if hasattr(self, "_sig_declined_gate"):
             self._sig_declined_gate = {}
+        # S28-363 review: the S28-358 gate-pass cache and the S28-312b era
+        # votes are STEP-scoped like the seeded-file set — a later step's
+        # conflict on the same path is an entirely new buffer, and a stale
+        # entry would let the cache rescue restore a PREVIOUS step's
+        # content over this step's resolution (the era note's stale votes
+        # would bias its election the same way).
+        if hasattr(self, "_gate_pass_cache"):
+            self._gate_pass_cache = {}
+        if hasattr(self, "_step_era_votes"):
+            self._step_era_votes = {}
         if not result.units_by_path:
             # No conflicts at this stop: nothing to resolve (rare).
             self.out("no conflict units at this stop; continuing.")
