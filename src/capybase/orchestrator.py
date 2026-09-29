@@ -10910,17 +10910,47 @@ class Orchestrator:
                 pass
             return None
         if not _det:
-            # S28-352 (the trial42 catch): the ladder-None decline was
-            # silent — the engaged event had no outcome between it and the
-            # standing escalation. Journal it; the honest decline path
-            # must be VISIBLE (the S28-345 doctrine).
-            self.journal.emit(
-                "defer_to_ladder_declined",
-                {"path": path, "gate_passed": None,
-                 "reason": "ladder_none"},
-                step_index=self.step, path=path,
-            )
-            return None
+            # S28-365 D1 (flag-gated): the deterministic rungs declined —
+            # allow exactly ONE model re-resolve of the attributed unit
+            # (the full ladder: attribution + model + sidefix portfolio)
+            # within the CARRIED wall deadline — no fresh caps (S28-343).
+            # 0069's anatomy: Technologies.hpp has no deterministic rung;
+            # the t36 converter for its class was the chat arm.
+            if getattr(getattr(self.config, "future", None),
+                       "enable_defer_model_resolve", False):
+                self.journal.emit(
+                    "defer_to_ladder_model_round",
+                    {"path": path},
+                    step_index=self.step, path=path)
+                try:
+                    _det = self._whole_file_repair(
+                        path, _substrate, _original, _failures,
+                        deterministic_only=False,
+                        wall_deadline=wall_deadline,
+                    )
+                except Exception as _m_exc:  # noqa: BLE001 — best-effort
+                    try:
+                        self.journal.emit(
+                            "defer_to_ladder_error",
+                            {"path": path,
+                             "error": (f"{type(_m_exc).__name__}: "
+                                       f"{_m_exc}")[:200]},
+                            step_index=self.step, path=path)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return None
+            if not _det:
+                # S28-352 (the trial42 catch): the ladder-None decline was
+                # silent — the engaged event had no outcome between it and
+                # the standing escalation. Journal it; the honest decline
+                # path must be VISIBLE (the S28-345 doctrine).
+                self.journal.emit(
+                    "defer_to_ladder_declined",
+                    {"path": path, "gate_passed": None,
+                     "reason": "ladder_none"},
+                    step_index=self.step, path=path,
+                )
+                return None
         # The gate is the authority: the ladder's output rescues only if
         # the whole file verifies (the rungs' returns are whole-file
         # representations; re-validate exactly as Phase 2 does).

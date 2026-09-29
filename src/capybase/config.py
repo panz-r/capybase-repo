@@ -1134,6 +1134,13 @@ class FutureConfig(BaseModel):
     # heuristic (S28-341). Zero model requests.
     enable_gate_pass_cache: bool = False
 
+    # D1 (S28-365, pilot-gated): the defer-to-ladder's deterministic pass
+    # returning None earns exactly ONE model re-resolve round (attribution
+    # + model + sidefix) within the CARRIED wall deadline — no fresh caps
+    # (S28-343). 0069's Technologies.hpp: no deterministic rung fits; the
+    # t36 converter for its class was the chat arm.
+    enable_defer_model_resolve: bool = False
+
     # Declaration restoration (S28-197, pilot-gated — the corrected
     # S28-178): when a whole-file failure names an UNDECLARED symbol,
     # insert the pristine side's DECLARING LINE before the symbol's

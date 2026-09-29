@@ -1360,6 +1360,9 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # S28-358: the session gate-pass cache (pilot-gated).
     if os.environ.get("CAPYBASE_GATE_PASS_CACHE", "") == "1":
         cfg.future.enable_gate_pass_cache = True
+    # S28-365 D1: the defer's bounded model re-resolve (pilot-gated).
+    if os.environ.get("CAPYBASE_DEFER_MODEL_RESOLVE", "") == "1":
+        cfg.future.enable_defer_model_resolve = True
     # S28-345: sequenced syntax-first preflight (pilot-gated).
     if os.environ.get("CAPYBASE_SYNTAX_PREFLIGHT", "") == "1":
         cfg.validation.enable_syntax_preflight = True

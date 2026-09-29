@@ -34,11 +34,13 @@ class _RecJournal:
         self.events.append((event, payload))
 
 
-def _orch(*, ladder_result=None, gate_passed=True):
+def _orch(*, ladder_result=None, gate_passed=True, defer_model_resolve=False):
     orch = Orchestrator.__new__(Orchestrator)
     orch.journal = _RecJournal()
     orch.step = 0
     orch.calls: list = []
+    orch.config = SimpleNamespace(future=SimpleNamespace(
+        enable_defer_model_resolve=defer_model_resolve))
 
     def _ladder(path, accepted, original, failures, **kw):
         orch.calls.append({"accepted": list(accepted), "failures": failures,
@@ -165,3 +167,65 @@ def test_wiring_marker_and_flag_exist():
         is False
     from capybase.config import Config
     assert Config().future.enable_defer_to_ladder is False
+
+
+# ---------------------------------------------------------------------------
+# S28-365 D1: the bounded model round after a deterministic None
+# ---------------------------------------------------------------------------
+
+def test_d1_flag_off_keeps_the_ladder_none_decline():
+    orch = _orch(ladder_result=None)
+    out = orch._defer_escalated_units_to_ladder(
+        "inc/header.h", [_accepted_pair()], [_outcome()])
+    assert out is None
+    kinds = [e for e, _ in orch.journal.events]
+    assert "defer_to_ladder_model_round" not in kinds
+
+
+def test_d1_deterministic_none_earns_one_model_round():
+    """flag ON: the deterministic pass returns None -> exactly one full
+    (model) round; its candidate rescues through the gate."""
+    orch = _orch(ladder_result=None, gate_passed=True,
+                 defer_model_resolve=True)
+    calls = []
+
+    def _ladder(path, accepted, original, failures, *, deterministic_only=True, **kw):
+        calls.append(deterministic_only)
+        if deterministic_only:
+            return None  # the rungs declined (0069's Technologies.hpp)
+        return [(_unit(), _cand("model rescue", cid="u1:wf"))]
+
+    orch._whole_file_repair = _ladder
+    # the model round's rescue must pass the gate
+    orch.verification = SimpleNamespace(verify_file=lambda *a, **k: SimpleNamespace(passed=True, hard_failures=[]))
+    out = orch._defer_escalated_units_to_ladder(
+        "inc/header.h", [_accepted_pair()], [_outcome()])
+    assert out is not None
+    assert calls == [True, False]  # deterministic first, then the ONE model round
+    kinds = [e for e, _ in orch.journal.events]
+    assert "defer_to_ladder_model_round" in kinds
+    assert "defer_to_ladder_rescued" in kinds
+
+
+def test_d1_model_round_none_declines_visibly():
+    orch = _orch(ladder_result=None, gate_passed=True,
+                 defer_model_resolve=True)
+    calls = []
+
+    def _ladder(path, accepted, original, failures, *, deterministic_only=True, **kw):
+        calls.append(deterministic_only)
+        return None  # both rounds decline
+
+    orch._whole_file_repair = _ladder
+    out = orch._defer_escalated_units_to_ladder(
+        "inc/header.h", [_accepted_pair()], [_outcome()])
+    assert out is None
+    assert calls == [True, False]
+    kinds = [e for e, _ in orch.journal.events]
+    assert "defer_to_ladder_model_round" in kinds
+    assert "defer_to_ladder_declined" in kinds
+
+
+def test_d1_flag_and_env_gate_exist():
+    from capybase.config import Config
+    assert Config().future.enable_defer_model_resolve is False
