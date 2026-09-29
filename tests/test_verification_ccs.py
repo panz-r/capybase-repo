@@ -865,6 +865,11 @@ def test_verify_file_c_build_timeout_fallback_reports_no_crash(tmp_path, monkeyp
     import capybase.verification as _ver
     span = _span_of_markers(_C_FILE_CONFLICT)
     cfg = ValidationConfig()
+    # S28-367 graduation: the syntax preflight (default ON) retires a
+    # parse-failed buffer BEFORE the build — this test exercises the
+    # TIMEOUT machinery, which now only triggers for parse-CLEAN buffers,
+    # so pin the preflight off for this fixture.
+    cfg.enable_syntax_preflight = False
     cfg.cc_build_command = "make"  # truthy, full build (no target template)
     eng = VerificationEngine.default(cfg)
     real_rst = _ver._run_shell_tree

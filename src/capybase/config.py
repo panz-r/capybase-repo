@@ -340,7 +340,7 @@ class ValidationConfig(BaseModel):
     # standalone check precedes a C/C++ buffer's first full tree build;
     # a syntax failure retires the 300s window (a non-parsing file will
     # not compile).
-    enable_syntax_preflight: bool = False
+    enable_syntax_preflight: bool = True
     reject_if_copies_one_side: bool = True
     # Sprint-19 P2 (churn-aware preservation heuristic): when the ONLY
     # unaccounted obligation of the non-copied side is a pure DELETION of
@@ -615,6 +615,15 @@ class JournalConfig(BaseModel):
 
 
 class FutureConfig(BaseModel):
+    # S28-367 GRADUATION DOCTRINE: pilot flags are the experiment control
+    # (default OFF + env gate) until a mechanism earns promotion with live
+    # evidence — then the default flips True, the env gate retires, and
+    # the [future] toml section remains the bisection off-switch. The
+    # graduated set (see the per-field notes): the rung family, the three
+    # feedback carriers, the ship-gate read chain, the throttle, the
+    # stamp, terminal arms, the ra fallback, and the preflight. The
+    # UN-graduated flags below stay OFF until their first conversion or
+    # their first armed round.
     """Resolution-mechanism toggles (the pre-LLM layers).
 
     NOTE: the history-aware features (future probes, obligations, branch
@@ -1030,18 +1039,18 @@ class FutureConfig(BaseModel):
     # two sides, attach both variants to the repair feedback so the model
     # picks the convention the file already follows. Feedback-only — same
     # repair rounds, zero new model requests (pinned by the pilot).
-    enable_side_consistent_feedback: bool = False
+    enable_side_consistent_feedback: bool = True
     # S28-189/S28-204: seam-aware repair feedback (pilot-gated, default
     # OFF) — the splice-seam context reveal (string-seam + scope-seam).
     # Feedback-only: same repair rounds, zero new model requests.
-    enable_seam_aware_feedback: bool = False
+    enable_seam_aware_feedback: bool = True
     # S28-247.2 (queue item 11): the anti-reroll line (pilot-gated,
     # default OFF) — on a repair round whose failed candidate is
     # byte-identical to an earlier attempt, the repair prompt carries an
     # explicit change-the-approach instruction (trial15: 13 draws/~19%
     # of prompts wasted on identical resubmissions). Feedback-only:
     # same repair rounds, zero new model requests.
-    enable_anti_reroll_feedback: bool = False
+    enable_anti_reroll_feedback: bool = True
     # S28-239.1 (queue item 1): build-what-you-ship (pilot-gated,
     # default OFF) — at the pre-escalation point for compile-gated
     # files, ONE final gate probe on the SHIPPED buffer: a pass flips
@@ -1049,7 +1058,7 @@ class FutureConfig(BaseModel):
     # the shipped buffer compiled while the escalation cited an earlier
     # buffer's error), a fail re-proves the escalation on fresh
     # evidence. Zero new model requests (a warm build).
-    enable_ship_gate_final_probe: bool = False
+    enable_ship_gate_final_probe: bool = True
     # S28-233/243 (queue item 4): the terminal-path arms (pilot-gated,
     # default OFF) — when a file's per-unit loop ends with an exhausted
     # unit (the session's terminal escalation exit, upstream of Phase
@@ -1058,7 +1067,7 @@ class FutureConfig(BaseModel):
     # pystring closer first, re-validated on the whole file before
     # acceptance. Zero new model requests. Fixture: 0052's trial15
     # sessions (12 draws, zero arm events, Phase 2 never reached).
-    enable_terminal_path_arms: bool = False
+    enable_terminal_path_arms: bool = True
     # S28-203: the sides-check alignment on the model's validator doubt
     # (pilot-gated, default OFF) — the doubt is tested against the
     # pristine sides before an escalation shelves the candidate.
@@ -1073,20 +1082,20 @@ class FutureConfig(BaseModel):
     # guard's premise inverts: taking the replayed side loses only
     # content the tree cannot compile. Tries the replayed side-pick
     # first, bypassing the churn guard. Zero new model requests.
-    enable_tree_absent_deletion: bool = False
+    enable_tree_absent_deletion: bool = True
     # S28-311 (trial37 cost census; pilot-gated, default OFF): after 2
     # byte-identical syntax-class failures on the same unit, decline
     # further model draws for that unit — the deterministic arms own the
     # class (scikit-0052 spent 12 draws/session on one unterminated
     # string with zero verdict change).
-    enable_syntax_draw_throttle: bool = False
+    enable_syntax_draw_throttle: bool = True
     # S28-309/310 (pilot-gated, default OFF): the self-refuting-gate
     # fallback — when a rust tree's file gate fails the merge but
     # rust-analyzer passes the same text, the session gate has refuted
     # itself (polars-0015: cargo check failed all four texts,
     # rust-analyzer passed all four). Stamp, journal the delta, skip the
     # repair budget. Zero model requests.
-    enable_ra_gate_fallback: bool = False
+    enable_ra_gate_fallback: bool = True
     # S28-280 (pilot-gated, default OFF): the judge-unavailable stamp —
     # when a file gate's failure names an UNDEFINED ALL-CAPS macro
     # invocation (generated arginfo headers' class: the macro is not
@@ -1094,7 +1103,7 @@ class FutureConfig(BaseModel):
     # this file (the oracle itself fails it — S28-293's population).
     # Skip the repair budget AND the deterministic rungs for the file;
     # the harness doors classify the row.
-    enable_judge_unavailable_stamp: bool = False
+    enable_judge_unavailable_stamp: bool = True
 
     # Defer-to-ladder (S28-337/339, pilot-gated): the SECOND header-cap
     # hit (recovery already spent) carries a defer marker on the

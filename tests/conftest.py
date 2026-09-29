@@ -63,6 +63,28 @@ def _isolate_model_profile(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
 
 
 @pytest.fixture(autouse=True)
+def _reset_feedback_carriers():
+    """S28-367 graduation isolation: the three feedback carriers
+    (side-consistent, seam, anti-reroll) are module-level latches set by
+    orchestrator construction — since their graduation to default-ON, any
+    test constructing an orchestrator latches them True for the whole
+    process, and prompt tests silently inherit carrier lines (the
+    dispatch-idempotency test's mirror call registered a resubmission and
+    the anti-reroll line poisoned the model path's prompt). Reset the
+    latches around EVERY test; a test wanting a carrier sets it
+    explicitly via the setter."""
+    import capybase.resolution_engine as _re
+
+    _re.set_side_consistent_feedback(False)
+    _re.set_seam_aware_feedback(False)
+    _re.set_anti_reroll_feedback(False)
+    yield
+    _re.set_side_consistent_feedback(False)
+    _re.set_seam_aware_feedback(False)
+    _re.set_anti_reroll_feedback(False)
+
+
+@pytest.fixture(autouse=True)
 def _no_leaked_mock_patches():
     """Fail any test that leaves a unittest.mock patch active (S28-121).
 

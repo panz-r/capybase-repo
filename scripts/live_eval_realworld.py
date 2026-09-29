@@ -409,15 +409,18 @@ _C_BUILD_TIMED_OUT: set[str] = set()
 # build's output head lands here per case and rides the row.
 _LAST_C_BUILD_DIAG: dict[str, str] = {}
 
-# S28-239.2/240.1 (queue item 2): KEEP-THE-BEST promotion (pilot-gated,
-# default OFF; CAPYBASE_KEEP_BEST=1). At the scoring tail, a kept row
+# S28-239.2/240.1 (queue item 2) + S28-367 graduation: KEEP-THE-BEST
+# promotion. At the scoring tail, a kept row
 # whose best repeat beats it (by verdict rank, or sim within the rank)
 # copies that repeat's outcome fields over its own — the repeats are
 # already paid, so the promotion is zero-request, and the harvest's
 # per-case rows stop understating the system (trial15: 4/15 rows kept a
 # worse verdict than an existing repeat). The demoted record rides the
 # row's repeat_flips field.
-_KEEP_BEST_REPEATS = os.environ.get("CAPYBASE_KEEP_BEST", "") == "1"
+# S28-239.2/240.1 + S28-367: KEEP-THE-BEST promotion — GRADUATED
+# (default ON; CAPYBASE_KEEP_BEST=0 opts out). The live promotions:
+# 0127/nlohmann (t40), duckdb-0001 (t46).
+_KEEP_BEST_REPEATS = os.environ.get("CAPYBASE_KEEP_BEST", "1") != "0"
 
 # S28-244 (queue item 10): the UNVERIFIED relabel (pilot-gated, default
 # OFF; CAPYBASE_UNVERIFIED_RELABEL=1) — escalated + oracle-undecidable
@@ -433,7 +436,9 @@ _SHIP_GATE_READ = os.environ.get("CAPYBASE_SHIP_GATE_PROBE", "") == "1"
 # S28-243.2 (queue item 6): the era-header pre-screen (pilot-gated,
 # default OFF; CAPYBASE_ERA_PRESCREEN=1) — setup-time GU for cases whose
 # oracle references tree-absent APIs (the duckdb near-oracle class).
-_ERA_PRESCREEN = os.environ.get("CAPYBASE_ERA_PRESCREEN", "") == "1"
+# S28-367 graduated (default ON; CAPYBASE_ERA_PRESCREEN=0 opts out):
+# the era GU classification + the memo (293s -> 5s on repeats).
+_ERA_PRESCREEN = os.environ.get("CAPYBASE_ERA_PRESCREEN", "1") != "0"
 
 
 @dataclass
@@ -1310,20 +1315,12 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # S28-180 pilot gate: the side-consistent repair feedback is default
     # OFF; the screening rerun opts in via env (feedback-only — the
     # request-count pin must hold with it on).
-    if os.environ.get("CAPYBASE_SIDE_FEEDBACK", "") == "1":
-        cfg.future.enable_side_consistent_feedback = True
     # S28-189/S28-204 pilot gate: the seam-aware repair feedback is
     # default OFF; the screening rerun opts in via env.
-    if os.environ.get("CAPYBASE_SEAM_FEEDBACK", "") == "1":
-        cfg.future.enable_seam_aware_feedback = True
     # S28-247.2 pilot gate: the anti-reroll line is default OFF; the
     # next armed rerun opts in via env.
-    if os.environ.get("CAPYBASE_ANTI_REROLL", "") == "1":
-        cfg.future.enable_anti_reroll_feedback = True
     # S28-239.1 pilot gate: build-what-you-ship (the pre-escalation
     # final gate probe) is default OFF; the next armed rerun opts in.
-    if os.environ.get("CAPYBASE_SHIP_GATE_PROBE", "") == "1":
-        cfg.future.enable_ship_gate_final_probe = True
     # S28-203 pilot gate: the sides-check alignment on the validator
     # doubt is default OFF; the screening rerun opts in via env.
     if os.environ.get("CAPYBASE_SIDES_ALIGNMENT", "") == "1":
@@ -1333,21 +1330,11 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
         cfg.future.enable_beam_sides_substrate = True
     # S28-233/243 pilot gate (queue item 4): the terminal-path arms are
     # default OFF; the next armed rerun opts in via env.
-    if os.environ.get("CAPYBASE_TERMINAL_ARMS", "") == "1":
-        cfg.future.enable_terminal_path_arms = True
     # S28-268 pilot gate: the tree-absent-member deletion rung is
     # default OFF; the next armed rerun opts in via env.
-    if os.environ.get("CAPYBASE_TREE_ABSENT_DELETION", "") == "1":
-        cfg.future.enable_tree_absent_deletion = True
     # S28-311: the syntax-class draw throttle (pilot-gated).
-    if os.environ.get("CAPYBASE_SYNTAX_DRAW_THROTTLE", "") == "1":
-        cfg.future.enable_syntax_draw_throttle = True
     # S28-309/310: the self-refuting-gate fallback (rust, pilot-gated).
-    if os.environ.get("CAPYBASE_RA_GATE_FALLBACK", "") == "1":
-        cfg.future.enable_ra_gate_fallback = True
     # S28-280: the judge-unavailable stamp (pilot-gated).
-    if os.environ.get("CAPYBASE_JUDGE_STAMP", "") == "1":
-        cfg.future.enable_judge_unavailable_stamp = True
     # S28-337/339: the defer-to-ladder (pilot-gated).
     if os.environ.get("CAPYBASE_DEFER_TO_LADDER", "") == "1":
         cfg.future.enable_defer_to_ladder = True
@@ -1366,9 +1353,6 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # S28-365 D3: the injection/deletion arbitration (pilot-gated).
     if os.environ.get("CAPYBASE_INJECT_ARBITRATION", "") == "1":
         cfg.future.enable_inject_arbitration = True
-    # S28-345: sequenced syntax-first preflight (pilot-gated).
-    if os.environ.get("CAPYBASE_SYNTAX_PREFLIGHT", "") == "1":
-        cfg.validation.enable_syntax_preflight = True
     # S28-183 pilot gate: the repair-edit delimiter guard is default OFF
     # (census-gated decline); the screening rerun opts in via env.
     if os.environ.get("CAPYBASE_REPAIR_GUARD", "") == "1":
