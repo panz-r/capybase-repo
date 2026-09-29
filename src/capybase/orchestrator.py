@@ -527,6 +527,93 @@ _TA_SYMBOL_PATTERNS = (
 )
 
 
+def _python_mismatch_closer_fix(
+        text: str, line_1based: int, expected_closer: str = "]") -> str | None:
+    """S28-365 D2a: the mismatched-closer repair.
+
+    python's diagnostic: closing-parenthesis-does-not-match-opening — the
+    splice closed a square-bracket block with a round closer. The
+    mismatched position is found by a string-aware bracket-stack scan of
+    the line: the first closer that does not match its stack top (or
+    lands on an empty stack — the cross-line case, where the opener is
+    upstream and the diagnostic names it) is substituted with the named
+    opener's closer. Returns the new text, or None (line out of range /
+    no mismatch on the line / no change)."""
+    _openers = {"(": ")", "[": "]", "{": "}"}
+    _closers = {v: k for k, v in _openers.items()}
+    lines = text.split("\n")
+    idx = line_1based - 1
+    if not (0 <= idx < len(lines)):
+        return None
+    line = lines[idx]
+    stack: list[str] = []
+    in_str = ""
+    esc = False
+    mismatch_pos = None
+    for i, ch in enumerate(line):
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if in_str:
+            if ch == in_str:
+                in_str = ""
+            continue
+        if ch in ("'", '"'):
+            in_str = ch
+            continue
+        if ch in _openers:
+            stack.append(_openers[ch])
+        elif ch in _closers:
+            if not stack or stack[-1] != ch:
+                mismatch_pos = i
+                break
+            stack.pop()
+    if mismatch_pos is None:
+        # no in-line mismatch: the cross-line case — the diagnostic names
+        # the opener, so the line's LAST closer is the mismatched one
+        pos = line.rfind(")" if expected_closer == "]" else "")
+        if pos < 0:
+            return None
+        mismatch_pos = pos
+    new_lines = list(lines)
+    new_lines[idx] = (line[:mismatch_pos] + expected_closer
+                      + line[mismatch_pos + 1:])
+    new = "\n".join(new_lines)
+    return new if new != text else None
+
+
+def _python_triple_quote_fix(text: str, detect_line_1based: int) -> str | None:
+    """S28-365 D2b: the unterminated triple-quote repair.
+
+    python's diagnostic: unterminated triple-quoted string literal
+    (detected at line N) — the splice lost the literal's closer. Find
+    the LAST triple-single or triple-double opener strictly before the
+    detection line (rightmost occurrence — the literal still open at N)
+    and splice the matching closer at the END of the line before N.
+    Returns the new text, or None (no opener found / the detection line
+    is the first)."""
+    lines = text.split("\n")
+    det = detect_line_1based - 1
+    if det <= 0 or det > len(lines):
+        return None
+    best = None  # (line_idx, col, quote)
+    for i in range(min(det, len(lines)) - 1, -1, -1):
+        for q in ("'''", '"""'):
+            col = lines[i].find(q)
+            if col != -1 and (best is None or (i, col) > (best[0], best[1])):
+                best = (i, col, q)
+        if best is not None and best[0] != i:
+            break  # found on a strictly-earlier line: the nearest opener
+    if best is None:
+        return None
+    new_lines = list(lines)
+    new_lines[det - 1] = lines[det - 1] + best[2]
+    new = "\n".join(new_lines)
+    return new if new != text else None
+
 def _failures_shape_is_type_only(failures) -> bool:
     """S28-365 D3: True when the FIRST absent-symbol message in the round
     is the TYPE shape ("does not name a type") — the deletion rung's
@@ -16898,6 +16985,163 @@ class Orchestrator:
                             {"rung": "paren_closer",
                              "error": (f"{type(_pc_exc).__name__}: "
                                        f"{_pc_exc}")},
+                            step_index=self.step, path=path)
+                    except Exception:  # noqa: BLE001
+                        pass
+            # S28-365 D2a/D2b: the python literal-family rungs — the
+            # scikit family's REAL shapes (the data pass): the mismatched
+            # closer (")' does not match opening ('[") and the unterminated
+            # triple-quote — NOT the unmatched-closer shape the D2a
+            # predecessor awaited. Message-triggered like the closer;
+            # one splice at the named position; accept only on pass.
+            if (language == "python"
+                    and getattr(
+                        getattr(self.config, "future", None),
+                        "enable_tree_absent_deletion", False)
+                    and f"mismatchclose:{_sig}" not in _tried):
+                _tried.add(f"mismatchclose:{_sig}")
+                try:
+                    import re as _re_mc
+                    _mc_line = None
+                    for _f in failures:
+                        _m = _re_mc.search(
+                            r"closing parenthesis '\)' does not match "
+                            r"opening parenthesis '\[' \(at line (\d+)\)",
+                            getattr(_f, "message", "") or "")
+                        if _m:
+                            _mc_line = int(_m.group(1))
+                            break
+                    if _mc_line is not None:
+                        _mc_buf0 = _resolved_buffer(original, accepted)
+                        _mc_new = _python_mismatch_closer_fix(
+                            _mc_buf0, _mc_line)
+                        if _mc_new is not None:
+                            _mc_val = self.verification.verify_file(
+                                path, language, original,
+                                [(u.marker_span, c.resolved_text)
+                                 for u, c in accepted],
+                                repo_root=str(self.git.repo),
+                                whole_text=_mc_new,
+                                pristine_side_texts=(
+                                    [t for t in (
+                                        self._micro_stage_sides(path)[0]
+                                        or {}).values() if t.strip()]
+                                    or None),
+                            )
+                            if _mc_val.passed:
+                                _mc_unit = units[0].model_copy(update={
+                                    "marker_span": None,
+                                    "unit_kind": "whole_file"})
+                                _mc_cand = CandidateResolution(
+                                    candidate_id=(
+                                        (accepted[fault_idx][1].candidate_id
+                                         if 0 <= fault_idx < len(accepted)
+                                         else unit.unit_id) + ":mismatchclose"),
+                                    unit_id=unit.unit_id,
+                                    model_name="deterministic",
+                                    resolved_text=_mc_new,
+                                    prompt_version="deterministic_mismatch_closer",
+                                    provenance="deterministic_mismatch_closer",
+                                    self_reported_confidence=0.7,
+                                    explanation=(
+                                        "S28-365 D2a: the closer did not "
+                                        f"match its opener at line "
+                                        f"{_mc_line}; substituted the "
+                                        "square closer; the splice "
+                                        "verifies"),
+                                )
+                                self.journal.emit(
+                                    "mismatch_closer_applied",
+                                    {"path": path, "line": _mc_line},
+                                    step_index=self.step, path=path)
+                                return [(_mc_unit, _mc_cand)]
+                            self.journal.emit(
+                                "mismatch_closer_declined",
+                                {"path": path, "line": _mc_line,
+                                 "gate_still_fails": True},
+                                step_index=self.step, path=path)
+                except Exception as _mc_exc:  # noqa: BLE001 — best-effort
+                    try:
+                        self.journal.emit(
+                            "repair_rung_error",
+                            {"rung": "mismatch_closer",
+                             "error": (f"{type(_mc_exc).__name__}: "
+                                       f"{_mc_exc}")},
+                            step_index=self.step, path=path)
+                    except Exception:  # noqa: BLE001
+                        pass
+            if (language == "python"
+                    and getattr(
+                        getattr(self.config, "future", None),
+                        "enable_tree_absent_deletion", False)
+                    and f"tripquote:{_sig}" not in _tried):
+                _tried.add(f"tripquote:{_sig}")
+                try:
+                    import re as _re_tq
+                    _tq_line = None
+                    for _f in failures:
+                        _m = _re_tq.search(
+                            r"unterminated triple-quoted string literal "
+                            r"\(detected at line (\d+)\)",
+                            getattr(_f, "message", "") or "")
+                        if _m:
+                            _tq_line = int(_m.group(1))
+                            break
+                    if _tq_line is not None:
+                        _tq_buf0 = _resolved_buffer(original, accepted)
+                        _tq_new = _python_triple_quote_fix(
+                            _tq_buf0, _tq_line)
+                        if _tq_new is not None:
+                            _tq_val = self.verification.verify_file(
+                                path, language, original,
+                                [(u.marker_span, c.resolved_text)
+                                 for u, c in accepted],
+                                repo_root=str(self.git.repo),
+                                whole_text=_tq_new,
+                                pristine_side_texts=(
+                                    [t for t in (
+                                        self._micro_stage_sides(path)[0]
+                                        or {}).values() if t.strip()]
+                                    or None),
+                            )
+                            if _tq_val.passed:
+                                _tq_unit = units[0].model_copy(update={
+                                    "marker_span": None,
+                                    "unit_kind": "whole_file"})
+                                _tq_cand = CandidateResolution(
+                                    candidate_id=(
+                                        (accepted[fault_idx][1].candidate_id
+                                         if 0 <= fault_idx < len(accepted)
+                                         else unit.unit_id) + ":tripquote"),
+                                    unit_id=unit.unit_id,
+                                    model_name="deterministic",
+                                    resolved_text=_tq_new,
+                                    prompt_version="deterministic_triple_quote",
+                                    provenance="deterministic_triple_quote",
+                                    self_reported_confidence=0.7,
+                                    explanation=(
+                                        "S28-365 D2b: the unterminated "
+                                        "triple-quote closed before the "
+                                        f"detected line {_tq_line}; the "
+                                        "splice verifies"),
+                                )
+                                self.journal.emit(
+                                    "triple_quote_applied",
+                                    {"path": path, "line": _tq_line},
+                                    step_index=self.step, path=path)
+                                return [(_tq_unit, _tq_cand)]
+                            self.journal.emit(
+                                "triple_quote_declined",
+                                {"path": path, "line": _tq_line,
+                                 "gate_still_fails": True},
+                                step_index=self.step, path=path)
+                except Exception as _tq_exc:  # noqa: BLE001 — best-effort
+                    try:
+                        self.journal.emit(
+                            "repair_rung_error",
+                            {"rung": "triple_quote",
+                             "error": (f"{type(_tq_exc).__name__}: "
+                                       f"{_tq_exc}")},
                             step_index=self.step, path=path)
                     except Exception:  # noqa: BLE001
                         pass
