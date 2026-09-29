@@ -380,6 +380,10 @@ def _tcl_config_sh() -> str:
 # probes the extracted tree's build system. _config_for reads from here so the
 # in-loop build gate matches whatever prepare actually ran. Keyed by case.id.
 _DETECTED_BUILD_CMD: dict[str, str] = {}
+# S28-363: per-case prepare diagnostics (cmd, timed_out, rc, stderr_tail) —
+# the classifier's prepare_failed rows carry these forward so timeout vs
+# configure-error vs env-absent stays distinguishable.
+_PREPARE_DIAG: dict[str, dict] = {}
 # Sprint-20 S20.2: toolchain-era preflight cache (case_id -> probe dict,
 # None when no usable gate). Populated on the first run of a case; the
 # majority repeats reuse it (pristine sides and the oracle are identical
@@ -1142,13 +1146,34 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
             # case rather than caching, because cached Makefiles contain
             # absolute paths (TOP=/var/tmp/capy-rw-OLD/r) that break when
             # restored into a different temp dir.
+            # S28-363: the budget is prepare-type aware and the attempt is
+            # DIAGNOSED — previously one flat 180/300s covered the whole
+            # chained command, TimeoutExpired and rc!=0 collapsed into the
+            # same boolean, and the output was dropped: the classifier's
+            # 31 prepare_failed rows were indistinguishable. The raise is
+            # measured on the sweep's failures (clickhouse's cmake
+            # cold-configure exceeds 180s; php's autoreconf+configure
+            # chain on php-src exceeds 300s). Cost only on prepares that
+            # currently die and poison the case's gate to "true".
             try:
-                _prepare_timeout = 300 if "autoreconf" in prepare else 180
+                _prepare_timeout = 600 if "autoreconf" in prepare else 420
                 proc = _run_shell_tree(prepare, cwd=str(repo),
                                        timeout=_prepare_timeout)
                 prepare_ok = proc.returncode == 0
-            except Exception:  # noqa: BLE001 — best-effort
+                _PREPARE_DIAG[case.id] = {
+                    "cmd": prepare[:200], "timed_out": False,
+                    "rc": proc.returncode,
+                    "stderr_tail": ("" if prepare_ok else
+                                    ((proc.stderr or proc.stdout or "")[-300:])),
+                }
+            except Exception as _prep_exc:  # noqa: BLE001 — best-effort
                 prepare_ok = False
+                _PREPARE_DIAG[case.id] = {
+                    "cmd": prepare[:200],
+                    "timed_out": isinstance(_prep_exc, subprocess.TimeoutExpired),
+                    "rc": None,
+                    "stderr_tail": str(_prep_exc)[:300],
+                }
         # If prepare failed (missing autotools macros, no compiler, etc.),
         # don't saddle the build gate with a command that can't work — it
         # would reject every resolution, even perfect ones. Fall back to
@@ -1902,6 +1927,14 @@ def _classify_case(case: "Case") -> dict:
         if (case.language in ("c", "cpp", "c++")
                 and (not _detected or _detected == "true")):
             rec["class"] = "prepare_failed"
+            # S28-363: the prepare attempt's diagnostics (cmd, timed_out,
+            # rc, stderr tail) ride the row — timeout vs configure-error
+            # vs env-absent stays distinguishable downstream.
+            _diag = _PREPARE_DIAG.get(case.id)
+            rec["prepare"] = dict(_diag) if _diag else {}
+            rec["prepare"]["reason"] = (
+                "prepare_ran_and_failed" if _diag
+                else "build_system_undetectable")
             return rec
         _probe = _toolchain_era_probe(repo, case, has_crate=True)
         if _probe is None:
