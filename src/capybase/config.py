@@ -1124,6 +1124,16 @@ class FutureConfig(BaseModel):
     # only on pass. Zero model requests.
     enable_hunk_substitution: bool = False
 
+    # Session gate-pass cache (S28-358, pilot-gated): stash buffers that
+    # PASSED the file gate this session; when a later candidate fails
+    # the gate, re-validate the stash (the same gate, seconds) and
+    # prefer it. The t44 duckdb-0001 anatomy: byte-identical candidates
+    # passed in one repeat and failed in the other; the failure cascade
+    # ended with the side-takeover rescue replacing the near-oracle
+    # content. The stash is a GATE fact only — never a preservation
+    # heuristic (S28-341). Zero model requests.
+    enable_gate_pass_cache: bool = False
+
     # Declaration restoration (S28-197, pilot-gated — the corrected
     # S28-178): when a whole-file failure names an UNDECLARED symbol,
     # insert the pristine side's DECLARING LINE before the symbol's

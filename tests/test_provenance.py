@@ -58,6 +58,7 @@ def test_provenance_values_match_spec():
         "deterministic_indented_block",
         "deterministic_paren_closer",
         "deterministic_hunk_substitution",
+        "deterministic_gate_pass_cache",
         "deterministic_dup_eradication",
         "deterministic_side_consistency_repair",
         "deterministic_side_consensus_repair",

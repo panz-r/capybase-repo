@@ -1332,6 +1332,9 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # S28-275(b): the hunk-level substitution rung (pilot-gated).
     if os.environ.get("CAPYBASE_HUNK_SUBSTITUTION", "") == "1":
         cfg.future.enable_hunk_substitution = True
+    # S28-358: the session gate-pass cache (pilot-gated).
+    if os.environ.get("CAPYBASE_GATE_PASS_CACHE", "") == "1":
+        cfg.future.enable_gate_pass_cache = True
     # S28-345: sequenced syntax-first preflight (pilot-gated).
     if os.environ.get("CAPYBASE_SYNTAX_PREFLIGHT", "") == "1":
         cfg.validation.enable_syntax_preflight = True

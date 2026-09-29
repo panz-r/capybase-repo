@@ -10769,6 +10769,71 @@ class Orchestrator:
         # chains); never escalates.
         return StepResult(step_index=self.step, escalated=False, continued=True)
 
+    def _gate_pass_cache_lookup(
+        self, path: str, language, original: str, units: list, buffer: str,
+        pristine_side_texts: list | None = None,
+    ):
+        """S28-358: re-validate the session's gate-passing buffers for
+        ``path``, newest first; return ``(accepted, buffer, validation)``
+        for the first that passes the gate AGAIN, or None.
+
+        The t44 duckdb-0001 anatomy: the same bytes passed verify_file in
+        one repeat and failed in the other; the failure cascade ended at
+        the side-takeover rescue replacing the near-oracle candidate. The
+        stash is a GATE fact (it passed this session's gate) — the rescue
+        re-validates through the same gate, never a preservation proxy
+        (S28-341). Skips the entry identical to the just-failed buffer."""
+        entries = list(reversed(
+            getattr(self, "_gate_pass_cache", {}).get(path, [])))
+        if not entries:
+            return None
+        try:
+            _cur_sha = hashlib.sha1(
+                (buffer or "").encode("utf-8")).hexdigest()[:16]
+        except Exception:  # noqa: BLE001
+            _cur_sha = None
+        for _sha, _buf in entries:
+            if _sha == _cur_sha:
+                continue  # the just-failed content; re-validating is noise
+            # whole_text bypasses the splice: the stash IS a full buffer
+            try:
+                _val = self.verification.verify_file(
+                    path, language, original,
+                    [(u.marker_span, "") for u in units],
+                    repo_root=str(self.git.repo),
+                    whole_text=_buf,
+                    pristine_side_texts=pristine_side_texts,
+                )
+            except Exception:  # noqa: BLE001 — gate errors decline
+                continue
+            if not _val.passed:
+                continue
+            _unit = units[0].model_copy(update={
+                "marker_span": None, "unit_kind": "whole_file"})
+            _cand = CandidateResolution(
+                candidate_id=f"{units[0].unit_id}:gatepasscache-{_sha}",
+                unit_id=units[0].unit_id,
+                model_name="deterministic",
+                resolved_text=_buf,
+                prompt_version="deterministic_gate_pass_cache",
+                provenance="deterministic_gate_pass_cache",
+                self_reported_confidence=0.7,
+                explanation=(
+                    "S28-358: this exact buffer passed the file gate "
+                    "earlier this session; the later candidate failed, "
+                    "so the stash head was re-validated and restored"),
+            )
+            self.journal.emit(
+                "gate_pass_cache_rescued",
+                {"path": path, "sha": _sha},
+                step_index=self.step, path=path)
+            return ([(_unit, _cand)], _buf, _val)
+        self.journal.emit(
+            "gate_pass_cache_declined",
+            {"path": path, "entries": len(entries)},
+            step_index=self.step, path=path)
+        return None
+
     def _defer_escalated_units_to_ladder(
         self, path: str, accepted: list, escalated_units: list,
         *, wall_deadline: float | None = None,
@@ -12208,6 +12273,30 @@ class Orchestrator:
                         if not hasattr(self, "_resolved_validated_paths"):
                             self._resolved_validated_paths: set[str] = set()
                         self._resolved_validated_paths.add(path)
+                        # S28-358 (flag-gated): stash the gate-passing
+                        # buffer. The t44 duckdb-0001 anatomy: the SAME
+                        # bytes passed the gate in one repeat and failed in
+                        # the other; the failure cascaded into the repair
+                        # ladder and finally the side-takeover rescue
+                        # REPLACED the near-oracle content with a worse
+                        # answer — nothing remembered the buffer had passed
+                        # verify_file once this session. The stash is a
+                        # GATE fact only (never a preservation heuristic,
+                        # S28-341); 3 entries per path, newest last.
+                        if getattr(getattr(self.config, "future", None),
+                                   "enable_gate_pass_cache", False):
+                            try:
+                                _gpc_sha = hashlib.sha1(
+                                    buffer.encode("utf-8")).hexdigest()[:16]
+                                _gpc = getattr(self, "_gate_pass_cache", None)
+                                if _gpc is None:
+                                    _gpc = self._gate_pass_cache = {}
+                                _lst = _gpc.setdefault(path, [])
+                                if _gpc_sha not in {s for s, _ in _lst}:
+                                    _lst.append((_gpc_sha, buffer))
+                                    del _lst[:-3]
+                            except Exception:  # noqa: BLE001 — stash is best-effort
+                                pass
                     # Causal attribution: record whether the previous repair
                     # mechanism changed the failure shape. NOT_ENGAGED = first
                     # iteration (no prior mechanism); CLEARED = the prior repair
@@ -12568,6 +12657,27 @@ class Orchestrator:
                                 break
                         else:
                             break
+                    # S28-358: the session gate-pass cache rescue — before
+                    # any repair spend, re-validate the session's stash of
+                    # gate-passing buffers (flag-gated; the gate is the
+                    # authority; the t44 duckdb-0001 cascade is the
+                    # fixture). A decline leaves the repair path untouched.
+                    if (not file_validation.passed
+                            and getattr(getattr(self.config, "future", None),
+                                        "enable_gate_pass_cache", False)
+                            and getattr(self, "_gate_pass_cache", {})
+                            .get(path)):
+                        _gpc_hit = self._gate_pass_cache_lookup(
+                            path, language, original, units, buffer,
+                            pristine_side_texts=_pristine)
+                        if _gpc_hit is not None:
+                            accepted, buffer, file_validation = _gpc_hit
+                            accepted_by_path[path] = accepted
+                            resolved_files[path] = buffer
+                            # the restored buffer is NEW input: its build
+                            # test must run (the whole-side rung's rule)
+                            self._p2_build_checked = False
+                            continue
                     # Whole-side repair rung (sprint-19 P1): the splice's
                     # COMPILE gate failed — probe the pristine stage sides
                     # before spending repair budget on a reconstruction
