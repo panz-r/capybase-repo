@@ -624,7 +624,12 @@ class FutureConfig(BaseModel):
     # remains the bisection off-switch. The two exceptions still in their
     # differential phase: enable_beam_sides_substrate and
     # enable_sides_check_alignment (their single armed arm decides
-    # promote-or-prune).
+    # promote-or-prune). THE CAP (S28-369): ~3 concurrent pilot flags at
+    # any one time — more means lost focus. A new experimental flag
+    # requires a free slot, and the differential phase is ONE round:
+    # arm, measure, promote (trigger conditions) or delete. The opt-out
+    # switches on graduated mechanisms (CAPYBASE_KEEP_BEST=0 et al) are
+    # bisection off-switches, not pilot flags, and do not count.
     """Resolution-mechanism toggles (the pre-LLM layers).
 
     NOTE: the history-aware features (future probes, obligations, branch
