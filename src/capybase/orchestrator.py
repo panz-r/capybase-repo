@@ -11886,9 +11886,14 @@ class Orchestrator:
                 # gates judge the result (the re-gate is inherent).
                 if getattr(getattr(self.config, "future", None),
                            "enable_era_preference", False):
-                    _era_votes = getattr(self, "_step_era_votes", {}).get(
-                        path, [])
-                    _era_el = _era_election(_era_votes)
+                    try:
+                        _era_votes = getattr(self, "_step_era_votes", {}).get(
+                            path, [])
+                        _era_el = _era_election(_era_votes)
+                    except Exception:  # noqa: BLE001 — S28-372: the era arm
+                        # is telemetry; it must never kill the case loop
+                        # (the harvest's 1,496-case stakes).
+                        _era_votes, _era_el = [], None
                     if _era_el is not None:
                         unit.structural_metadata["era_election"] = {
                             "side": _era_el,
@@ -11923,7 +11928,10 @@ class Orchestrator:
                 # the file's running election.
                 if getattr(getattr(self.config, "future", None),
                            "enable_era_preference", False):
-                    _ev = _era_vote(unit, outcome.accepted)
+                    try:
+                        _ev = _era_vote(unit, outcome.accepted)
+                    except Exception:  # noqa: BLE001 — S28-372: telemetry
+                        _ev = None
                     if _ev:
                         _votes = getattr(self, "_step_era_votes", None)
                         if _votes is None:
@@ -12069,9 +12077,14 @@ class Orchestrator:
                 # rescue's exact flow).
                 if getattr(getattr(self.config, "future", None),
                            "enable_defer_to_ladder", False):
-                    _deferred_acc = self._defer_escalated_units_to_ladder(
-                        path, accepted, escalated_units,
-                        wall_deadline=_file_wall_deadline)
+                    try:
+                        _deferred_acc = self._defer_escalated_units_to_ladder(
+                            path, accepted, escalated_units,
+                            wall_deadline=_file_wall_deadline)
+                    except Exception:  # noqa: BLE001 — S28-372: the defer is
+                        # best-effort; the escalation must stand no matter
+                        # what the rescue plumbing does
+                        _deferred_acc = None
                     if _deferred_acc is not None:
                         accepted = _deferred_acc
                         accepted_by_path[path] = accepted
@@ -12823,9 +12836,14 @@ class Orchestrator:
                                         "enable_gate_pass_cache", False)
                             and getattr(self, "_gate_pass_cache", {})
                             .get(path)):
-                        _gpc_hit = self._gate_pass_cache_lookup(
-                            path, language, original, units, buffer,
-                            pristine_side_texts=_pristine)
+                        try:
+                            _gpc_hit = self._gate_pass_cache_lookup(
+                                path, language, original, units, buffer,
+                                pristine_side_texts=_pristine)
+                        except Exception:  # noqa: BLE001 — S28-372: the
+                            # cache is best-effort; a failure here must
+                            # fall through to the normal repair path
+                            _gpc_hit = None
                         if _gpc_hit is not None:
                             accepted, buffer, file_validation = _gpc_hit
                             accepted_by_path[path] = accepted
