@@ -621,15 +621,16 @@ class FutureConfig(BaseModel):
     # defect shape and declines visibly otherwise — so NO flag outlives
     # the first development and design phase: the default flips True at
     # promotion, the env gate retires, and the [future] toml section
-    # remains the bisection off-switch. The two exceptions still in their
-    # differential phase: enable_beam_sides_substrate and
-    # enable_sides_check_alignment (their single armed arm decides
-    # promote-or-prune). THE CAP (S28-369): ~3 concurrent pilot flags at
+    # remains the bisection off-switch. THE CAP (S28-369): ~3 concurrent pilot flags at
     # any one time — more means lost focus. A new experimental flag
     # requires a free slot, and the differential phase is ONE round:
     # arm, measure, promote (trigger conditions) or delete. The opt-out
     # switches on graduated mechanisms (CAPYBASE_KEEP_BEST=0 et al) are
     # bisection off-switches, not pilot flags, and do not count.
+    # S28-371: the LAST two differential pilots (sides-alignment,
+    # beam-substrate) ran their arm and were DELETED — the pilot-flag
+    # inventory is ZERO. A new mechanism creates its flag at build and
+    # retires it in its one differential round.
     """Resolution-mechanism toggles (the pre-LLM layers).
 
     NOTE: the history-aware features (future probes, obligations, branch
@@ -1077,11 +1078,9 @@ class FutureConfig(BaseModel):
     # S28-203: the sides-check alignment on the model's validator doubt
     # (pilot-gated, default OFF) — the doubt is tested against the
     # pristine sides before an escalation shelves the candidate.
-    enable_sides_check_alignment: bool = False
     # S28-233: synthesize the whole-file beam's substrate from the
     # wholesale-winner floor when every per-unit candidate was rejected
     # (the arms are otherwise structurally unreachable — pilot6's 0052).
-    enable_beam_sides_substrate: bool = False
     # S28-268: the tree-absent-member deletion rung (pilot-gated,
     # default OFF) — when the whole-file repair failures name a member
     # ABSENT from the entire tree (fixed-string git grep), the churn

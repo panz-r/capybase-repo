@@ -1324,13 +1324,6 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # next armed rerun opts in via env.
     # S28-239.1 pilot gate: build-what-you-ship (the pre-escalation
     # final gate probe) is default OFF; the next armed rerun opts in.
-    # S28-203 pilot gate: the sides-check alignment on the validator
-    # doubt is default OFF; the screening rerun opts in via env.
-    if os.environ.get("CAPYBASE_SIDES_ALIGNMENT", "") == "1":
-        cfg.future.enable_sides_check_alignment = True
-    # S28-233 pilot gate: the beam-substrate synthesis is default OFF.
-    if os.environ.get("CAPYBASE_BEAM_SUBSTRATE", "") == "1":
-        cfg.future.enable_beam_sides_substrate = True
     # S28-233/243 pilot gate (queue item 4): the terminal-path arms are
     # default OFF; the next armed rerun opts in via env.
     # S28-268 pilot gate: the tree-absent-member deletion rung is

@@ -268,18 +268,3 @@ def test_source_pin_beam_skip_census():
     i_skip = src.index("whole_file_beam_skipped")
     i_guard = src.index("if accepted:", i_skip)
     assert i_skip < i_guard
-
-
-def test_source_pin_substrate_synthesis_consumes_the_floor():
-    """S28-233's A/B: the synthesis must set accepted from the floor,
-    consume it (_floor = None) so the floor block cannot clobber the
-    beam's improvement, and journal the event."""
-    import capybase.orchestrator as orch_mod
-    from pathlib import Path
-    src = Path(orch_mod.__file__).read_text()
-    assert "beam_substrate_synthesized" in src
-    i = src.index("beam_substrate_synthesized")
-    block = src[max(0, i - 1200):i]
-    assert "enable_beam_sides_substrate" in block
-    assert "_floor = None" in block  # the floor is consumed
-    assert "not accepted" in block   # only on the empty-accepted shape

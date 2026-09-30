@@ -13347,19 +13347,6 @@ class Orchestrator:
                         # best whole answer instead of being unreachable.
                         # The synthesis CONSUMES the floor (the beam's
                         # accepted flows through the normal path below).
-                        if (_floor is not None and not accepted
-                                and getattr(
-                                    getattr(self.config, "future", None),
-                                    "enable_beam_sides_substrate", False)):
-                            accepted = _floor
-                            accepted_by_path[path] = accepted
-                            _floor = None
-                            self.journal.emit(
-                                "beam_substrate_synthesized",
-                                {"path": path,
-                                 "units": len(accepted)},
-                                step_index=self.step, path=path,
-                            )
                     if _floor is not None:
                         accepted = _floor
                         accepted_by_path[path] = accepted
@@ -20245,25 +20232,6 @@ class Orchestrator:
             # distinguish the branches; 'unknown' keeps the escalation
             # exactly as before).
             _decide_suspect = cand.suspected_validator_error
-            if (_decide_suspect
-                    and not getattr(validation, "passed", False)
-                    and getattr(getattr(self.config, "future", None),
-                                "enable_sides_check_alignment", False)):
-                try:
-                    from capybase.verification import sides_check_alignment
-                    _align = sides_check_alignment(unit, validation)
-                except Exception:
-                    _align = "unknown"
-                if _align in ("inapplicable", "applicable"):
-                    self.journal.emit(
-                        f"sides_check_{_align}",
-                        {"unit_id": unit.unit_id,
-                         "failure_validators": [
-                             getattr(f, "validator", "")
-                             for f in (validation.hard_failures or [])]},
-                        step_index=self.step, path=unit.path,
-                        unit_id=unit.unit_id)
-                    _decide_suspect = False
             decision = self.risk.decide(
                 validation,
                 retry_count=retry_count,
