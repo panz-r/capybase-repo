@@ -13340,13 +13340,6 @@ class Orchestrator:
                         # winner is still the best available whole answer.
                         _floor = self._wholesale_winner_floor(
                             path, language, units, buffer=None)
-                        # S28-233's A/B (flag-gated, default OFF): when
-                        # EVERY per-unit candidate was rejected, synthesize
-                        # the beam's substrate from the floor — the arms
-                        # (pystring closer et al) get their chance on the
-                        # best whole answer instead of being unreachable.
-                        # The synthesis CONSUMES the floor (the beam's
-                        # accepted flows through the normal path below).
                     if _floor is not None:
                         accepted = _floor
                         accepted_by_path[path] = accepted
@@ -20221,16 +20214,9 @@ class Orchestrator:
             # S28-203: the SIDES-CHECK ALIGNMENT on the model's validator
             # doubt (pilot-gated, default OFF). The doubt is TESTABLE:
             # run the failing check on the PRISTINE sides. Sides fail it
-            # too -> the check is inapplicable for this region's content
-            # family (the S28-105 doctrine at the engine) — the forced
-            # escalation would shelve near-oracle content on
-            # non-discriminative evidence. Sides pass -> the splice broke
-            # the property and the doubt was wrong — the failure belongs
-            # to the seam family's feedback, not a shelve. Either way the
-            # suspicion flag no longer force-escalates: the candidate
-            # takes the normal evidence-driven ladder (journal events
-            # distinguish the branches; 'unknown' keeps the escalation
-            # exactly as before).
+            # (S28-371: the sides-check ALIGNMENT check that used to sit
+            # here was deleted with its pilot — the suspicion flag takes
+            # the pre-S28-203 path straight into risk.decide.)
             _decide_suspect = cand.suspected_validator_error
             decision = self.risk.decide(
                 validation,
