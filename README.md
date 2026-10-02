@@ -388,7 +388,7 @@ loaded, one excluded for an empty-oracle corpus defect (zenodo-0044),
 17 git-resolvable skips — the **1,484-case real-conflict denominator**
 below.
 
-#### Current results (post-s28)
+#### Current Results (post-s28)
 
 1,500 of 1,502 cases ran across three process interruptions and 21.1
 hours of case wall; zero SETUP_FAILED and zero INFRA_LOST rows. The
@@ -402,17 +402,19 @@ fleet ran entirely at defaults — every mechanism on, no toggles.
 | rust | 262 | 214 | 4 | 36 | 1 | 12 | 81.7% | 95.1% | 96.9% |
 | **total** | **1484** | **1339** | **28** | **36** | **25** | **216** | **90.2%** | **94.1%** | **96.1%** |
 
-All 36 era-dead rows are rust — 23 in tikv, 12 in polars, one in
-sea-orm — each verified by the preflight's
-sides-plus-oracle-fail-identically probe. The 25 GATE_UNAVAILABLE rows
-are the sandbox's share, not the resolver's: duckdb's era-header
-pre-screen rows (the oracle repeats APIs the compiler rejects on the
-sides), php's bare arginfo headers, and the fmt-era and redis-class
-gates the oracle shares — each verified by the post-hoc oracle probe,
-and all excluded from the adjusted denominators like era-dead. cpp's
-lower headline rate is duckdb's interlocked parser weaves under
-GCC-15 template-body diagnostics plus prusaslicer's macro-braced GUI
-files.
+Two verdict classes are environmental rather than resolver failures;
+both leave the adjusted denominators:
+
+- **era-dead** (36 rows, all rust — tikv 23, polars 12, sea-orm 1):
+  both sides and the human oracle fail the current toolchain
+  identically — un-passable by construction.
+- **GATE_UNAVAILABLE** (25 rows): the oracle fails the same whole-file
+  gate the merge faced — duckdb's era-header pre-screen class, php's
+  bare arginfo headers, and the fmt-era and redis-class gates.
+
+cpp's lower headline rate is content, not infrastructure: duckdb's
+interlocked parser weaves under GCC-15 template-body diagnostics plus
+prusaslicer's macro-braced GUI files.
 
 ##### Mechanism breakdown
 
