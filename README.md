@@ -453,8 +453,7 @@ changes: the deterministic repair-rung family (mismatched closer,
 triple-quote, rename, expected-token) is promoted, with language
 guards keeping the C rungs off python; the era pre-screen and the
 draw throttle are always-on; the repair-feedback carriers are
-graduated; and the injection/deletion arbitration is new. The shared
-cargo cache was also repaired before the run.
+graduated; and the injection/deletion arbitration is new.
 
 | lang | cases | PASS | WORKING | era-dead | GATE_UNAVAIL | PASS % | adj % | P+W adj % | Δ P+W |
 |------|-------|------|---------|----------|--------------|--------|-----------|-----------|-------|
