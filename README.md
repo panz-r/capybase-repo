@@ -454,13 +454,13 @@ Counting rules:
 
 #### vs Prior round (s28 vs s27)
 
-Both rounds are the full corpus. The s28 side carries the sprint's
-headline changes: the deterministic repair-rung family (mismatched
-closer, triple-quote, rename, expected-token) promoted with its
-language guards, the era pre-screen and draw throttle always-on, the
-repair-feedback carriers graduated, the injection/deletion
-arbitration, and the shared cargo-cache repair. 1,484 cases ran;
-17 git-resolvable skips; zero SETUP_FAILED and zero INFRA_LOST.
+Both rounds cover the full corpus. The s28 round carries the sprint's
+changes: the deterministic repair-rung family (mismatched closer,
+triple-quote, rename, expected-token) is promoted, with language
+guards keeping the C rungs off python; the era pre-screen and the
+draw throttle are always-on; the repair-feedback carriers are
+graduated; and the injection/deletion arbitration is new. The shared
+cargo cache was also repaired before the run.
 
 | lang | cases | PASS | WORKING | era-dead | GATE_UNAVAIL | PASS % | adj % | P+W adj % | Δ P+W |
 |------|-------|------|---------|----------|--------------|--------|-----------|-----------|-------|
