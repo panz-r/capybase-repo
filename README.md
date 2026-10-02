@@ -385,7 +385,7 @@ complement ran with zero model calls.
 exclusions applied: zenodo-0044's empty oracle, 17 git-resolvable
 replays), leaving the **1,484-case real-conflict denominator** for the
 tables below. The round spans three process interruptions and 21.1
-hours of case wall; zero SETUP_FAILED and zero INFRA_LOST rows. The
+hours of wall time; zero SETUP_FAILED and zero INFRA_LOST rows. The
 fleet ran entirely at defaults — every mechanism on, no toggles.
 
 | lang | cases | PASS | WORKING | era-dead | GATE_UNAVAIL | llm | PASS % | adj % | P+W adj % |
