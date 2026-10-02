@@ -379,18 +379,12 @@ whose accepted resolution's lineage involved the model — candidate
 generation, repair, adjudication ballots, or comment reconciliation. The
 complement ran with zero model calls.
 
-#### Corpus
-
-The corpus of **non-git-resolvable conflicts** (cases where git's own
-three-way merge leaves markers — anything git resolves cleanly is not
-a resolution problem) ran end-to-end in a single launch: 1,501 cases
-loaded, one excluded for an empty-oracle corpus defect (zenodo-0044),
-17 git-resolvable skips — the **1,484-case real-conflict denominator**
-below.
-
 #### Current Results (post-s28)
 
-1,500 of 1,502 cases ran across three process interruptions and 21.1
+1,501 of the corpus's 1,502 cases ran (the [Corpus](#corpus)
+exclusions applied: zenodo-0044's empty oracle, 17 git-resolvable
+replays), leaving the **1,484-case real-conflict denominator** for the
+tables below. The round spans three process interruptions and 21.1
 hours of case wall; zero SETUP_FAILED and zero INFRA_LOST rows. The
 fleet ran entirely at defaults — every mechanism on, no toggles.
 
@@ -531,15 +525,16 @@ After clone and build (`.venv` created per Setup below):
 
 ### Corpus
 
-1,502 non-git-resolvable rebase conflicts mined from upstream
-histories — each case carries both sides, the merge base, and the
-actual human resolution as the oracle: Python (cython 150,
-scikit-learn 56, zenodo 100, flask 10, requests 1; 317), C (php 150,
-sqlite 133, libuv 101, redis 55, json-c 17; 456), C/C++
-(prusaslicer 150, duckdb 150, protobuf 73, clickhouse 50,
-nlohmann-json 38, fmt 6; 467), Rust (tokio 118, tikv 41, axum 38,
-sea-orm 29, polars 27, clap 5, serde 4; 262). 17 cases resolve
-cleanly on replay and are excluded at run time; one empty-oracle
-case is skipped. Earlier per-language censuses (sprints 17–20) and
-their methodology notes live in `docs/eval-results-tracker.md` and
-the sprint results docs.
+The corpus is **non-git-resolvable conflicts** — cases where git's own
+three-way merge leaves markers; anything git resolves cleanly is not a
+resolution problem. 1,502 cases are mined from upstream histories,
+each carrying both sides, the merge base, and the actual human
+resolution as the oracle: Python (cython 150, scikit-learn 56, zenodo
+100, flask 10, requests 1; 317), C (php 150, sqlite 133, libuv 101,
+redis 55, json-c 17; 456), C/C++ (prusaslicer 150, duckdb 150,
+protobuf 73, clickhouse 50, nlohmann-json 38, fmt 6; 467), Rust (tokio
+118, tikv 41, axum 38, sea-orm 29, polars 27, clap 5, serde 4; 262).
+17 cases resolve cleanly on replay and are excluded at run time; one
+empty-oracle case is skipped. Earlier per-language censuses (sprints
+17–20) and their methodology notes live in
+`docs/eval-results-tracker.md` and the sprint results docs.
